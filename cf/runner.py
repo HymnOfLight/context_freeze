@@ -126,6 +126,8 @@ class Experiment:
                        "system": s["system"]})
             self.log(f"warmup {pkg}: PSS {self.m_fg[pkg]//1024} MB (anon {self.a_fg[pkg]//1024} MB) "
                      f"cold {res.get('total_time_ms')} ms [{res.get('launch_state')}]")
+        dev.home()   # otherwise the first request may already be in the foreground (FRONT)
+        time.sleep(1)
         B_kb = self.cfg["eta"] * sum(self.m_fg.values())
         self.emit({"type": "budget", "eta": self.cfg["eta"], "budget_kb": B_kb,
                    "sum_m_fg_kb": sum(self.m_fg.values()), "m_fg_kb": self.m_fg, "a_fg_kb": self.a_fg})
