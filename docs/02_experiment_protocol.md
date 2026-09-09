@@ -23,14 +23,18 @@ freezer 相同机制)。找不到时回退 `kill -STOP/-CONT`。**冻结不释�
 `frozen` 与 `compressed` 两个集合。
 
 ### 回收 / 换出 (z_i, s_i)
-按探测结果依次尝试:
-1. `memory.reclaim` (cgroup v2 memcg, 内核 ≥ 5.19 / Android 15 模拟器 6.6 内核) — 精确到应用;
-2. `/proc/<pid>/reclaim` 写 `anon` / `all` (Android 通用内核, 部分 5.x);
-3. tmpfs 气球: 在 `/data/local/tmp/cf_balloon` 上挂 tmpfs, 用 `/dev/urandom` 填不可压缩页, 把 MemAvailable 压到
+按探测结果依次尝试 (只作用于该应用自己的进程, 按进程名匹配):
+1. `memory.reclaim` (cgroup v2 memcg 且 memory 控制器已启用) — 精确到应用, 可带 `swappiness=`;
+2. memcg v1 `memory.force_empty` — Android 15 模拟器实测走这一条: 应用都在根 memcg, 工具建
+   `/dev/memcg/cf/uid_<uid>`、置 `move_charge_at_immigrate=3`、迁入进程后 force_empty, 匿名页进 zram、文件页丢弃
+   (真机 per_app_memcg=true 时直接用应用自带的 `apps/uid_X/pid_Y` 组);
+3. `/proc/<pid>/reclaim` 写 `anon` / `all` (部分 Android 通用内核);
+4. tmpfs 气球: 在 `/data/local/tmp/cf_balloon` 上挂 tmpfs, 用 `/dev/urandom` 填不可压缩页, 把 MemAvailable 压到
    `balloon_reserve_mb`, 由内核 LRU 挤出最冷 (已冻结) 应用的页面。全局、不精确, 但任何内核都可用。
 
-`reclaim_mode=anon` 只压匿名页 (文件页留在 DRAM, 模型里作为 `b_keep` 计入压缩后占用);
-`reclaim_mode=all` 同时丢弃文件页 (对应 e^b_i, 之后产生 R^file refault)。
+`reclaim_mode=anon` 只在 `/proc/<pid>/reclaim` 可用时真正生效 (文件页留在 DRAM, 模型里作为 `b_keep` 计入压缩后占用);
+memcg 路径总是同时丢弃文件页 (对应 e^b_i, 之后产生 R^file refault, 由 `refault_file` 报告)。
+每步 JSON 的 `actions.reclaim` 记录每个应用实际使用的机制, 汇总表 `reclaim_methods` 列会列出。
 
 ### 预算与 η 扫描
 预算只计 **后台** 应用: `M_bg(t) = Σ_{i≠r_t} (Pss_i + ρ̂·SwapPss_i)`; `budget_violation` 记录 M_bg > B。

@@ -66,6 +66,15 @@ python3 -m pytest -q tests
 最优的比值; `eta_rank` 是预测器的加权逆序误差; `eta_floor` 是 "全部压缩也放不下" 的可达下界, 提醒 η=10%
 不应预先宣称可达 (文档 §1)。
 
+## 验证状态
+
+* `tests/` (18 项): /proc、`am start -W` 输出解析 (含真实抓取的 HOT / FRONT / TIMEOUT 样本), 策略约束, Bellman DP 与穷举一致,
+  在线策略代价 ≥ OPT, runner 端到端 (假设备)。
+* 在 Linux 主机上用 **Android 15 (API 35) google_apis 系统镜像** 实测通过: `adb root`、cgroup v2 `cgroup.freeze` 冻结/解冻、
+  memcg v1 每应用回收 (Clock: PSS 42 MB → 35 kB, SwapPss → 22 MB, zram/pswpout 同步增长)、解冻后按需换回 (majflt/pswpin)、
+  tmpfs 气球、完整 `run_experiment.py` 循环与 `cf.analyze` 汇总。该主机无可用 KVM, 模拟器以软件模拟运行, 因而绝对时延无意义;
+  Apple Silicon 上的 arm64 镜像用户态布局相同 (同一 Android 15 内核配置), 脚本无需改动。
+
 ## 与文档模型的对应
 
 | 文档符号 | 采集/实现位置 |
@@ -81,7 +90,7 @@ python3 -m pytest -q tests
 | L_t 恢复时延 | `am start -W` 的 `TotalTime` 与 `LaunchState` (HOT/WARM/COLD) |
 | PSI | `/proc/pressure/memory` |
 | E_t 可冻结安全集合 | `never_freeze` 白名单 (前台/正在播放/推送依赖) |
-| 页面回收 (memcg) | `memory.reclaim` (cgroup v2) → `/proc/<pid>/reclaim` → tmpfs 气球 (全局压力) 依次回退 |
+| 页面回收 (memcg) | `memory.reclaim` (cgroup v2) → memcg v1 每应用 `force_empty` (Android 15 模拟器实测路径) → `/proc/<pid>/reclaim` → tmpfs 气球 (全局压力) 依次回退 |
 | T^ML 预算 | 每步 `decision_ms` / `action_ms`, analyze 报告 P50/P99 |
 
 更多细节见 `docs/`。

@@ -52,15 +52,32 @@ scripts/prepare_device.sh --system-freezer disabled --zram-mb 1024 [--swapfile-m
 * `cached_apps_freezer disabled` — 关闭 Android 自带的 cached-app freezer, 否则系统会和我们的控制器争抢
   `cgroup.freeze`。跑 **"Android 默认" 基线** 时改为 `--system-freezer enabled` 并使用 `policy=none` 配置。
   该设置需要重启, 脚本会自动重启并等待。
-* zram — 模拟器默认没有 swap; 脚本在 `/dev/block/zram0` 上建立压缩交换区并以最高优先级 `swapon`。
-  若内核没有 zram (少数镜像), 用 `--swapfile-mb` 在 `/data` 上建交换文件 (相当于 "闪存" 层)。
+* zram — API 35 (Android 15) google_apis 镜像默认已启用 zram (约 RAM 的 75%, lz4, 优先级 -2), 脚本会打印
+  `already active`; 旧镜像没有 swap 时脚本在 `/dev/block/zram0` 上建立压缩交换区并 `swapon`。
+  若内核没有 zram, 用 `--swapfile-mb` 在 `/data` 上建交换文件 (相当于 "闪存" 层)。
   两者同时开启时 zram 优先级更高, 冷页先进 zram、更冷的溢出到文件 —— 对应文档的 DRAM / ZRAM / 闪存三层。
 * 关闭动画、保持亮屏、解锁 — 让 `am start -W` 的 `TotalTime` 更稳定。
 
+### 在 Android 15 (API 35, 内核 6.6) google_apis 镜像上实测到的内核布局
+
+| 项 | 实测 | 对工具的影响 |
+|---|---|---|
+| cgroup v2 `/sys/fs/cgroup` | 挂载但 `cgroup.controllers` 为空, 只有 freezer 语义; 每个应用进程在 `uid_<uid>/pid_<pid>/` | 冻结用 `cgroup.freeze` (已验证 `cgroup.events` 中 `frozen 1/0`) |
+| memcg | v1 在 `/dev/memcg`, `ro.config.per_app_memcg` 未开启, 所有应用都在根 memcg | 没有 v2 `memory.reclaim`; 工具为每个应用建 `/dev/memcg/cf/uid_<uid>`, 置 `memory.move_charge_at_immigrate=3` 后把进程迁入, 再写 `memory.force_empty` 做 **按应用回收** (实测 Clock: PSS 42 MB → 35 kB, SwapPss 0 → 22 MB) |
+| `/proc/<pid>/reclaim` | 不存在 | 无法只回收匿名页; force_empty 同时丢弃文件页 |
+| zram | 默认开启 `/dev/block/zram0` (lz4) | `prepare_device.sh --zram-mb` 只在未开启时创建 |
+| Settings | 与 system_server 共用 uid 1000 | runner 自动加入 `never_freeze`, 且所有操作只按 **进程名** 匹配, 绝不按 uid 整组冻结 |
+
+真机 (per_app_memcg=true) 上应用自带 `/dev/memcg/apps/uid_X/pid_Y`, 工具直接对该组 `force_empty`; 若是 cgroup v2
+memcg 则走 `memory.reclaim`。
+
 ## 5. 应用集合
 
-模拟器 google_apis 镜像自带: Settings, Chrome, Messages, Phone, Contacts, Calendar, Clock, Calculator,
-Camera, Google。这些应用体积偏小, 建议再装几款 F-Droid 开源应用作为 "重" 应用:
+API 35 google_apis 镜像自带 (`scripts/list_launchable.sh` 实测): Settings, Chrome, Messages, Phone, Contacts,
+Calendar, Clock, Gmail, Maps, YouTube, YouTube Music, Photos, Docs, Files, Google, Camera。
+Messages / Calendar / Gmail 等首次打开会弹登录或 "What's New" 引导页, 此时 `am start -W` 返回
+`LaunchState: UNKNOWN (0)` (工具记为 `FRONT`, 不计时延); **实验前请手动把每个应用打开一次并跳过引导**,
+或把这类应用从列表中去掉。若还想加入更 "重" 的应用, 可安装 F-Droid 开源应用:
 
 ```bash
 python3 scripts/install_fdroid_apps.py          # Firefox(fennec), VLC, NewPipe, Organic Maps, Wikipedia, AntennaPod
@@ -77,7 +94,8 @@ k=10 左右即可, Bellman 离线最优 (模拟器轨迹回放到 `cf.sim`) 支�
 |---|---|
 | `adb root` 提示 `cannot run as root in production builds` | 换 `google_apis` / `default` 镜像 |
 | `--probe` 显示 `freezer=sigstop` | 镜像没有把应用放进 cgroup v2 freezer 层级 (Android 10 及以下); 会退回 SIGSTOP, 语义相近但 Binder 调用方可能阻塞 |
-| `reclaim_methods` 只剩 `balloon` | 内核没有 memcg v2 `memory.reclaim` 也没有 `/proc/<pid>/reclaim`; runner 会用 tmpfs 气球制造全局压力, 由内核 LRU 把被冻结 (最冷) 的应用页面挤入 zram |
+| `reclaim_methods` 只剩 `balloon` | 既没有 memcg (v1 `/dev/memcg` 或 v2 `memory.reclaim`) 也没有 `/proc/<pid>/reclaim`; runner 会用 tmpfs 气球制造全局压力, 由内核 LRU 把被冻结 (最冷) 的应用页面挤入 zram |
+| `LaunchState: TIMEOUT` | `am start -W` 内部等待首帧超时 (模拟器极慢时出现, 例如无 KVM 的 x86 软件模拟); 记录 `WaitTime` 作为时延下界。M4 上原生 arm64 镜像不会出现 |
 | 应用 `LaunchState: COLD` 频繁 | lmkd 在杀后台进程; 可提高客体 RAM, 或在配置里设置 `"stop_lmkd": true` (仅实验用, 由内核 OOM killer 兜底) |
 | `am start -W` 无 `TotalTime` | 该 Activity 已在前台 (记为 `FRONT`), trace 生成器默认不允许连续重复请求 |
 | 主机内存告急 | 关闭 IDE/浏览器, 或客体降到 2048 MB; 不要在同一台机器上同时开两个模拟器 |
