@@ -1,0 +1,29 @@
+{
+  "_comment": "基线 '不冻结': 不做任何动作, 仅观测系统 (配合 prepare_device.sh --system-freezer disabled). 若想测 'Android 默认 cached-app freezer' 基线, 用 --system-freezer enabled 重新准备设备后再跑同一配置.",
+  "apps": [
+    "com.android.settings",
+    "com.android.chrome",
+    "com.google.android.apps.messaging",
+    "com.google.android.dialer",
+    "com.google.android.contacts",
+    "com.google.android.calendar",
+    "com.google.android.deskclock",
+    "com.google.android.calculator",
+    "com.android.camera2",
+    "com.google.android.googlequicksearchbox",
+    "org.mozilla.fennec_fdroid",
+    "org.videolan.vlc",
+    "org.schabi.newpipe",
+    "app.organicmaps",
+    "org.wikipedia",
+    "de.danoeh.antennapod"
+  ],
+  "policy": "none",
+  "eta": 1.0,
+  "trace": {"kind": "zipf", "T": 40, "seed": 1, "s": 1.0, "stickiness": 0.3},
+  "dwell_s": 4.0,
+  "settle_s": 1.5,
+  "freeze_resident": false,
+  "zram_mb": 1024,
+  "out_dir": "results"
+}
