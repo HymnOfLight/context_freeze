@@ -80,6 +80,43 @@ def make_apps(cfg: SimConfig) -> list[SimApp]:
     return apps
 
 
+def apps_from_log(path: str, cfg: SimConfig) -> list[SimApp]:
+    """Build SimApps from a runner JSONL: m_fg / a_fg from the budget record, rho from the
+    measured zram ratio, resume latencies from observed HOT vs compressed launches."""
+    import json
+    import statistics
+    budget_rec, steps = None, []
+    with open(path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            if r.get("type") == "budget":
+                budget_rec = r
+            elif r.get("type") == "step":
+                steps.append(r)
+    if not budget_rec:
+        raise ValueError(f"{path}: no budget record (run did not finish warmup)")
+    rhos = [s["rho_est"] for s in steps if s.get("rho_est")]
+    rho = statistics.median(rhos) if rhos else cfg.rho_range[0]
+    apps = []
+    for name, m_kb in budget_rec["m_fg_kb"].items():
+        a = budget_rec["a_fg_kb"].get(name, m_kb * 0.6) * 1024
+        m = m_kb * 1024
+        hot = [s["launch"]["total_time_ms"] for s in steps
+               if s["req"] == name and not s.get("was_compressed") and s["launch"].get("total_time_ms")
+               and s["launch"].get("launch_state") in ("HOT", "WARM", None)]
+        comp = [s["launch"]["total_time_ms"] for s in steps
+                if s["req"] == name and s.get("was_compressed") and s["launch"].get("total_time_ms")]
+        cold = [s["launch"]["total_time_ms"] for s in steps
+                if s["req"] == name and s["launch"].get("launch_state") == "COLD"]
+        l_hot = statistics.median(hot) if hot else cfg.l_hot_ms[0]
+        l_comp = statistics.median(comp) if comp else l_hot + cfg.comp_fixed_ms + (a / MB) / cfg.decompress_mb_per_ms
+        l_cold = statistics.median(cold) if cold else l_comp * 2.5
+        apps.append(SimApp(name, m, a, rho, l_hot, max(l_comp, l_hot), l_cold))
+    return apps
+
+
 def budget(cfg: SimConfig, apps: Sequence[SimApp]) -> float:
     """B = eta * sum_i m_fg_i  (m_fg_i approximated by the working set m_i)."""
     if cfg.budget_override_bytes is not None:

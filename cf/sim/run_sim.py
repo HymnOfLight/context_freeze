@@ -15,11 +15,12 @@ import time
 from ..policies import make_policy, POLICIES
 from ..trace import make_trace
 from .bellman import solve_opt
-from .model import Lambdas, SimConfig, budget, evaluate_policy, make_apps
+from .model import Lambdas, SimConfig, apps_from_log, budget, evaluate_policy, make_apps
 
 
-def run_one(cfg: SimConfig, trace: list[str], policies: list[str], with_opt: bool = True) -> list[dict]:
-    apps = make_apps(cfg)
+def run_one(cfg: SimConfig, trace: list[str], policies: list[str], with_opt: bool = True,
+            apps: list | None = None) -> list[dict]:
+    apps = apps if apps is not None else make_apps(cfg)
     names = [a.name for a in apps]
     B = budget(cfg, apps)
     rows = []
@@ -88,11 +89,16 @@ def main(argv=None) -> int:
     all_rows: list[dict] = []
     for eta in args.eta:
         cfg = SimConfig(k=args.k, eta=eta, lam=lam, seed=args.seed)
-        names = [a.name for a in make_apps(cfg)]
+        apps = None
+        if args.trace == "replay" and args.trace_path and args.trace_path.endswith(".jsonl"):
+            # replay a real run: app sizes / latencies come from the device log itself
+            apps = apps_from_log(args.trace_path, cfg)
+            cfg.k = len(apps)
+        names = [a.name for a in (apps or make_apps(cfg))]
         tcfg = {"kind": args.trace, "T": args.T, "s": args.zipf_s, "stickiness": args.stickiness,
                 "seed": args.seed, "drift_at": args.drift_at, "path": args.trace_path}
         trace = make_trace(names, tcfg)
-        rows = run_one(cfg, trace, args.policies, with_opt=not args.no_opt)
+        rows = run_one(cfg, trace, args.policies, with_opt=not args.no_opt and cfg.k <= 14, apps=apps)
         all_rows.extend(rows)
     print_table(all_rows)
     if args.out:

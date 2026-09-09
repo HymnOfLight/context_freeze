@@ -1,0 +1,3 @@
+numpy>=1.24        # 离线 Bellman DP (cf/sim/bellman.py)
+pytest>=7          # 单元测试
+matplotlib>=3.7    # 可选: Pareto 前沿绘图 (cf.analyze --plot)
