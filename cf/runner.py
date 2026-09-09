@@ -91,8 +91,13 @@ class Experiment:
         # validate app list
         self.apps = []
         for pkg in self.cfg["apps"]:
-            if dev.launcher_activity(pkg) and dev.uid_of(pkg) is not None:
+            uid = dev.uid_of(pkg)
+            if dev.launcher_activity(pkg) and uid is not None:
                 self.apps.append(pkg)
+                if not Device.is_isolated_uid(uid) and pkg not in self.cfg["never_freeze"]:
+                    # e.g. Settings shares uid 1000 with system_server: observe only
+                    self.log(f"WARN: {pkg} runs under shared system uid {uid}; added to never_freeze")
+                    self.cfg["never_freeze"] = list(self.cfg["never_freeze"]) + [pkg]
             else:
                 self.log(f"WARN: {pkg} not installed / no launcher activity - dropped")
         if len(self.apps) < 2:
@@ -137,8 +142,11 @@ class Experiment:
                 a = (app.total("pss_anon_kb") + app.total("swap_pss_kb")) * 1024
             else:
                 m, a = self.m_fg[pkg] * 1024, self.a_fg[pkg] * 1024
-            # with reclaim_mode=anon the file/code pages stay in DRAM after compression
-            b_keep = max(0.0, m - a) if self.cfg["reclaim_mode"] == "anon" else 0.0
+            # only /proc/<pid>/reclaim can restrict itself to anonymous pages; memcg reclaim
+            # (v1 force_empty / v2 memory.reclaim) drops file pages too -> nothing stays behind
+            anon_only = self.cfg["reclaim_mode"] == "anon" and \
+                (self.dev.caps.reclaim_methods or ["balloon"])[0] == "proc_reclaim"
+            b_keep = max(0.0, m - a) if anon_only else 0.0
             hist = self.resume_hist.get(pkg, [])
             comp = [ms for c, ms in hist if c and ms]
             hot = [ms for c, ms in hist if not c and ms]

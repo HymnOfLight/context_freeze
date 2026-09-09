@@ -82,6 +82,8 @@ class Device:
         self._uid_cache: dict[str, int] = {}
         self._activity_cache: dict[str, str] = {}
         self._balloon_blocks = 0
+        self.last_reclaim_bytes: Optional[int] = None
+        self.sample_timeout = 180.0
 
     # ------------------------------------------------------------------ probing
     def probe(self) -> Caps:
@@ -141,13 +143,17 @@ class Device:
     def launcher_activity(self, pkg: str) -> Optional[str]:
         if pkg in self._activity_cache:
             return self._activity_cache[pkg]
-        out = self.adb.shell(
-            f"cmd package resolve-activity --brief -a android.intent.action.MAIN "
-            f"-c android.intent.category.LAUNCHER {shlex.quote(pkg)}")
-        comp = P.parse_resolve_activity(out)
-        if comp and comp.startswith(pkg):
-            self._activity_cache[pkg] = comp
-            return comp
+        for attempt in range(3):   # package manager can be briefly unresponsive under load
+            out = self.adb.shell(
+                f"cmd package resolve-activity --brief -a android.intent.action.MAIN "
+                f"-c android.intent.category.LAUNCHER {shlex.quote(pkg)}")
+            comp = P.parse_resolve_activity(out)
+            if comp and comp.startswith(pkg):
+                self._activity_cache[pkg] = comp
+                return comp
+            if "No activity found" in out or "does not exist" in out:
+                return None
+            time.sleep(1 + attempt)
         return None
 
     def pids_of_uid(self, uid: int) -> list[tuple[int, str]]:
@@ -159,6 +165,18 @@ class Device:
             if len(parts) == 2 and parts[0].isdigit():
                 res.append((int(parts[0]), parts[1].strip()))
         return res
+
+    def pids_of_pkg(self, pkg: str) -> list[int]:
+        """Processes of the app only (name == pkg or pkg:child). Apps that share a system uid
+        (e.g. Settings = uid 1000 together with system_server) must never be handled per uid."""
+        uid = self.uid_of(pkg)
+        if uid is None:
+            return []
+        return [pid for pid, name in self.pids_of_uid(uid) if name == pkg or name.startswith(pkg + ":")]
+
+    @staticmethod
+    def is_isolated_uid(uid: Optional[int]) -> bool:
+        return uid is not None and uid >= 10000
 
     # ---------------------------------------------------------------- sampling
     def sample(self, pkgs: list[str]) -> dict:
@@ -172,18 +190,19 @@ class Device:
             "echo '##SWAPS'; cat /proc/swaps",
             "echo '##PS'; ps -A -o PID,UID,NAME",
         ]
-        uid_list = " ".join(str(u) for u in uids.values() if u is not None)
-        # per-process files for every pid whose uid is one of ours
+        # per-process files for the apps' own processes only (matching by *name*, not uid:
+        # smaps_rollup walks page tables and shared uids such as 1000 have dozens of processes)
+        pattern = "|".join(f"{p}|{p}:*" for p in pkgs)
         script.append(
             "ps -A -o PID,UID,NAME | while read pid uid name; do "
-            f"case \" {uid_list} \" in *\" $uid \"*) "
+            f"case \"$name\" in {pattern}) "
             "echo \"##PID $pid $uid\"; cat /proc/$pid/smaps_rollup 2>/dev/null; "
             "echo '##STAT'; cat /proc/$pid/stat 2>/dev/null; "
             "echo '##OOM'; cat /proc/$pid/oom_score_adj 2>/dev/null; "
             "echo '##FRZ'; cg=$(grep -m1 '^0::' /proc/$pid/cgroup 2>/dev/null | cut -d: -f3); "
             "[ -n \"$cg\" ] && cat /sys/fs/cgroup$cg/cgroup.freeze 2>/dev/null;;"
             " esac; done")
-        out = self.adb.shell("; ".join(script), timeout=60)
+        out = self.adb.shell("; ".join(script), timeout=self.sample_timeout)
         return self._parse_sample(out, pkgs, uids)
 
     def _parse_sample(self, out: str, pkgs: list[str], uids: dict[str, Optional[int]]) -> dict:
@@ -240,14 +259,16 @@ class Device:
         return {"ts": time.time(), "system": sys_, "apps": apps}
 
     # ------------------------------------------------------------------ actions
-    def launch(self, pkg: str, timeout: float = 60) -> dict:
+    def launch(self, pkg: str, timeout: float = 180) -> dict:
         comp = self.launcher_activity(pkg)
         if not comp:
             return {"status": "no-activity", "launch_state": None, "total_time_ms": None}
         t0 = time.time()
-        out = self.adb.shell(
-            f"am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
-            f"-n {shlex.quote(comp)}", timeout=timeout)
+        cmd = (f"am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
+               f"-n {shlex.quote(comp)}")
+        out = self.adb.shell(cmd, timeout=timeout)
+        if not out.strip():
+            out = self.adb.shell(cmd, timeout=timeout)
         res = P.parse_am_start(out)
         res["host_elapsed_ms"] = int((time.time() - t0) * 1000)
         res["component"] = comp
@@ -259,23 +280,27 @@ class Device:
     def home(self) -> None:
         self.adb.shell("input keyevent KEYCODE_HOME")
 
-    def _freezer_paths(self, uid: int) -> list[str]:
+    def _freezer_paths(self, uid: int, pids: list[int]) -> list[str]:
+        """Per-process freezer groups only; the uid-level group is never touched because a
+        shared uid (Settings/system_server = 1000) would take the whole system down."""
         root = self.caps.cgroup_v2_root or "/sys/fs/cgroup"
-        out = self.adb.shell(f"ls -d {root}/uid_{uid}/pid_* {root}/uid_{uid} 2>/dev/null")
+        if not pids:
+            return []
+        out = self.adb.shell("ls -d " + " ".join(f"{root}/uid_{uid}/pid_{p}" for p in pids) + " 2>/dev/null")
         return [l.strip() for l in out.splitlines() if l.strip().startswith("/")]
 
     def set_frozen(self, pkg: str, frozen: bool) -> str:
         uid = self.uid_of(pkg)
         if uid is None:
             return "no-uid"
+        pids = self.pids_of_pkg(pkg)
         val = "1" if frozen else "0"
         if self.caps.freezer == "cgroup.freeze":
-            paths = self._freezer_paths(uid)
+            paths = self._freezer_paths(uid, pids)
             if paths:
                 cmds = " ; ".join(f"echo {val} > {p}/cgroup.freeze" for p in paths)
                 self.adb.shell(cmds + " 2>/dev/null")
                 return "cgroup.freeze"
-        pids = [pid for pid, _ in self.pids_of_uid(uid)]
         if pids:
             sig = "STOP" if frozen else "CONT"
             self.adb.shell(f"kill -{sig} {' '.join(map(str, pids))} 2>/dev/null")
@@ -287,14 +312,12 @@ class Device:
         uid = self.uid_of(pkg)
         if uid is None:
             return "no-uid"
-        pids = [pid for pid, _ in self.pids_of_uid(uid)]
+        pids = self.pids_of_pkg(pkg)
         if not pids:
             return "no-process"
         for method in self.caps.reclaim_methods:
             if method == "memcg_v2.memory.reclaim":
-                root = self.caps.cgroup_v2_root
-                paths = [p for p in self._freezer_paths(uid) if p.count("/") >= 4]  # pid-level dirs
-                paths = paths or [f"{root}/uid_{uid}"]
+                paths = self._freezer_paths(uid, pids)   # pid-level groups only
                 amount = str(bytes_hint) if bytes_hint else "4G"
                 ok = any("__OK__" in self.adb.shell(
                     f"echo {amount} > {p}/memory.reclaim 2>/dev/null && echo __OK__", timeout=120)
@@ -302,12 +325,27 @@ class Device:
                 if ok:
                     return method
             elif method == "memcg_v1.force_empty":
-                cg = self.adb.shell(f"grep -m1 memory /proc/{pids[0]}/cgroup").strip()
+                root = self.caps.memcg_v1_root
+                cg = self.adb.shell(f"grep -m1 ':memory:' /proc/{pids[0]}/cgroup").strip()
                 path = cg.split(":")[-1] if cg else ""
-                if path and path not in ("/", ""):
-                    full = f"{self.caps.memcg_v1_root}{path}/memory.force_empty"
-                    if "__OK__" in self.adb.shell(f"echo 0 > {full} 2>/dev/null && echo __OK__", timeout=120):
-                        return method
+                if path and path != "/":
+                    grp = f"{root}{path}"          # per-app memcg already exists (per_app_memcg=true)
+                else:
+                    # apps live in the root memcg (emulator default): create our own group, pull the
+                    # existing charges over (move_charge_at_immigrate=3) and reclaim just that group
+                    grp = f"{root}/cf/uid_{uid}"
+                    moves = "; ".join(f"echo {pid} > {grp}/cgroup.procs 2>/dev/null" for pid in pids)
+                    self.adb.shell(f"mkdir -p {grp}; echo 3 > {grp}/memory.move_charge_at_immigrate 2>/dev/null; {moves}")
+                out = self.adb.shell(
+                    f"b=$(cat {grp}/memory.usage_in_bytes); echo 0 > {grp}/memory.force_empty 2>/dev/null && "
+                    f"echo __OK__ $b $(cat {grp}/memory.usage_in_bytes)", timeout=180)
+                if "__OK__" in out:
+                    parts = out.split()
+                    try:
+                        self.last_reclaim_bytes = int(parts[1]) - int(parts[2])
+                    except (IndexError, ValueError):
+                        self.last_reclaim_bytes = None
+                    return method
             elif method == "proc_reclaim":
                 ok = False
                 for pid in pids:

@@ -116,6 +116,8 @@ def summarize(run: dict) -> dict:
         "lat_compressed_p95_ms": pct(lat_comp, 0.95),
         "n_hot": len(by_state.get("HOT", [])), "n_warm": len(by_state.get("WARM", [])),
         "n_cold": len(by_state.get("COLD", [])),
+        "n_timeout": len(by_state.get("TIMEOUT", [])),
+        "n_front": sum(1 for s in steps if s["launch"].get("launch_state") == "FRONT"),
         "n_killed": sum(len(s.get("killed_since_prev", [])) for s in steps),
         "budget_violations": sum(1 for s in steps if s.get("budget_violation")),
         "n_compress_actions": sum(len(s["actions"].get("reclaim", {})) for s in steps),

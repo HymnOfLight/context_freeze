@@ -24,10 +24,31 @@ WaitTime: 430
 Complete
 """
 
-AM_FRONT = """Starting: Intent { cmp=com.android.settings/.Settings }
+AM_HOT = """Starting: Intent { cmp=com.google.android.dialer/.extensions.GoogleDialtactsActivity }
 Warning: Activity not started, its current task has been brought to the front
 Status: ok
-Activity: com.android.settings/.Settings
+LaunchState: HOT
+Activity: com.google.android.dialer/com.android.dialer.main.impl.MainActivity
+TotalTime: 7391
+WaitTime: 7778
+Complete
+"""
+
+AM_FRONT = """Starting: Intent { cmp=com.google.android.apps.messaging/.ui.ConversationListActivity }
+Warning: Activity not started, intent has been delivered to currently running top-most instance.
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.google.android.apps.messaging/.gaia.expresssignin.BugleExpressSignInActivity
+TotalTime: 0
+WaitTime: 5
+Complete
+"""
+
+AM_TIMEOUT = """Starting: Intent { cmp=com.google.android.deskclock/com.android.deskclock.DeskClock }
+Status: timeout
+LaunchState: UNKNOWN (-1)
+Activity: com.google.android.deskclock/com.android.deskclock.DeskClock
+WaitTime: 27792
 Complete
 """
 
@@ -42,8 +63,12 @@ def test_am_start():
     r = P.parse_am_start(AM_START)
     assert r["status"] == "ok" and r["launch_state"] == "WARM"
     assert r["total_time_ms"] == 412 and r["wait_time_ms"] == 430
-    r2 = P.parse_am_start(AM_FRONT)
-    assert r2["launch_state"] == "FRONT" and r2["total_time_ms"] is None
+    hot = P.parse_am_start(AM_HOT)
+    assert hot["launch_state"] == "HOT" and hot["total_time_ms"] == 7391
+    front = P.parse_am_start(AM_FRONT)
+    assert front["launch_state"] == "FRONT" and front["total_time_ms"] is None
+    to = P.parse_am_start(AM_TIMEOUT)
+    assert to["launch_state"] == "TIMEOUT" and to["total_time_ms"] == 27792
 
 
 def test_mm_stat_psi_swaps_vmstat():

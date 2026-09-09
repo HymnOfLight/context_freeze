@@ -81,8 +81,19 @@ def parse_am_start(text: str) -> dict:
     for k, v in _AM_INT.findall(text):
         res[{"ThisTime": "this_time_ms", "TotalTime": "total_time_ms",
              "WaitTime": "wait_time_ms"}[k]] = int(v)
-    if "brought to the front" in text:
-        res["launch_state"] = res["launch_state"] or "FRONT"
+    state = res["launch_state"] or ""
+    if res["status"] == "timeout" or state.startswith("UNKNOWN (-1)"):
+        # `am start -W` gave up waiting for the first frame: WaitTime is a lower bound
+        res["launch_state"] = "TIMEOUT"
+        res["total_time_ms"] = res["total_time_ms"] or res["wait_time_ms"]
+    elif "currently running top-most instance" in text or state.startswith("UNKNOWN") \
+            or (res["total_time_ms"] == 0):
+        # the activity was already in the foreground -> nothing resumed, no latency sample
+        res["launch_state"] = "FRONT"
+        res["total_time_ms"] = None
+        res["this_time_ms"] = None
+    # note: "Warning: Activity not started, its current task has been brought to the front"
+    # accompanies a normal HOT resume and carries a valid TotalTime -> keep it
     if "Error" in text or "Exception" in text:
         res["status"] = res["status"] or "error"
     return res
