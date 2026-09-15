@@ -4,7 +4,7 @@
 
 | 项 | 建议 | 说明 |
 |---|---|---|
-| 客体 (Android) RAM | 3072 MB 基线, 2048 MB 高压 | 16 GB 主机: macOS 自身 + 模拟器进程约需 5–6 GB, 客体 3 GB 时仍有余量; 2 GB 客体更容易触发回收 |
+| 客体 (Android) RAM | **6144 MB 默认**, 3072 MB 为内存压力变体 | 3 GB 客体时 Android 的 lmkd 在我们的控制器动作之前就把压缩后的后台进程杀掉 (上一轮日志里 COLD 启动占多数), 策略之间无从比较; 6 GB 让 "谁离开 DRAM" 由控制器而非 lmkd 决定。16 GB 主机: 6 GB 客体 + 约 2 GB 模拟器进程开销 + macOS ≈ 10–11 GB, 跑矩阵时请关闭 IDE / 浏览器 |
 | 客体 CPU | 4 核 | `-cores 4`; M4 大核充足 |
 | 磁盘 | ≥ 15 GB | 系统镜像 ~1.5 GB, AVD userdata 8 GB, APK 缓存 |
 | 镜像 ABI | `arm64-v8a` | Apple Silicon 通过 Hypervisor.framework 原生运行 arm64 镜像; x86 镜像走翻译, 极慢且不代表真机 |
@@ -32,15 +32,19 @@ export ANDROID_HOME=~/Library/Android/sdk
 ## 3. 创建并启动 AVD
 
 ```bash
-scripts/setup_avd.sh 35 cf_api35 3072          # API, AVD 名, RAM(MB); 第四个参数可选 default 换 AOSP 镜像
-scripts/start_emulator.sh cf_api35 3072        # 等待 sys.boot_completed=1
+scripts/setup_avd.sh 35 cf_api35 6144          # API, AVD 名, RAM(MB); 第四个参数可选 default 换 AOSP 镜像
+scripts/start_emulator.sh cf_api35 6144        # 等待 sys.boot_completed=1
 ```
+
+`start_emulator.sh` 启动前用 `vm_stat` 估算宿主可用内存, 不足 "客体 RAM + 2 GB" 时给出警告; 开机后核对客体 `MemTotal`
+是否接近请求值, 并检查模拟器日志里有没有 "Software GL" / SwiftShader —— 宿主内存吃紧时模拟器会**静默**退回 CPU 软件渲染,
+此后所有 `am start -W` 的 `TotalTime` 都被渲染而非内存主导 (上一轮日志中后半段时延整体抬高即此原因)。
 
 `setup_avd.sh` 写入 `~/.android/avd/cf_api35.avd/config.ini`: `hw.ramSize`, `hw.cpu.ncore=4`,
 `disk.dataPartition.size=8G`, `fastboot.forceColdBoot=yes` (每次冷启动, 避免快照把上次实验的内存状态带进来)。
 
 `start_emulator.sh` 使用 `-no-snapshot -no-boot-anim -no-audio -gpu auto`; 若要无窗口跑批量实验加 `-no-window`。
-注意 `-memory` 会覆盖 config.ini 里的 RAM, 因此不同压力等级可只改这个参数。
+注意 `-memory` 会覆盖 config.ini 里的 RAM, 因此不同压力等级可只改这个参数 (6144 默认 / 3072 压力 / 2048 极限)。
 
 ## 4. 设备准备
 
@@ -51,7 +55,8 @@ scripts/prepare_device.sh --system-freezer disabled --zram-mb 1024 [--swapfile-m
 * `adb root` — 失败说明用了 Play 镜像。
 * `cached_apps_freezer disabled` — 关闭 Android 自带的 cached-app freezer, 否则系统会和我们的控制器争抢
   `cgroup.freeze`。跑 **"Android 默认" 基线** 时改为 `--system-freezer enabled` 并使用 `policy=none` 配置。
-  该设置需要重启, 脚本会自动重启并等待。
+  该设置需要重启, 脚本会自动重启, 并用 `dumpsys activity settings | grep use_freezer` 验证 system_server 实际生效的值
+  (仅写 `settings` 而不重启是不够的 —— 上一轮日志里系统 freezer 仍在工作)。runner 启动时也会再检查一次并 WARN。
 * zram — API 35 (Android 15) google_apis 镜像默认已启用 zram (约 RAM 的 75%, lz4, 优先级 -2), 脚本会打印
   `already active`; 旧镜像没有 swap 时脚本在 `/dev/block/zram0` 上建立压缩交换区并 `swapon`。
   若内核没有 zram, 用 `--swapfile-mb` 在 `/data` 上建交换文件 (相当于 "闪存" 层)。
@@ -98,4 +103,5 @@ k=10 左右即可, Bellman 离线最优 (模拟器轨迹回放到 `cf.sim`) 支�
 | `LaunchState: TIMEOUT` | `am start -W` 内部等待首帧超时 (模拟器极慢时出现, 例如无 KVM 的 x86 软件模拟); 记录 `WaitTime` 作为时延下界。M4 上原生 arm64 镜像不会出现 |
 | 应用 `LaunchState: COLD` 频繁 | lmkd 在杀后台进程; 可提高客体 RAM, 或在配置里设置 `"stop_lmkd": true` (仅实验用, 由内核 OOM killer 兜底) |
 | `am start -W` 无 `TotalTime` | 该 Activity 已在前台 (记为 `FRONT`), trace 生成器默认不允许连续重复请求 |
-| 主机内存告急 | 关闭 IDE/浏览器, 或客体降到 2048 MB; 不要在同一台机器上同时开两个模拟器 |
+| 主机内存告急 / 模拟器日志出现 "Software GL" | 关闭 IDE/浏览器, 重启模拟器; 仍不够时客体降到 4096 MB; 不要在同一台机器上同时开两个模拟器 |
+| 实验中途被打断 (Ctrl+C、模拟器崩溃、adb 超时) | 数据不丢: 每步都写 `results/<name>.ckpt`, `python3 run_experiment.py <config> --resume results/<name>.jsonl` 继续; 矩阵用 `OUT=<matrix_dir> scripts/run_matrix.sh ...` (见 docs/02 §6) |
