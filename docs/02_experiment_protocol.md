@@ -13,9 +13,11 @@ for t in 1..T:
    2. settle_s 后采样 (一次 adb 往返: meminfo, vmstat, PSI, zram mm_stat, swaps, 每个进程 smaps_rollup/stat/oom_score_adj/cgroup.freeze)
    3. 由采样构造 AppInfo(mᵢ, aᵢ, ρ̂, Ĉresumeᵢ, b_keep) -> policy.choose_resident -> S_t  (r_t ∈ S_t, never_freeze ⊆ S_t)
    4. 执行:  i ∉ S_t: freeze + reclaim(anon);   i ∈ S_t \ {r_t}: 按 freeze_resident 决定是否只冻结不回收
-   5. dwell_s 后再次采样, 写一行 JSON (type=step)
-cleanup   解冻全部, 释放气球, 恢复 lmkd
+   5. dwell_s 后再次采样, 写一行 JSON (type=step), 把控制器状态写入 <name>.ckpt (断点)
+cleanup   解冻全部, 释放气球, 恢复 lmkd, 写 type=end, 删除 .ckpt, 打印摘要
 ```
+
+每一步的 adb 命令、内核行为与验证方法见 `docs/03_adb_mechanisms.md`。
 
 ### 冻结 (y_i)
 `/sys/fs/cgroup/uid_<uid>/pid_<pid>/cgroup.freeze` 写 1/0 (Android 11+ 的 cgroup v2 freezer, 与系统 cached-app
@@ -94,6 +96,51 @@ python3 -m cf.sim.run_sim --trace replay --trace-path results/matrix_*/landlord_
 ```
 
 每个 (策略, η) 至少重复 3 个种子; 报告均值与置信区间, 模拟器上的时延抖动 (宿主调度) 明显大于真机。
+
+## 6. 断点续跑 (checkpoint / resume)
+
+一次 40 步 × 16 应用的实验在模拟器上要跑几十分钟, 矩阵要跑数小时; Ctrl+C、模拟器崩溃、adb 超时、宿主休眠都不应让已跑的步骤作废。
+
+**机制** (`cf/runner.py`):
+
+* 每完成一步, 把完整控制器状态 pickle 到 `<out_dir>/<name>.ckpt` (原子替换): 策略对象 (Landlord 信用、LRU 时间戳、Markov 转移计数、
+  hybrid 的 w 与误差窗口)、当前常驻 / 冻结 / 压缩集合、恢复时延历史 (Ĉresume 估计用)、上一步的 pid 集合 (用于统计被杀)、
+  warmup 得到的 m̄ᶠᵍ / a / L_cold、预算 B、完整轨迹 σ 与已完成步数。JSONL 仍是唯一的数据文件, `.ckpt` 只是状态快照。
+* 任何异常 (`KeyboardInterrupt`、`AdbError`、超时、设备离线) 都会: 写一条 `{"type": "interrupted", "after_step": t}`,
+  尽力解冻所有应用, **保留** `.ckpt`, 并在控制台打印续跑命令。
+* 续跑 (`--resume`): 以追加模式重开 JSONL 与 `.log`, 重新探测设备、重建 zram / 动画设置 (模拟器可能已重启),
+  **跳过 warmup** (沿用 checkpoint 里的 m̄ᶠᵍ, 保证预算不变), 先全部解冻再按 checkpoint 把 `compressed` 集合重新回收、
+  `frozen` 集合重新冻结 (进程已不在的记为将要 COLD), 写一条 `{"type": "resume", "from_step": t+1}`, 从 t+1 步继续。
+  轨迹来自 checkpoint 而不是重新生成, 因此续跑前后是同一个 σ。
+* 正常结束写 `{"type": "end"}` 并删除 `.ckpt`; `run_experiment.py` 遇到已 `end` 的同名结果直接跳过 (不会覆盖), 遇到有 `.ckpt` 的
+  同名结果自动续跑, `--overwrite` 强制重来。
+* `cf.analyze` 对续跑文件: 同一 t 的重复 step (崩溃时写了半行) 以后者为准; 内核计数器 (`pswpout` 等) 按相邻步差值累加,
+  模拟器重启导致的计数器回绕不会算出负数; 汇总表新增 `resumes` (续跑次数) 与 `finished` 两列, 论文里可据此标注。
+
+**用法**:
+
+```bash
+# 单次实验: 用结果文件路径续跑 (策略/η/T/名称全部来自 checkpoint)
+python3 run_experiment.py configs/emulator_base.json --resume results/landlord_eta0.3.jsonl
+# 或重复原命令并加 --resume
+python3 run_experiment.py configs/emulator_base.json --policy landlord --eta 0.3 --T 40 --name landlord_eta0.3 --resume
+
+# 矩阵: 指定原来的输出目录即可, 已完成 (policy, η) 跳过, 未完成的续跑, 剩下的照常
+OUT=results/matrix_20260914-005939 scripts/run_matrix.sh configs/emulator_base.json 40
+scripts/run_matrix.sh --resume results/matrix_20260914-005939
+```
+
+续跑会在汇总里留下痕迹 (`resumes ≥ 1`), 中断期间系统状态 (页缓存、zram 内容、模拟器性能) 与连续运行不完全相同; 严谨起见,
+Pareto 图上的最终数据点建议来自未中断或只中断一次的运行, 中断多次的运行用于调试。
+
+## 7. 控制台与日志
+
+* 所有输出带时间戳与级别 (`INFO / OK / WARN / ERR / STEP / HEAD`), 同时写入 `<out_dir>/<name>.log`
+  (`run_matrix.sh` 另存原始控制台到 `<name>.console.log`), 不再依赖 `tee` 与 Python 缓冲 (已 `line_buffering`, 脚本内 `PYTHONUNBUFFERED=1`)。
+* 每步一行: `[t/T 已用 ETA] 应用 状态 时延 <-来源(hot/frz/zram) | S/frz/zram 计数 | M_bg/B | 本步动作与耗时 | killed`; 有进程被杀的步用 WARN 级别。
+* 开始前 preflight 对已知干扰因素告警: 系统 cached-apps freezer 未关、客体 RAM < 4 GB、无 swap、只剩气球回收、软件渲染 (SwiftShader/llvmpipe)、
+  warmup 时应用未存活或落在引导页 (FRONT/TIMEOUT)。
+* 结束时打印摘要 (launch 状态计数、时延分位、后台 PSS 与预算、swap 读写、refault、回收路径、警告条数) 并给出 `cf.analyze` 命令。
 
 ## 5. 已知局限
 
