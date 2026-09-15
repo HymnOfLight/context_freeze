@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # Create a rootable Android Virtual Device for the freeze/swap experiments.
 #
-#   scripts/setup_avd.sh [API_LEVEL=35] [AVD_NAME=cf_api35] [RAM_MB=3072] [TAG=google_apis]
+#   scripts/setup_avd.sh [API_LEVEL=35] [AVD_NAME=cf_api35] [RAM_MB=6144] [TAG=google_apis]
 #
 # Notes for MacBook (Apple Silicon, 16 GB):
 #   * use arm64-v8a images (native under Hypervisor.framework; x86 images are unusably slow)
 #   * use google_apis or default (AOSP) images -> `adb root` works.  google_apis_playstore does NOT.
-#   * 16 GB host: 3072 MB guest is a comfortable default; 2048 MB creates strong memory pressure.
+#   * 16 GB host: 6144 MB guest is the default (keeps lmkd quiet so the controller, not lmkd,
+#     decides what leaves DRAM); 3072 MB is the memory-pressure variant. The emulator process adds
+#     ~2 GB on top of the guest RAM, so close IDE/browser while running the matrix.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/env.sh
 
 API="${1:-35}"
 AVD="${2:-cf_api${API}}"
-RAM="${3:-3072}"
+RAM="${3:-6144}"
 TAG="${4:-google_apis}"
 ARCH="$(host_arch)"
 IMG="system-images;android-${API};${TAG};${ARCH}"
