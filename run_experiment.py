@@ -74,6 +74,10 @@ def main(argv=None) -> int:
             path += ".jsonl"
         base["out_dir"] = os.path.dirname(path) or "."
         base["name"] = os.path.basename(path)[:-len(".jsonl")]
+        ck = Experiment.load_checkpoint(path)
+        if ck:                      # for the banner only; Experiment._restore uses the checkpoint anyway
+            base["policy"], base["eta"] = ck["cfg"]["policy"], ck["cfg"]["eta"]
+        base.setdefault("policy", "?"); base.setdefault("eta", "?")
         jobs = [(base["name"], base)]
     else:
         policies = args.policies or [args.policy or base.get("policy", "landlord")]
