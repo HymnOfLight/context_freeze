@@ -31,19 +31,29 @@ if [ "$(sh id -u)" != "0" ]; then
 fi
 
 CUR="$(sh settings get global cached_apps_freezer)"
-echo "== cached_apps_freezer: current='$CUR' wanted='$SYS_FREEZER'"
-if [ "$CUR" != "$SYS_FREEZER" ]; then
+# what system_server actually uses right now (CachedAppOptimizer reads the setting at boot)
+ACTIVE="$(sh dumpsys activity settings 2>/dev/null | grep -o 'use_freezer=[a-z]*' | head -1 || true)"
+echo "== cached_apps_freezer: setting='$CUR' active='${ACTIVE:-unknown}' wanted='$SYS_FREEZER'"
+WANT_ACTIVE="use_freezer=true"; [ "$SYS_FREEZER" = "disabled" ] && WANT_ACTIVE="use_freezer=false"
+if [ "$CUR" != "$SYS_FREEZER" ] || { [ -n "$ACTIVE" ] && [ "$ACTIVE" != "$WANT_ACTIVE" ]; }; then
   sh settings put global cached_apps_freezer "$SYS_FREEZER"
-  if [ "$SYS_FREEZER" = "disabled" ]; then
-    sh device_config put activity_manager use_freezer false >/dev/null 2>&1 || true
-  else
-    sh device_config put activity_manager use_freezer true >/dev/null 2>&1 || true
-  fi
+  FLAG=true; [ "$SYS_FREEZER" = "disabled" ] && FLAG=false
+  # Android 11+ reads the flag from the *_native_boot namespace; older builds from activity_manager
+  sh device_config put activity_manager_native_boot use_freezer $FLAG >/dev/null 2>&1 || true
+  sh device_config put activity_manager use_freezer $FLAG >/dev/null 2>&1 || true
   if [ "$REBOOT" = 1 ]; then
     echo "== rebooting for the freezer setting to take effect"
     "$ADB" reboot; "$ADB" wait-for-device
     until [ "$(sh getprop sys.boot_completed 2>/dev/null)" = "1" ]; do sleep 2; done
-    "$ADB" root >/dev/null 2>&1 || true; "$ADB" wait-for-device; sleep 2
+    "$ADB" root >/dev/null 2>&1 || true; "$ADB" wait-for-device; sleep 3
+    ACTIVE="$(sh dumpsys activity settings 2>/dev/null | grep -o 'use_freezer=[a-z]*' | head -1 || true)"
+    if [ -n "$ACTIVE" ] && [ "$ACTIVE" != "$WANT_ACTIVE" ]; then
+      echo "!! system freezer still reports '$ACTIVE' after reboot - it will fight our controller for cgroup.freeze"
+    else
+      echo "== system freezer now: ${ACTIVE:-unknown (dumpsys did not report use_freezer)}"
+    fi
+  else
+    echo "!! --no-reboot: the new freezer setting only applies after the next reboot"
   fi
 fi
 
