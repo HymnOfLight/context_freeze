@@ -23,12 +23,15 @@ def pct(values: list[float], p: float) -> float | None:
 
 
 def load(path: str) -> dict:
-    meta, budget, steps, warm = None, None, [], []
+    meta, budget, steps, warm, resumes, finished = None, None, {}, [], 0, False
     with open(path) as f:
         for line in f:
             if not line.strip():
                 continue
-            r = json.loads(line)
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue          # torn last line after a crash; the step was re-done after --resume
             t = r.get("type")
             if t == "meta":
                 meta = r
@@ -37,16 +40,24 @@ def load(path: str) -> dict:
             elif t == "warmup":
                 warm.append(r)
             elif t == "step":
-                steps.append(r)
-    return {"path": path, "meta": meta or {}, "budget": budget or {}, "steps": steps, "warmup": warm}
+                steps[r["t"]] = r    # a step re-executed after a resume replaces the torn one
+            elif t == "resume":
+                resumes += 1
+            elif t == "end":
+                finished = True
+    return {"path": path, "meta": meta or {}, "budget": budget or {},
+            "steps": [steps[k] for k in sorted(steps)], "warmup": warm,
+            "resumes": resumes, "finished": finished}
 
 
 def _delta(steps: list[dict], key: str, sub: str = "vmstat") -> int | None:
+    """Cumulative growth of a monotone kernel counter. Summed pairwise so that a counter reset
+    (emulator rebooted between an interruption and --resume) is skipped instead of going negative."""
     vals = [s["after_dwell"]["system"].get(sub, {}).get(key) for s in steps]
     vals = [v for v in vals if v is not None]
     if len(vals) < 2:
         return None
-    return vals[-1] - vals[0]
+    return sum(b - a for a, b in zip(vals, vals[1:]) if b >= a)
 
 
 def summarize(run: dict) -> dict:
@@ -127,6 +138,8 @@ def summarize(run: dict) -> dict:
         "action_p95_ms": pct([s["action_ms"] for s in steps], 0.95),
         "reclaim_methods": ",".join(sorted({h for s in steps for h in s["actions"].get("reclaim", {}).values()})),
         "freezer": caps.get("freezer"),
+        "resumes": run.get("resumes", 0),
+        "finished": run.get("finished", True),
     }
     if row["sum_m_fg_mb"] and row["bg_pss_avg_mb"] is not None:
         row["bg_pss_avg_over_sum_fg"] = round(row["bg_pss_avg_mb"] / row["sum_m_fg_mb"], 3)

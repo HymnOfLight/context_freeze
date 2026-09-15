@@ -68,7 +68,14 @@ class FakeDevice(Device):
         s = self.state[pkg]
         s["pid"], s["swap"], s["frozen"] = None, 0, False
 
+    fail_at_launch: int | None = None     # raise AdbError on the n-th launch (crash injection)
+    launches = 0
+
     def launch(self, pkg):
+        self.launches += 1
+        if self.fail_at_launch is not None and self.launches == self.fail_at_launch:
+            from cf.adb import AdbError
+            raise AdbError("error: device 'emulator-5554' not found")
         s = self.state[pkg]
         if s["pid"] is None:
             s["pid"] = self.rng.randint(2000, 30000)
