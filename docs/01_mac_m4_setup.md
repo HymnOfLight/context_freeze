@@ -43,7 +43,9 @@ scripts/start_emulator.sh cf_api35 6144        # 等待 sys.boot_completed=1
 `setup_avd.sh` 写入 `~/.android/avd/cf_api35.avd/config.ini`: `hw.ramSize`, `hw.cpu.ncore=4`,
 `disk.dataPartition.size=8G`, `fastboot.forceColdBoot=yes` (每次冷启动, 避免快照把上次实验的内存状态带进来)。
 
-`start_emulator.sh` 使用 `-no-snapshot -no-boot-anim -no-audio -gpu auto`; 若要无窗口跑批量实验加 `-no-window`。
+`start_emulator.sh` 使用 `-no-snapshot -no-boot-anim -no-audio -gpu host`; 若要无窗口跑批量实验加 `-no-window`。
+**不用 `-gpu auto`**: auto 模式下宿主可用内存一旦低于 5 GB, 模拟器就静默改用 SwiftShader 软件渲染 (9/16 那轮 6 GB 客体正是如此,
+HOT 启动也要 1 s); `host` 通过 Metal 直接用 Apple GPU, 与宿主内存无关。`GPU=auto scripts/start_emulator.sh` 可改回。
 注意 `-memory` 会覆盖 config.ini 里的 RAM, 因此不同压力等级可只改这个参数 (6144 默认 / 3072 压力 / 2048 极限)。
 
 ## 4. 设备准备
@@ -104,4 +106,6 @@ k=10 左右即可, Bellman 离线最优 (模拟器轨迹回放到 `cf.sim`) 支�
 | 应用 `LaunchState: COLD` 频繁 | lmkd 在杀后台进程; 可提高客体 RAM, 或在配置里设置 `"stop_lmkd": true` (仅实验用, 由内核 OOM killer 兜底) |
 | `am start -W` 无 `TotalTime` | 该 Activity 已在前台 (记为 `FRONT`), trace 生成器默认不允许连续重复请求 |
 | 主机内存告急 / 模拟器日志出现 "Software GL" | 关闭 IDE/浏览器, 重启模拟器; 仍不够时客体降到 4096 MB; 不要在同一台机器上同时开两个模拟器 |
+| `run_experiment.py` 报 `PreflightError` 拒绝开跑 | 系统 freezer 未关 (`settings get global cached_apps_freezer` 应为 `disabled`, 用 `prepare_device.sh --system-freezer disabled` 并重启) 或模拟器在软件渲染 (用 `start_emulator.sh` 重启); 只有跑 "Android 默认" 基线才用 `--no-strict` |
+| 进度行出现 `killed: xxx[bg anr]` 等 | 系统杀了后台进程, 方括号是 ActivityManager 的原因; 与内存无关的原因见 docs/02 §8 表格; 实时看: `adb logcat -b events \| grep -E 'am_kill\|am_anr'` |
 | 实验中途被打断 (Ctrl+C、模拟器崩溃、adb 超时) | 数据不丢: 每步都写 `results/<name>.ckpt`, `python3 run_experiment.py <config> --resume results/<name>.jsonl` 继续; 矩阵用 `OUT=<matrix_dir> scripts/run_matrix.sh ...` (见 docs/02 §6) |

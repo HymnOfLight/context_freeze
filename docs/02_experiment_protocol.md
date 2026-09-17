@@ -78,12 +78,12 @@ memcg 路径总是同时丢弃文件页 (对应 e^b_i, 之后产生 R^file refau
 ## 4. 建议的实验矩阵
 
 ```bash
-# A. 基线: 不冻结 / Android 默认 freezer
-scripts/prepare_device.sh --system-freezer enabled  && python3 run_experiment.py configs/emulator_baseline_none.json --name android_default
-scripts/prepare_device.sh --system-freezer disabled && python3 run_experiment.py configs/emulator_baseline_none.json --name none
+# A. 基线: Android 默认 freezer (需 --no-strict, 因为系统 freezer 是开着的) / 不冻结 (矩阵里的 none)
+scripts/prepare_device.sh --system-freezer enabled  && NO_STRICT=1 POLICIES=none SEEDS="1 2 3" OUT=results/android_default scripts/run_matrix.sh
+scripts/prepare_device.sh --system-freezer disabled     # 之后的矩阵 B 自带 none 基线
 
-# B. 策略 x η (同一随机种子 => 同一 σ)
-POLICIES="lru lfu landlord markov hybrid" ETAS="0.15 0.25 0.35 0.5" scripts/run_matrix.sh configs/emulator_base.json 60
+# B. 策略 x η x 种子 (同一种子 => 同一 σ; 3 个种子给出均值与方差)
+POLICIES="none lru lfu landlord markov hybrid" ETAS="0.15 0.25 0.35 0.5" SEEDS="1 2 3" scripts/run_matrix.sh configs/emulator_base.json 60
 
 # C. 分布漂移: 在 T/2 处打乱应用流行度, 观察 hybrid 的 w 是否回落到 Landlord
 python3 run_experiment.py configs/emulator_base.json --policies markov hybrid landlord --eta 0.3 --T 80   # 配置里 trace.drift_at=40
@@ -96,6 +96,9 @@ python3 -m cf.sim.run_sim --trace replay --trace-path results/matrix_*/landlord_
 ```
 
 每个 (策略, η) 至少重复 3 个种子; 报告均值与置信区间, 模拟器上的时延抖动 (宿主调度) 明显大于真机。
+`run_matrix.sh` 把一个矩阵的全部输出放在一个目录里, 结束后只对该目录做 `cf.analyze`; 第一格 warmup 测得的
+m̄ᶠᵍ 通过 `--m-fg-from` 复用到其余所有格, 使同一 η 在每次运行里都是同样多 MB 的预算 (否则 Σm̄ᶠᵍ 在运行间 ±7% 浮动,
+Pareto 图的横坐标随之漂移)。
 
 ## 6. 断点续跑 (checkpoint / resume)
 
@@ -142,7 +145,25 @@ Pareto 图上的最终数据点建议来自未中断或只中断一次的运行,
   warmup 时应用未存活或落在引导页 (FRONT/TIMEOUT)。
 * 结束时打印摘要 (launch 状态计数、时延分位、后台 PSS 与预算、swap 读写、refault、回收路径、警告条数) 并给出 `cf.analyze` 命令。
 
-## 5. 已知局限
+## 8. 干扰因素与工具的防护 (来自 9/13、9/16 两轮矩阵的教训)
+
+| 干扰 | 表现 | 工具现在怎么做 |
+|---|---|---|
+| Android 自带 cached-apps freezer / compaction 仍在启用 (`cached_apps_freezer` 为 `null` = 默认开) | `none` 什么都没做却有 200 MB SwapPss; 控制器记录的 frozen 与内核状态有 ~9% 不一致 | `prepare_device.sh --system-freezer disabled` 同时关 `use_freezer` 与 `use_compaction` (native_boot 命名空间, 持久化), 重启后用 `dumpsys activity settings` 核对; runner **严格 preflight**: 未关则拒绝开跑 (`--no-strict` 仅用于 Android 默认基线) |
+| 模拟器退到软件渲染 (SwiftShader) | 宿主可用内存 < 5 GB 时 `-gpu auto` 静默切换; HOT 启动也要 ~1 s, 所有时延被渲染主导 | `start_emulator.sh` 默认 `-gpu host` (Metal), 不再让模拟器自选; 开机后检查日志与 `dumpsys SurfaceFlinger`; runner preflight 检测到 SwiftShader/llvmpipe 即拒绝开跑 |
+| 后台进程被系统杀掉 (与内存无关: 6 GB 客体、4 GB 空闲时仍每轮 10–13 次, 与 3 GB 时同步同 App) | 之后的恢复变成 COLD (+1–1.6 s), 主导时延尾部 | 每次检测到进程消失即查 `dumpsys activity exit-info <pkg>`, 把 reason / description (如 `bg anr`、`Sync transaction while frozen`、`too many cached`) 写进 step 记录与进度行, 汇总表 `kill_reasons` 列; 对策按原因定: FREEZER → 系统 freezer 未关; ANR → 把该应用加入 `never_freeze` 或不在冻结期间与其交互; `too many cached` → `device_config put activity_manager max_cached_processes 64` |
+| Σm̄ᶠᵍ 每次运行重测, ±7% 浮动 | 同一 η 预算不同, Pareto 横坐标漂移 | `--m-fg-from <jsonl>` / 矩阵自动复用第一格; `budget` 记录带 `m_fg_source` |
+| 不同客体内存的矩阵被 `results/matrix_*/*.jsonl` 通配到一张图 | 同一 (策略, η) 两个点, 折线来回折返 | 汇总按 (策略, η, 客体 RAM) 分组, 不同 RAM 用不同标记且**从不连线**; `run_matrix.sh` 只汇总本目录 |
+| `none` 按 η 画折线 | 8 个纯噪声样本被一条无关变量连起来 | `none` 画成水平参考带 (均值 ± sd), 不画折线 |
+| 单种子, 噪声 (P95 ±400 ms) > 策略差异 | 策略排名不可复现 | `--seeds 1 2 3`; 图上点 = 种子均值, 误差棒 = ±1 sd; `summary_agg.csv` 给 mean/sd/n |
+
+### 读 Pareto 图
+
+`pareto.png` 左图: 横轴后台内存节省 (%), 纵轴恢复时延 P95; 右图纵轴累计 swap 写入。每个点是一个 (策略, η) 在所有种子上的均值,
+误差棒 ±1 sd; 同一策略按 η 连线; 灰色水平带是 `none` 的均值 ± sd。`pareto_eta.png` 把横轴换成实际达到的 η (= 后台 PSS / Σm̄ᶠᵍ,
+左大右小), 便于和文档里的 η 目标直接对照。两条策略曲线只有在误差棒不重叠时才谈得上谁优。
+
+## 9. 已知局限
 
 * 模拟器上 "闪存写入" 是宿主文件写入, 没有真机的写放大与磨损; 用 `pswpout` 作为代理量。
 * `am start -W` 的 `TotalTime` 是到首帧的时间, 不含应用内部懒加载的 refault 尾部; `pgmajfault`/`refault` 是补充。
