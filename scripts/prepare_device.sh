@@ -41,17 +41,25 @@ if [ "$CUR" != "$SYS_FREEZER" ] || { [ -n "$ACTIVE" ] && [ "$ACTIVE" != "$WANT_A
   # Android 11+ reads the flag from the *_native_boot namespace; older builds from activity_manager
   sh device_config put activity_manager_native_boot use_freezer $FLAG >/dev/null 2>&1 || true
   sh device_config put activity_manager use_freezer $FLAG >/dev/null 2>&1 || true
+  # CachedAppOptimizer also *compacts* cached apps into zram on its own (that is where the ~200 MB of
+  # SwapPss in the `none` runs came from); it must go off together with the freezer for a clean baseline
+  sh device_config put activity_manager_native_boot use_compaction $FLAG >/dev/null 2>&1 || true
+  sh device_config put activity_manager use_compaction $FLAG >/dev/null 2>&1 || true
+  # keep the flags across reboots / device_config syncs
+  sh device_config set_sync_disabled_for_tests persistent >/dev/null 2>&1 || true
   if [ "$REBOOT" = 1 ]; then
     echo "== rebooting for the freezer setting to take effect"
     "$ADB" reboot; "$ADB" wait-for-device
     until [ "$(sh getprop sys.boot_completed 2>/dev/null)" = "1" ]; do sleep 2; done
     "$ADB" root >/dev/null 2>&1 || true; "$ADB" wait-for-device; sleep 3
     ACTIVE="$(sh dumpsys activity settings 2>/dev/null | grep -o 'use_freezer=[a-z]*' | head -1 || true)"
+    COMPACT="$(sh dumpsys activity settings 2>/dev/null | grep -o 'use_compaction=[a-z]*' | head -1 || true)"
     if [ -n "$ACTIVE" ] && [ "$ACTIVE" != "$WANT_ACTIVE" ]; then
       echo "!! system freezer still reports '$ACTIVE' after reboot - it will fight our controller for cgroup.freeze"
     else
-      echo "== system freezer now: ${ACTIVE:-unknown (dumpsys did not report use_freezer)}"
+      echo "== system freezer now: ${ACTIVE:-unknown (dumpsys did not report use_freezer)}, ${COMPACT:-use_compaction=?}"
     fi
+    echo "== settings get global cached_apps_freezer -> $(sh settings get global cached_apps_freezer)"
   else
     echo "!! --no-reboot: the new freezer setting only applies after the next reboot"
   fi
@@ -87,4 +95,6 @@ echo "== /proc/swaps:"; sh cat /proc/swaps
 sh 'settings put global window_animation_scale 0; settings put global transition_animation_scale 0; settings put global animator_duration_scale 0'
 sh 'svc power stayon true; input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard' >/dev/null 2>&1 || true
 sh 'settings put global stay_on_while_plugged_in 7' >/dev/null 2>&1 || true
+echo "== kill diagnostics: the runner records \`dumpsys activity exit-info <pkg>\` for every process that dies;"
+echo "   for a live view run:  adb logcat -b events -b system | grep -E 'am_kill|am_proc_died|am_anr'"
 echo "== done. launchable packages: scripts/list_launchable.sh"
