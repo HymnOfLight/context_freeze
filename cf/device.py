@@ -277,6 +277,27 @@ class Device:
     def force_stop(self, pkg: str) -> None:
         self.adb.shell(f"am force-stop {shlex.quote(pkg)}")
 
+    def exit_info(self, pkg: str, pids: Optional[set[int]] = None) -> list[dict]:
+        """Why did the app's processes die?  ActivityManager keeps an ApplicationExitInfo per dead process
+        (Android 11+): reason (LOW_MEMORY / ANR / FREEZER / EXCESSIVE_RESOURCE_USAGE / OTHER ...) and a
+        free-text description such as 'bg anr', 'too many cached' or 'Sync transaction while frozen'.
+        Restricted to `pids` (the ones we saw alive in the previous step) when given."""
+        out = self.adb.shell(f"dumpsys activity exit-info {shlex.quote(pkg)} 2>/dev/null", timeout=60)
+        entries = P.parse_exit_info(out)
+        if pids:
+            hit = [e for e in entries if e.get("pid") in pids]
+            if hit:
+                return hit
+        return entries[:3]
+
+    def renderer(self) -> str:
+        """SurfaceFlinger's GLES line: tells software (SwiftShader / llvmpipe) from hardware GPU rendering."""
+        return self.adb.shell("dumpsys SurfaceFlinger 2>/dev/null | grep -m1 -i 'GLES:'").strip()
+
+    @staticmethod
+    def is_software_renderer(gles: str) -> bool:
+        return any(k in gles.lower() for k in ("swiftshader", "llvmpipe", "software"))
+
     def home(self) -> None:
         self.adb.shell("input keyevent KEYCODE_HOME")
 

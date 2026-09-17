@@ -51,6 +51,9 @@ DEFAULTS = {
     "default_rho": 0.35,
     "out_dir": "results",
     "min_guest_ram_mb": 4096,      # below this lmkd kills dominate the COLD count (preflight warning)
+    "fixed_m_fg_kb": None,         # {pkg: kB}: reuse one warmup's m_fg so every run of a matrix gets the same budget
+    "fixed_a_fg_kb": None,
+    "strict_preflight": True,      # abort instead of warn when a known confounder is present (see _preflight)
 }
 
 CKPT_VERSION = 1
@@ -62,6 +65,11 @@ RESUMABLE_ERRORS = (AdbError, subprocess.TimeoutExpired, subprocess.CalledProces
 
 class ResumeError(RuntimeError):
     pass
+
+
+class PreflightError(RuntimeError):
+    """The device is in a state that makes the run's numbers meaningless (system freezer active,
+    software GPU ...). Fix the device or pass --no-strict to run anyway."""
 
 
 class Experiment:
@@ -248,28 +256,36 @@ class Experiment:
                               "build": a.shell("getprop ro.build.fingerprint").strip()}})
 
     def _preflight(self, caps) -> None:
-        """Warn about the confounders that spoiled earlier runs (see docs/02, §6)."""
+        """Check for the confounders that spoiled earlier runs (docs/02 §6). Blocking ones raise
+        PreflightError unless strict_preflight is off; the rest are warnings."""
         pol = self.cfg["policy"]
-        if pol != "none" and caps.cached_apps_freezer not in ("disabled", "false", "0"):
-            self.log.warn(f"Android's own cached-apps freezer is '{caps.cached_apps_freezer}' - it competes "
-                          f"with this controller for cgroup.freeze. Run scripts/prepare_device.sh "
-                          f"--system-freezer disabled (needs a reboot)")
+        blocking: list[str] = []
+        if caps.cached_apps_freezer not in ("disabled", "false", "0"):
+            blocking.append(f"Android's own cached-apps freezer is '{caps.cached_apps_freezer}' (null = device default = "
+                            f"enabled on Android 15). It freezes/compacts/kills cached apps on its own and fights this "
+                            f"controller for cgroup.freeze; 'none' then measures Android's freezer, not 'no freezing'. "
+                            f"Fix: scripts/prepare_device.sh --system-freezer disabled (reboots), or --no-strict for "
+                            f"an explicit 'Android default' baseline")
+        gles = self.dev.renderer()
+        if gles and Device.is_software_renderer(gles):
+            blocking.append(f"emulator renders with a software GPU ({gles[:70]}...): every launch pays ~1 s of CPU "
+                            f"rasterisation, so TotalTime measures rendering, not memory. Fix: start with "
+                            f"scripts/start_emulator.sh (forces -gpu host) after freeing host RAM, or --no-strict")
+        elif gles:
+            self.log.info("renderer: " + gles[:110])
         if caps.mem_total_kb and caps.mem_total_kb // 1024 < self.cfg["min_guest_ram_mb"]:
             self.log.warn(f"guest RAM is only {caps.mem_total_kb // 1024} MB (< {self.cfg['min_guest_ram_mb']}); "
-                          f"lmkd will kill background apps and inflate COLD starts. "
-                          f"Start the emulator with 6144 MB (scripts/start_emulator.sh <avd> 6144)")
+                          f"lmkd may kill background apps and inflate COLD starts")
         if not caps.swaps and pol != "none":
             self.log.warn("no swap device: compressed pages have nowhere to go (zram_mb in the config or "
                           "scripts/prepare_device.sh --zram-mb 1024)")
         if caps.reclaim_methods == ["balloon"] and pol != "none":
             self.log.warn("no per-app reclaim mechanism (memcg / proc reclaim); falling back to the global "
                           "tmpfs balloon - memory savings will be imprecise")
-        gles = self.dev.adb.shell("dumpsys SurfaceFlinger 2>/dev/null | grep -m1 -i 'GLES:'").strip()
-        if gles and any(k in gles.lower() for k in ("swiftshader", "llvmpipe", "software")):
-            self.log.warn(f"emulator renders with a software GPU ({gles[:80]}...): frame times and hence "
-                          f"TotalTime will be dominated by rendering, not by memory. Check host RAM / -gpu")
-        elif gles:
-            self.log.info("renderer: " + gles[:110])
+        for msg in blocking:
+            (self.log.err if self.cfg["strict_preflight"] else self.log.warn)(msg)
+        if blocking and self.cfg["strict_preflight"]:
+            raise PreflightError(f"{len(blocking)} blocking preflight problem(s); fix the device or use --no-strict")
 
     def warmup(self) -> float:
         """Measure m_fg_i (foreground working set) and cold start latency for every app."""
@@ -286,6 +302,10 @@ class Experiment:
             app = s["apps"][pkg]
             self.m_fg[pkg] = app.total("pss_kb") + app.total("swap_pss_kb")
             self.a_fg[pkg] = app.total("pss_anon_kb") + app.total("swap_pss_kb")
+            fixed = self.cfg.get("fixed_m_fg_kb") or {}
+            if pkg in fixed:                 # same denominator for every run of the matrix
+                self.m_fg[pkg] = int(fixed[pkg])
+                self.a_fg[pkg] = int((self.cfg.get("fixed_a_fg_kb") or {}).get(pkg, self.a_fg[pkg]))
             self.l_cold[pkg] = res.get("total_time_ms")
             self.emit({"type": "warmup", "pkg": pkg, "launch": res, "app": app.to_dict(),
                        "system": s["system"]})
@@ -303,9 +323,16 @@ class Experiment:
         dev.home()   # otherwise the first request may already be in the foreground (FRONT)
         time.sleep(1)
         self.B_kb = self.cfg["eta"] * sum(self.m_fg.values())
-        self.emit({"type": "budget", "eta": self.cfg["eta"], "budget_kb": self.B_kb,
+        fixed = self.cfg.get("fixed_m_fg_kb") or {}
+        source = "fixed" if fixed and all(p in fixed for p in self.apps) else ("mixed" if fixed else "measured")
+        if fixed:
+            missing = [p for p in self.apps if p not in fixed]
+            if missing:
+                self.log.warn(f"fixed_m_fg_kb has no entry for {missing}; those use this run's measurement")
+        self.emit({"type": "budget", "eta": self.cfg["eta"], "budget_kb": self.B_kb, "m_fg_source": source,
                    "sum_m_fg_kb": sum(self.m_fg.values()), "m_fg_kb": self.m_fg, "a_fg_kb": self.a_fg})
-        self.log.ok(f"budget B = {self.cfg['eta']} x {sum(self.m_fg.values()) // 1024} MB = {int(self.B_kb) // 1024} MB")
+        self.log.ok(f"budget B = {self.cfg['eta']} x {sum(self.m_fg.values()) // 1024} MB = {int(self.B_kb) // 1024} MB "
+                    f"(m_fg {source})")
         return self.B_kb
 
     # ------------------------------------------------------------------ step
@@ -405,6 +432,15 @@ class Experiment:
         s2 = self.dev.sample(self.apps)
         pids_now = {p: set(s2["apps"][p].to_dict()["pids"]) for p in self.apps}
         killed = [p for p in self.apps if self.prev_pids.get(p) and not pids_now[p]]
+        kill_info = {}
+        for p in killed:          # ask ActivityManager why (LOW_MEMORY? ANR? FREEZER? ...)
+            try:
+                ents = self.dev.exit_info(p, self.prev_pids.get(p))
+                if ents:
+                    e = ents[0]
+                    kill_info[p] = {k: e.get(k) for k in ("timestamp", "pid", "reason", "subreason", "description")}
+            except RESUMABLE_ERRORS:
+                pass
         self.prev_pids = pids_now
         # measured background footprint: resident PSS + physical share of swapped-out pages
         M_bg = sum((s2["apps"][p].total("pss_kb") + rho * s2["apps"][p].total("swap_pss_kb")) * 1024
@@ -417,7 +453,7 @@ class Experiment:
                "rho_est": rho, "budget_kb": self.B_kb, "M_bg_kb": M_bg / 1024,
                "M_model_kb": M_model / 1024, "budget_violation": M_bg > B,
                "decision_ms": round(decision_ms, 3), "action_ms": round(action_ms, 1),
-               "step_s": round(time.time() - t_step, 2), "killed_since_prev": killed,
+               "step_s": round(time.time() - t_step, 2), "killed_since_prev": killed, "kill_info": kill_info,
                "after_launch": {"system": s1["system"], "apps": {p: a.to_dict() for p, a in s1["apps"].items()}},
                "after_dwell": {"system": s2["system"], "apps": {p: a.to_dict() for p, a in s2["apps"].items()}},
                "tau_hat": pol.predicted_next_use(req)}
@@ -439,7 +475,15 @@ class Experiment:
             act += f" bal {acts['balloon_mb']}MB"
         mbg, b = int(rec["M_bg_kb"] / 1024), int(rec["budget_kb"] / 1024)
         viol = " VIOL" if rec["budget_violation"] else ""
-        killed = f" | killed: {','.join(short_pkg(k) for k in rec['killed_since_prev'])}" if rec["killed_since_prev"] else ""
+        if rec["killed_since_prev"]:
+            parts = []
+            for k in rec["killed_since_prev"]:
+                ki = (rec.get("kill_info") or {}).get(k) or {}
+                why = ki.get("description") or ki.get("reason")
+                parts.append(short_pkg(k) + (f"[{why}]" if why else ""))
+            killed = " | killed: " + ",".join(parts)
+        else:
+            killed = ""
         line = (f"[{rec['t'] + 1:3d}/{T} {fmt_dur(time.time() - self.t_start):>6} ETA {fmt_dur(eta_s):>6}] "
                 f"{short_pkg(rec['req'], 18)} {state:>7} {str(ms):>5} ms <-{src:<4} "
                 f"| S={len(rec['resident']):2d} frz={len(rec['frozen']):2d} zram={len(rec['compressed']):2d} "
@@ -464,7 +508,13 @@ class Experiment:
         else:
             self.log.head(f"run {self.cfg['name']}: policy={self.cfg['policy']} eta={self.cfg['eta']} "
                           f"T={T_cfg} trace={self.cfg['trace']['kind']} seed={self.cfg['trace']['seed']} -> {path}")
-            self.prepare()
+            try:
+                self.prepare()
+            except PreflightError:
+                self.close()
+                if os.path.exists(path) and os.path.getsize(path) == 0:
+                    os.remove(path)          # nothing was measured; do not leave an empty result behind
+                raise
             self.warmup()
             self.trace = make_trace(self.apps, self.cfg["trace"])
             self.emit({"type": "trace", "trace": self.trace})
@@ -541,7 +591,11 @@ class Experiment:
             return
         self.log.head(f"done {self.cfg['name']}: {r['T']} steps in {fmt_dur(time.time() - self.t_start)} -> {self.path}")
         self.log.ok(f"launches: HOT {r['n_hot']} WARM {r['n_warm']} COLD {r['n_cold']} "
-                    f"TIMEOUT {r['n_timeout']} FRONT {r['n_front']} | killed by lmkd {r['n_killed']}")
+                    f"TIMEOUT {r['n_timeout']} FRONT {r['n_front']} | processes killed by the system {r['n_killed']}"
+                    + (f" ({r['kill_reasons']})" if r.get("kill_reasons") else ""))
+        if r["n_killed"]:
+            self.log.warn(f"{r['n_killed']} kills were not ours - each one turns a later resume into a COLD start. "
+                          f"Reasons above come from `dumpsys activity exit-info`; see docs/02 §6 for what to do per reason")
         self.log.ok(f"resume latency P50/P95/P99 {r['lat_p50_ms']}/{r['lat_p95_ms']}/{r['lat_p99_ms']} ms "
                     f"(resident P50 {r['lat_resident_p50_ms']}, from zram P50 {r['lat_compressed_p50_ms']})")
         self.log.ok(f"background PSS avg {r['bg_pss_avg_mb']} MB (peak {r['bg_pss_peak_mb']}) vs budget "

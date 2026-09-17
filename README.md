@@ -50,15 +50,21 @@ python3 run_experiment.py configs/emulator_base.json --probe
 
 # 6. 单次实验 / 参数扫描 (控制台输出同时写入 results/<name>.log)
 python3 run_experiment.py configs/emulator_base.json --policy landlord --eta 0.3 --T 40 --name landlord_eta0.3
-POLICIES="none lru landlord hybrid" ETAS="0.2 0.3 0.5" scripts/run_matrix.sh configs/emulator_base.json 40
+#    矩阵 = 策略 x η x 种子, 同一目录、同一客体内存、同一预算分母 (第一格的 warmup m_fg 复用到所有格)
+POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" scripts/run_matrix.sh configs/emulator_base.json 40
 
 # 6b. 断点续跑: Ctrl+C / 模拟器崩溃 / adb 超时后, 从最后一个完成的步骤继续 (轨迹、策略状态、冻结/压缩集合全部恢复)
 python3 run_experiment.py configs/emulator_base.json --resume results/landlord_eta0.3.jsonl
 OUT=results/matrix_20260914-005939 scripts/run_matrix.sh configs/emulator_base.json 40   # 跳过已完成格子, 续跑未完成的
 
-# 7. 汇总
-python3 -m cf.analyze results/matrix_*/*.jsonl --csv summary.csv --pareto pareto.csv --plot pareto.png
+# 7. 汇总 (只汇总一个矩阵目录; 不同客体内存的矩阵不要用通配符混在一起)
+python3 -m cf.analyze results/matrix_<stamp>/*.jsonl --csv summary.csv --agg summary_agg.csv --pareto pareto.csv --plot pareto.png
+python3 -m cf.analyze results/matrix_<stamp>/*.jsonl --x eta --plot pareto_eta.png     # 横轴改为实际达到的 η
 ```
+
+`run_experiment.py` 在开跑前做 **严格 preflight**: 系统 cached-apps freezer 仍在启用 (`settings get global cached_apps_freezer`
+不是 `disabled`) 或模拟器在软件渲染 (SwiftShader) 时直接拒绝启动, 因为这两种状态下测出的数字没有意义
+(见 docs/02 §8); 明确要测 "Android 默认" 基线时加 `--no-strict`。
 
 运行时每步打印一行进度, 例如
 
@@ -67,8 +73,9 @@ python3 -m cf.analyze results/matrix_*/*.jsonl --csv summary.csv --pareto pareto
 ```
 
 (第 12/40 步, 已用 5m32s, 预计剩余 13m10s; Gmail 从 zram 恢复用了 1348 ms; 常驻 4 / 冻结 11 / 压缩 10 个应用; 后台占用 331 MB
-对预算 428 MB; 本步冻结 1 个、回收 1 个, 动作耗时 0.4 s)。开始前的 preflight 会对 "系统 freezer 未关"、"客体内存 < 4 GB"、
-"软件渲染"、"无 swap" 等已知干扰因素给出 WARN, 结束时打印 HOT/WARM/COLD 计数、时延 P50/P95/P99、后台 PSS 与预算、swap 读写的摘要。
+对预算 428 MB; 本步冻结 1 个、回收 1 个, 动作耗时 0.4 s)。有进程被系统杀掉时该行会带 `killed: calendar[bg anr]` ——
+方括号里是 ActivityManager 记录的死亡原因 (`dumpsys activity exit-info`), 汇总表 `kill_reasons` 列统计各原因次数。
+结束时打印 HOT/WARM/COLD 计数、时延 P50/P95/P99、后台 PSS 与预算、swap 读写的摘要。
 
 ## 合成验证 (无需模拟器)
 
@@ -84,8 +91,9 @@ python3 -m pytest -q tests
 
 ## 验证状态
 
-* `tests/` (24 项): /proc、`am start -W` 输出解析 (含真实抓取的 HOT / FRONT / TIMEOUT 样本), 策略约束, Bellman DP 与穷举一致,
-  在线策略代价 ≥ OPT, runner 端到端 (假设备), 崩溃后断点续跑 (landlord / hybrid / lru 三种策略状态恢复、无重复无缺步、计数器回绕)。
+* `tests/` (29 项): /proc、`am start -W` 输出解析 (含真实抓取的 HOT / FRONT / TIMEOUT 样本), 策略约束, Bellman DP 与穷举一致,
+  在线策略代价 ≥ OPT, runner 端到端 (假设备), 崩溃后断点续跑 (landlord / hybrid / lru 三种策略状态恢复、无重复无缺步、计数器回绕), 严格 preflight、固定预算分母、
+  kill 原因采集、多种子 / 多客体内存的汇总聚合。
 * 在 Linux 主机上用 **Android 15 (API 35) google_apis 系统镜像** 实测通过: `adb root`、cgroup v2 `cgroup.freeze` 冻结/解冻、
   memcg v1 每应用回收 (Clock: PSS 42 MB → 35 kB, SwapPss → 22 MB, zram/pswpout 同步增长)、解冻后按需换回 (majflt/pswpin)、
   tmpfs 气球、完整 `run_experiment.py` 循环与 `cf.analyze` 汇总。该主机无可用 KVM, 模拟器以软件模拟运行, 因而绝对时延无意义;

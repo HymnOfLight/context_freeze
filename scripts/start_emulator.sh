@@ -6,6 +6,13 @@
 # Examples
 #   scripts/start_emulator.sh cf_api35 6144                  # default: 6 GB guest (16 GB host)
 #   scripts/start_emulator.sh cf_api35 3072 -no-window       # memory-pressure variant, headless
+#   GPU=auto scripts/start_emulator.sh                       # let the emulator pick (may drop to software GL)
+#
+# GPU: the default is `-gpu host`, NOT `-gpu auto`.  With `auto` the emulator silently switches to
+# SwiftShader software rendering whenever the host has < 5 GB free ("Software GL rendering will be
+# used due to system memory pressure"), which happened with a 6 GB guest on a 16 GB Mac and made
+# every app launch ~1 s slower for reasons unrelated to memory.  `host` uses the Apple GPU through
+# Metal regardless of host memory; the runner's preflight aborts if software rendering is detected.
 #
 # Why 6 GB: with 3 GB the Android lmkd kills the compressed background apps long before our
 # controller gets to decide anything (dozens of COLD starts per run in earlier logs), and the
@@ -61,9 +68,10 @@ if pgrep -f "qemu-system.*-avd $AVD" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "== starting $AVD with ${RAM} MB RAM, 4 cores (log: $LOG)"
+GPU="${GPU:-host}"
+echo "== starting $AVD with ${RAM} MB RAM, 4 cores, -gpu $GPU (log: $LOG)"
 nohup "$EMULATOR" -avd "$AVD" -memory "$RAM" -cores 4 -no-snapshot -no-boot-anim \
-  -no-audio -gpu auto -netdelay none -netspeed full "$@" > "$LOG" 2>&1 &
+  -no-audio -gpu "$GPU" -netdelay none -netspeed full "$@" > "$LOG" 2>&1 &
 echo $! > results/emulator.pid
 
 "$ADB" wait-for-device
@@ -79,9 +87,12 @@ for _ in $(seq 1 240); do
     sleep 2
     if grep -qi "software gl\|swiftshader\|llvmpipe" "$LOG"; then
       echo "!! the emulator fell back to SOFTWARE rendering (see $LOG). Resume latencies will be"
-      echo "   dominated by the CPU rasteriser. Free host memory and restart, or pass -gpu host."
+      echo "   dominated by the CPU rasteriser and run_experiment.py will refuse to start (strict preflight)."
+      echo "   Free host memory (close IDE/browser) and restart; GPU=$GPU was requested."
     else
-      echo "== renderer: $("$ADB" shell dumpsys SurfaceFlinger 2>/dev/null | grep -m1 'GLES:' | tr -d '\r' | cut -c1-110)"
+      R="$("$ADB" shell dumpsys SurfaceFlinger 2>/dev/null | grep -m1 'GLES:' | tr -d '\r' | cut -c1-110)"
+      echo "== renderer: $R"
+      case "$R" in *[Ss]wift[Ss]hader*|*llvmpipe*) echo "!! guest reports a software renderer; check $LOG";; esac
     fi
     exit 0
   fi

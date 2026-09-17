@@ -18,6 +18,7 @@
     "org.schabi.newpipe",
     "org.wikipedia"
   ],
+  "_comment_baseline": "policy none = 观测基线. 系统 freezer 关闭时是 '不冻结' 基线; 系统 freezer 开启 (prepare_device.sh --system-freezer enabled) 时是 'Android 默认' 基线, 此时需 run_experiment.py --no-strict (或 run_matrix.sh NO_STRICT=1), 否则严格 preflight 会拒绝开跑.",
   "policy": "none",
   "eta": 1.0,
   "trace": {

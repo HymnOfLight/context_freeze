@@ -115,3 +115,44 @@ def parse_pid_list(text: str) -> list[int]:
 def parse_uid_from_dumpsys(text: str) -> Optional[int]:
     m = re.search(r"userId=(\d+)", text)
     return int(m.group(1)) if m else None
+
+
+_EXIT_HDR = re.compile(r"ApplicationExitInfo #(\d+):")
+_EXIT_KV = re.compile(r"(\w+)=([^\s]+(?: \([^)]*\))?)")
+
+
+def parse_exit_info(text: str) -> list[dict]:
+    """`dumpsys activity exit-info <pkg>` -> [{timestamp, pid, process, reason, subreason, description}, ...]
+    (most recent first, as printed by ActivityManager)."""
+    out: list[dict] = []
+    cur: Optional[dict] = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if _EXIT_HDR.search(line):
+            cur = {}
+            out.append(cur)
+            continue
+        if cur is None or not line:
+            continue
+        if line.startswith("description="):
+            cur["description"] = line[len("description="):].strip()
+            continue
+        if line.startswith("timestamp="):
+            m = re.search(r"timestamp=(\S+ \S+)", line)
+            if m:
+                cur["timestamp"] = m.group(1)
+        for k, v in _EXIT_KV.findall(line):
+            if k == "pid":
+                try:
+                    cur["pid"] = int(v)
+                except ValueError:
+                    pass
+            elif k == "process":
+                cur["process"] = v
+            elif k in ("reason", "subreason", "importance", "status"):
+                m = re.match(r"(-?\d+)(?: \((\w+)\))?", v)
+                if m:
+                    cur[k] = m.group(2) or m.group(1)
+                    if m.group(2):
+                        cur[k + "_code"] = int(m.group(1))
+    return [e for e in out if e]
