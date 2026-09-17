@@ -29,7 +29,17 @@ from cf.adb import Adb
 from cf.device import Device
 from cf.logging_util import Logger
 from cf.policies import POLICIES
-from cf.runner import Experiment, ResumeError, load_config, run_from_config
+from cf.runner import Experiment, PreflightError, ResumeError, load_config, run_from_config
+
+
+def load_m_fg(path: str) -> tuple[dict, dict]:
+    """Per-app m_fg / a_fg (kB) from the 'budget' record of an earlier result file."""
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if '"type": "budget"' in line:
+                r = json.loads(line)
+                return r["m_fg_kb"], r.get("a_fg_kb", {})
+    raise SystemExit(f"{path}: no budget record (run did not reach the end of warmup)")
 
 
 def main(argv=None) -> int:
@@ -46,6 +56,13 @@ def main(argv=None) -> int:
     ap.add_argument("--sweep-eta", type=float, nargs="+")
     ap.add_argument("--T", type=int)
     ap.add_argument("--seed", type=int)
+    ap.add_argument("--seeds", type=int, nargs="+", help="replicate every (policy, eta) cell with these trace seeds")
+    ap.add_argument("--m-fg-from", metavar="JSONL",
+                    help="reuse the warmup m_fg (per-app foreground PSS) of an earlier run so all runs share the same "
+                         "budget denominator; typically the first run of a matrix")
+    ap.add_argument("--no-strict", action="store_true",
+                    help="only warn (instead of aborting) when the system freezer is active or the GPU is software-"
+                         "rendered - use for the explicit 'Android default' baseline")
     ap.add_argument("--name", help="result file stem (default <policy>_eta<eta>_<timestamp>)")
     ap.add_argument("--out-dir", help="override config out_dir (default results/)")
     ap.add_argument("--resume", nargs="?", const=True, default=False, metavar="JSONL",
@@ -59,6 +76,12 @@ def main(argv=None) -> int:
     base = load_config(args.config)
     if args.out_dir:
         base["out_dir"] = args.out_dir
+    if args.no_strict:
+        base["strict_preflight"] = False
+    if args.m_fg_from:
+        base["fixed_m_fg_kb"], base["fixed_a_fg_kb"] = load_m_fg(args.m_fg_from)
+        print(f"budget denominator fixed from {args.m_fg_from}: "
+              f"sum m_fg = {sum(base['fixed_m_fg_kb'].values()) // 1024} MB over {len(base['fixed_m_fg_kb'])} apps")
     if args.probe:
         dev = Device(Adb(serial=args.serial, verbose=args.verbose))
         print("root:", dev.adb.ensure_root())
@@ -82,19 +105,27 @@ def main(argv=None) -> int:
     else:
         policies = args.policies or [args.policy or base.get("policy", "landlord")]
         etas = args.sweep_eta or [args.eta if args.eta is not None else base.get("eta", 0.3)]
+        seeds = args.seeds or [args.seed]
         jobs = []
         for pol in policies:
             for eta in etas:
-                cfg = json.loads(json.dumps(base))
-                cfg["policy"] = pol
-                cfg["eta"] = eta
-                if args.T:
-                    cfg.setdefault("trace", {})["T"] = args.T
-                if args.seed is not None:
-                    cfg.setdefault("trace", {})["seed"] = args.seed
-                cfg["name"] = args.name if (args.name and len(policies) * len(etas) == 1) else \
-                    f"{pol}_eta{eta}_{time.strftime('%Y%m%d-%H%M%S')}"
-                jobs.append((cfg["name"], cfg))
+                for seed in seeds:
+                    cfg = json.loads(json.dumps(base))
+                    cfg["policy"] = pol
+                    cfg["eta"] = eta
+                    if args.T:
+                        cfg.setdefault("trace", {})["T"] = args.T
+                    if seed is not None:
+                        cfg.setdefault("trace", {})["seed"] = seed
+                    single = len(policies) * len(etas) * len(seeds) == 1
+                    if args.name and single:
+                        cfg["name"] = args.name
+                    elif args.name and args.seeds:
+                        cfg["name"] = f"{args.name}_s{seed}"
+                    else:
+                        cfg["name"] = f"{pol}_eta{eta}" + (f"_s{seed}" if args.seeds else "") + \
+                            f"_{time.strftime('%Y%m%d-%H%M%S')}"
+                    jobs.append((cfg["name"], cfg))
 
     outputs, failed = [], []
     for i, (name, cfg) in enumerate(jobs):
@@ -129,6 +160,9 @@ def main(argv=None) -> int:
         except ResumeError as e:
             log.err(str(e))
             failed.append(path)
+        except PreflightError as e:
+            log.err(f"{e} - stopping the sweep (every following run would hit the same problem)")
+            return 2
         except Exception as e:      # noqa: BLE001 - keep the sweep going, report at the end
             log.err(f"run failed: {type(e).__name__}: {str(e)[:300]}")
             log.warn(f"continue this run later with: python3 run_experiment.py {args.config} --resume {path}")

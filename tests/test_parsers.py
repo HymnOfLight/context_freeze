@@ -91,3 +91,33 @@ def test_resolve_activity():
     out = "priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\ncom.android.settings/.Settings\n"
     assert P.parse_resolve_activity(out) == "com.android.settings/.Settings"
     assert P.parse_resolve_activity("No activity found\n") is None
+
+
+def test_parse_exit_info():
+    from cf.parsers import parse_exit_info
+    txt = """ACTIVITY MANAGER PROCESS EXIT INFO (dumpsys activity exit-info)
+  package: com.google.android.calendar
+    Historical Process Exit for uid=10123
+      ApplicationExitInfo #0:
+        timestamp=2026-09-16 16:00:10.123 pid=4321 realUid=10123 packageUid=10123 definingUid=10123 user=0
+        process=com.google.android.calendar
+        reason=6 (ANR) subreason=0 (UNKNOWN) status=0
+        importance=400 pss=40MB rss=90MB
+        description=bg anr
+        state=empty
+        trace=null
+      ApplicationExitInfo #1:
+        timestamp=2026-09-16 15:57:10.000 pid=4000 realUid=10123 packageUid=10123 definingUid=10123 user=0
+        process=com.google.android.calendar
+        reason=10 (USER_REQUESTED) subreason=0 (UNKNOWN) status=0
+        importance=100 pss=0B rss=0B
+        description=stop com.google.android.calendar due to from pid 999
+        state=empty
+        trace=null
+"""
+    ents = parse_exit_info(txt)
+    assert len(ents) == 2
+    assert ents[0]["pid"] == 4321 and ents[0]["reason"] == "ANR" and ents[0]["reason_code"] == 6
+    assert ents[0]["description"] == "bg anr" and ents[0]["timestamp"].startswith("2026-09-16 16:00")
+    assert ents[1]["reason"] == "USER_REQUESTED" and ents[1]["description"].startswith("stop ")
+    assert parse_exit_info("") == []

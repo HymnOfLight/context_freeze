@@ -49,8 +49,16 @@ class FakeDevice(Device):
         self.caps = Caps(kernel="6.6.0-fake", android_sdk=35, cgroup_v2_root="/sys/fs/cgroup",
                          v2_controllers=["memory", "freezer"], freezer="cgroup.freeze",
                          reclaim_methods=["memcg_v2.memory.reclaim", "balloon"], zram=True,
-                         mem_total_kb=3 * 1024 * 1024, cpu_count=4)
+                         mem_total_kb=self.mem_total_mb * 1024, cpu_count=4,
+                         cached_apps_freezer=self.system_freezer)
         return self.caps
+
+    def renderer(self):
+        return self.gles
+
+    def exit_info(self, pkg, pids=None):
+        return [{"timestamp": "2026-01-01 00:00:00.000", "pid": next(iter(pids)) if pids else 0,
+                 "reason": "ANR", "subreason": "UNKNOWN", "description": "bg anr"}] if self.kill_reason else []
 
     def uid_of(self, pkg):
         return self.state[pkg]["uid"] if pkg in self.state else None
@@ -70,6 +78,11 @@ class FakeDevice(Device):
 
     fail_at_launch: int | None = None     # raise AdbError on the n-th launch (crash injection)
     launches = 0
+    mem_total_mb = 3 * 1024
+    system_freezer = "disabled"           # preflight passes by default
+    gles = "GLES: Apple, Apple M4, OpenGL ES 3.2"
+    kill_reason = True
+    kill_every: int | None = None         # kill the least recently launched bg app every n launches
 
     def launch(self, pkg):
         self.launches += 1
@@ -90,6 +103,11 @@ class FakeDevice(Device):
         else:
             state, ms = "HOT", 90 + self.rng.randint(0, 40)
         s["frozen"] = False
+        if self.kill_every and self.launches % self.kill_every == 0:
+            victims = [p for p, st in self.state.items() if st["pid"] and p != pkg]
+            if victims:
+                v = self.state[victims[0]]
+                v["pid"], v["swap"], v["frozen"] = None, 0, False
         return {"status": "ok", "launch_state": state, "total_time_ms": ms, "wait_time_ms": ms + 10,
                 "component": f"{pkg}/.Main", "host_elapsed_ms": ms + 30}
 
