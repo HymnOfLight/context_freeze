@@ -3,6 +3,8 @@
 #
 #   scripts/run_matrix.sh [CONFIG=configs/emulator_base.json] [T=40]
 #   POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" scripts/run_matrix.sh
+#   SCENARIOS="office social commute shopping evening day" scripts/run_matrix.sh configs/cn_apps.json 60
+#       (mainland-China app set with usage scenarios; one cell per policy x eta x scenario x seed)
 #
 # What the script guarantees (these are the things that made the first Pareto plot unreadable):
 #   * one matrix = one output directory = one guest-RAM configuration; cf.analyze is run on THIS
@@ -34,6 +36,7 @@ T="${2:-40}"
 POLICIES="${POLICIES:-none lru lfu landlord markov hybrid}"
 ETAS="${ETAS:-0.25 0.35 0.5}"
 SEEDS="${SEEDS:-1 2 3}"
+SCENARIOS="${SCENARIOS:-}"          # empty: the trace kind of the config (zipf/markov/...)
 OUT="${OUT:-results/matrix_$(date +%Y%m%d-%H%M%S)}"
 M_FG_FROM="${M_FG_FROM:-}"
 EXTRA=()
@@ -57,18 +60,19 @@ if [ -z "$M_FG_FROM" ]; then
   done
 fi
 
-echo "== matrix dir: $OUT   (T=$T, policies: $POLICIES, etas: $ETAS, seeds: $SEEDS)"
+echo "== matrix dir: $OUT   (T=$T, policies: $POLICIES, etas: $ETAS, seeds: $SEEDS${SCENARIOS:+, scenarios: $SCENARIOS})"
 [ -n "$M_FG_FROM" ] && echo "== budget denominator (m_fg) from: $M_FG_FROM"
 echo "== interrupt any time; re-run with:  OUT=$OUT $0 $CONFIG $T"
 FAILED=0
 
-run_one() { # name policy eta seed
-  local name="$1" pol="$2" eta="$3" seed="$4" rc
-  local mfg=()
+run_one() { # name policy eta seed [scenario]
+  local name="$1" pol="$2" eta="$3" seed="$4" sc="${5:-}" rc
+  local mfg=() scn=()
   [ -n "$M_FG_FROM" ] && mfg=(--m-fg-from "$M_FG_FROM")
+  [ -n "$sc" ] && scn=(--scenario "$sc")
   set +e
   python3 -u run_experiment.py "$CONFIG" --policy "$pol" --eta "$eta" --T "$T" --seed "$seed" \
-    --name "$name" --out-dir "$OUT" "${mfg[@]}" "${EXTRA[@]}" 2>&1 | tee -a "$OUT/${name}.console.log"
+    --name "$name" --out-dir "$OUT" "${mfg[@]}" "${scn[@]}" "${EXTRA[@]}" 2>&1 | tee -a "$OUT/${name}.console.log"
   rc=${PIPESTATUS[0]}
   set -e
   if [ "$rc" = 130 ]; then                     # Ctrl+C: stop the whole sweep, keep checkpoints
@@ -86,16 +90,20 @@ run_one() { # name policy eta seed
   fi
 }
 
-# baseline "none" ignores the budget: run it once per seed with eta=1.0
+# baseline "none" ignores the budget: run it once per seed (and scenario) with eta=1.0
 if echo " $POLICIES " | grep -q " none "; then
-  for seed in $SEEDS; do run_one "none_eta1.0_s${seed}" none 1.0 "$seed"; done
+  for sc in ${SCENARIOS:-""}; do
+    for seed in $SEEDS; do run_one "none${sc:+_$sc}_eta1.0_s${seed}" none 1.0 "$seed" "$sc"; done
+  done
   POLICIES=$(echo "$POLICIES" | sed 's/\bnone\b//')
 fi
 
 for pol in $POLICIES; do
   for eta in $ETAS; do
-    for seed in $SEEDS; do
-      run_one "${pol}_eta${eta}_s${seed}" "$pol" "$eta" "$seed"
+    for sc in ${SCENARIOS:-""}; do
+      for seed in $SEEDS; do
+        run_one "${pol}${sc:+_$sc}_eta${eta}_s${seed}" "$pol" "$eta" "$seed" "$sc"
+      done
     done
   done
 done
