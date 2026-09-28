@@ -16,29 +16,26 @@
 
 ### 1.1 安装
 
-镜像里没有这些应用, 它们也不在 Google Play; 各家官网提供 APK 但没有稳定的直链, 因此脚本不自动下载。两种来源:
-
-推荐从自己的手机导出 (`pm path` 拉取 base.apk + split_*.apk 再装进模拟器), 完整步骤:
+镜像里没有这些应用, 它们也不在 Google Play。`scripts/install_cn_apps.py --download` 从国内应用商店自动下载并安装:
 
 ```bash
 cd ~/context_freeze && source scripts/env.sh
-export ANDROID_SERIAL=emulator-5554            # 两台设备同时连着时, 所有 adb 命令默认指向模拟器
+export ANDROID_SERIAL=emulator-5554
 
-# 手机: 设置 > 关于手机 > 连点 "版本号" 7 次 -> 开发者选项 > 打开 "USB 调试"; 数据线连 Mac; 手机弹窗选 "允许"
-$ADB devices -l                                 # 应看到两行 device: emulator-5554 和手机 (第一列即 serial)
-PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}'); echo "phone=$PHONE"
-
-python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json   # 拉取 14 个应用并装进模拟器
-python3 scripts/install_cn_apps.py --list        # 核对: installed 列; 缺的应用附官网下载页
+python3 scripts/install_cn_apps.py --download --config configs/cn_apps.json   # 14 个应用, 约 3.2 GB, 可断点续传
+python3 scripts/install_cn_apps.py --list        # 核对: installed 列
 scripts/first_run_cn_apps.sh configs/cn_apps.json                # 逐个手工点掉隐私协议 / 登录 (微信 QQ 用备用账号)
 python3 run_experiment.py configs/cn_apps.json --probe          # uid / 启动 Activity 都能解析
 python3 run_experiment.py configs/cn_apps.json --scenario list  # 每个场景实际会用到的应用
 ```
 
-没有手机时: 打开 `--list` 里的官网页面, 把下载的 `.apk` / `.xapk` 放进仓库的 `apks/` 目录, 然后 `python3 scripts/install_cn_apps.py`, 后续步骤相同。拉过一次的 APK 会留在 `apks/<包名>/`, 重建 AVD 后不带参数再跑一次即可。
+下载来源与 ABI 检查:
 
-`--from-phone` 不加 `--config` 会拉取目录里全部 30 个应用 (约 6 GB, AVD 的 /data 只有 8 GB, 不建议); 也可以只列包名:
-`python3 scripts/install_cn_apps.py --from-phone "$PHONE" com.tencent.mm com.sina.weibo`。
+* **腾讯应用宝** (`upage.html5.qq.com/wechat-apkinfo`, 返回官方包的 url / 版本 / 大小 / md5) → **酷安** (`api.coolapk.com/v6/apk/download`, 302 到同一 CDN 的 64 位包) → 少数官网直链 (哔哩哔哩 `dl.hdslb.com/.../android64/`, 支付宝 `t.alipayobjects.com`)。
+* API 31 起 arm64 模拟器镜像是**纯 64 位** (`ro.product.cpu.abilist=arm64-v8a`), 带 armeabi-v7a 原生库的包装不上 (`INSTALL_FAILED_NO_MATCHING_ABIS`)。应用宝给 小红书 / 哔哩哔哩 / 京东 / 支付宝 / 钉钉 的恰好是 32 位包, 所以下载前脚本先用两次 Range 请求读远端 APK 的 ZIP 中央目录, 看 `lib/<abi>/` 与模拟器的 abilist 是否有交集, 不匹配就换下一个来源, 不浪费流量。`--download --dry-run` 只打印每个来源会给什么, 不下载。
+* 下载到 `apks/<包名>/<包名>-<版本>.apk`, 写到 `.part` 完成后校验大小 / md5 (应用宝) / ZIP 结构再改名; 中断后重跑同一条命令用 Range 续传; 目录里已有 APK 的应用直接跳过。
+* 商店接口不是公开 API, 某天失效时 `--download` 会对该应用打印 `no installable build found`; 这时手工从 `--list` 给出的官网下载 `.apk` / `.xapk` 放进 `apks/`, 不带参数运行即可; 或从自己的手机导出: `--from-phone <serial> --config configs/cn_apps.json` (手机开 USB 调试, `$ADB devices -l` 里状态为 `device`; 用 `pm path` 拉 base.apk + split_*.apk)。
+* 不加 `--config` 会处理目录里全部 30 个应用 (约 6 GB, 不建议; AVD `/data` 默认 8 GB, `bootstrap_cn.sh` 建的是 16 GB); 也可以只列包名: `python3 scripts/install_cn_apps.py --download com.tencent.mm com.sina.weibo`。
 
 * 模拟器必须是 **arm64-v8a** 镜像 (M4 上 `scripts/setup_avd.sh` 创建的就是): 国产应用大多只带 arm 原生库, x86_64 镜像上会 `INSTALL_FAILED_NO_MATCHING_ABIS` 或走 ARM 翻译 (极慢且内存行为失真)。
 * 安装用 `-g` 一次性授予运行时权限, 减少首次启动的弹窗。

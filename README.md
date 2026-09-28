@@ -48,11 +48,9 @@ python3 scripts/install_fdroid_apps.py
 scripts/list_launchable.sh                        # 核对 configs/emulator_base.json 里的包名
 
 # 4b. 国产应用集合 (微信/QQ/微博/网易云音乐/网易邮箱大师/抖音/小红书/哔哩哔哩/淘宝/京东/支付宝/钉钉/WPS/高德):
-#     从自己的手机导出 APK 装进模拟器, 再手工过一遍首次启动的隐私协议 / 登录 —— 完整可复制的命令见下方 "国产应用: 从手机导出"
+#     自动从应用宝 / 酷安下载 64 位 APK 并安装 (约 3.2 GB, 可断点续传), 再手工过一遍首次启动的隐私协议 / 登录
 export ANDROID_SERIAL=emulator-5554
-$ADB devices -l                                   # 手机必须出现且状态是 device (unauthorized = 去手机上点 "允许"; 只有模拟器 = 没连上 / 没开 USB 调试)
-PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}'); echo "phone=$PHONE"
-python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json   # PHONE 为空时会报错退出, 不会静默跳过
+python3 scripts/install_cn_apps.py --download --config configs/cn_apps.json
 scripts/first_run_cn_apps.sh configs/cn_apps.json
 
 # 5. 探测设备能力 (freezer / memcg / zram / 各应用 uid 与启动 Activity)
@@ -106,28 +104,28 @@ FULL=1 bash scripts/bootstrap_cn.sh     # 完整矩阵: η {0.25, 0.35, 0.5} x �
 ```
 
 `scripts/bootstrap_cn.sh` 按顺序完成: 安装 SDK / Java → 创建 6 GB 客体、16 GB /data 的 AVD → 启动 → 关系统 freezer、开 2 GB zram →
-从手机 (或 `apks/`) 安装 14 个应用 → 首次启动手工过协议 (只做一次) → probe → 场景 × 策略 × η × 种子矩阵 → 汇总与 Pareto 图。
-每一步都会检查是否已完成, 中断后重新运行同一条命令即可续跑; 只有插手机和点隐私协议两步需要人。默认矩阵就是 **初次实验** (≤ 10 小时,
+自动下载并安装 14 个应用 (有手机连着时改为从手机导出) → 首次启动手工过协议 (只做一次) → probe → 场景 × 策略 × η × 种子矩阵 → 汇总与 Pareto 图。
+每一步都会检查是否已完成, 中断后重新运行同一条命令即可续跑; 只有点隐私协议 / 登录这一步需要人。默认矩阵就是 **初次实验** (≤ 10 小时,
 docs/04 §5 说明了为什么这样裁: 保留全部场景与策略, η 取两端、种子取 1 个、不减 T), 开跑前 `run_matrix.sh` 会打印格数和预计时长。手动逐步执行见下。
 
-## 国产应用: 从手机导出并完成配置 (手动逐步)
+## 国产应用: 下载、安装并完成配置 (手动逐步)
 
 ```bash
 cd ~/context_freeze && source scripts/env.sh
-export ANDROID_SERIAL=emulator-5554            # 两台设备同时连着时, 所有 adb 命令默认指向模拟器
+export ANDROID_SERIAL=emulator-5554
 
-# 手机: 设置 > 关于手机 > 连点 "版本号" 7 次 -> 开发者选项 > 打开 "USB 调试"; 数据线连 Mac; 手机弹窗选 "允许"
-$ADB devices -l                                 # 应看到两行 device: emulator-5554 和手机 (第一列即 serial)
-PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}'); echo "phone=$PHONE"
-
-python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json   # 拉取 14 个应用并装进模拟器
-python3 scripts/install_cn_apps.py --list        # 核对: installed 列; 缺的应用附官网下载页
+python3 scripts/install_cn_apps.py --download --config configs/cn_apps.json   # 自动下载 14 个 64 位 APK (~3.2 GB) 并装进模拟器
+python3 scripts/install_cn_apps.py --list        # 核对: installed 列
 scripts/first_run_cn_apps.sh configs/cn_apps.json                # 逐个手工点掉隐私协议 / 登录 (微信 QQ 用备用账号)
 python3 run_experiment.py configs/cn_apps.json --probe          # uid / 启动 Activity 都能解析
 python3 run_experiment.py configs/cn_apps.json --scenario list  # 每个场景实际会用到的应用
 ```
 
-没有手机时: 打开 `--list` 里的官网页面, 把下载的 `.apk` / `.xapk` 放进仓库的 `apks/` 目录, 然后 `python3 scripts/install_cn_apps.py`, 后续步骤相同。拉过一次的 APK 会留在 `apks/<包名>/`, 重建 AVD 后不带参数再跑一次即可。
+`--download` 依次查 腾讯应用宝 → 酷安 → 少数官网直链, 先用 Range 请求读远端 APK 的 ZIP 目录, 只下载含 `lib/arm64-v8a/` 的构建
+(API 31+ 的 arm64 模拟器镜像是纯 64 位, 装不了 armeabi-v7a 的包; 应用宝给 小红书 / 哔哩哔哩 / 京东 / 支付宝 / 钉钉 的是 32 位包, 这几个会自动转到酷安)。
+下载到 `apks/<包名>/`, 中断后重跑同一条命令续传; 应用宝的包校验 md5。`--download --dry-run` 只列出各来源会给哪个构建, 不下载。
+其它两种来源: 手工把 `.apk` / `.xapk` 放进 `apks/` 后不带参数运行; 或从自己的手机导出 (`--from-phone <serial> --config configs/cn_apps.json`,
+手机需开 USB 调试并在 `$ADB devices -l` 里显示为 `device`)。拉过 / 下过一次的 APK 会留在 `apks/<包名>/`, 重建 AVD 后不带参数再跑一次即可。
 
 ## 合成验证 (无需模拟器)
 

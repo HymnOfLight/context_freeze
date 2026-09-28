@@ -2,15 +2,15 @@
 # One-shot, re-runnable pipeline for the mainland-China app experiments on a Mac (Apple Silicon):
 #
 #   SDK + AVD (6 GB guest, 16 GB /data) -> boot -> device prep (system freezer off, 2 GB zram)
-#   -> install the apps from your phone (or apks/) -> first-run pass (manual, once)
+#   -> download + install the apps (or pull them from a phone if one is attached) -> first-run pass (manual, once)
 #   -> probe -> scenario x policy x eta x seed matrix -> summary + Pareto plots
 #
 #   cd ~/context_freeze && bash scripts/bootstrap_cn.sh
 #
 # Every stage checks whether it is already done, so re-running the same command after an
 # interruption (Ctrl+C, reboot, emulator crash) continues where it stopped: the matrix itself is
-# checkpointed per step (docs/02 §6). The only stages that need you are (1) plugging in the phone
-# with USB debugging on and (2) tapping through privacy agreements / logins once.
+# checkpointed per step (docs/02 §6). The only stage that needs you is tapping through the privacy
+# agreements / logins once (first run).
 #
 # Matrix sizes (T=60 steps, 14 apps: one cell is ~12-16 min incl. warmup; see docs/04 §4):
 #   default   FIRST experiment, budget 10 h: 5 scenarios x {none, lru, landlord, hybrid} x eta {0.25, 0.5}
@@ -27,7 +27,7 @@
 #   OUT=results/cn_matrix         matrix directory (fixed so that re-runs resume)
 #   DATA_GB=16                    /data partition of a *new* AVD (the default 8 GB is too small)
 #   SKIP_FIRST_RUN=1              do not run the interactive first-run pass again
-#   PHONE=<serial>                skip phone auto-detection
+#   PHONE=<serial>                pull the APKs from this phone instead of downloading them
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$PWD"
@@ -122,24 +122,21 @@ else
   if [ -z "${PHONE:-}" ]; then
     PHONE=$("$ADB" devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}')
   fi
-  if [ -z "$PHONE" ] && ! ls apks/*.apk apks/*.xapk apks/*.apks apks/*/ >/dev/null 2>&1; then
-    echo
-    echo "   Connect your phone now: 设置 > 关于手机 > 连点版本号 7 次 -> 开发者选项 > USB 调试; plug in; tap 允许."
-    echo "   (or drop .apk/.xapk files into $REPO/apks/ - download pages: python3 scripts/install_cn_apps.py --list)"
-    for i in $(seq 1 60); do
-      PHONE=$("$ADB" devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}')
-      [ -n "$PHONE" ] && break
-      ls apks/*.apk apks/*.xapk apks/*.apks apks/*/ >/dev/null 2>&1 && break
-      printf '.'; sleep 5
-    done; echo
-  fi
   if [ -n "$PHONE" ]; then
-    echo "   phone: $PHONE"
+    echo "   phone $PHONE attached: pulling the installed APKs from it"
     python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config "$CONFIG"
-  elif ls apks/*.apk apks/*.xapk apks/*.apks apks/*/ >/dev/null 2>&1; then
-    python3 scripts/install_cn_apps.py
   else
-    die "no phone and no APKs in apks/; re-run when either is available"
+    # no phone: download from the Chinese app stores (应用宝 -> 酷安 -> official links), 64-bit builds
+    # only (the arm64 emulator image cannot run armeabi-v7a APKs). ~3.2 GB for the 14-app config;
+    # already downloaded files in apks/<pkg>/ are reused, interrupted downloads resume.
+    python3 scripts/install_cn_apps.py --download --config "$CONFIG"
+  fi
+  HAVE=$(sh_ pm list packages | sed 's/^package://')
+  STILL=(); for p in $WANT; do grep -qx "$p" <<<"$HAVE" || STILL+=("$p"); done
+  if [ ${#STILL[@]} -gt 0 ]; then
+    echo "!! still not installed: ${STILL[*]}"
+    echo "   re-run this script to retry the download, or put their .apk/.xapk into $REPO/apks/ (pages: python3 scripts/install_cn_apps.py --list)."
+    echo "   The experiment can also run without them: scenarios drop apps that are not installed (docs/04 §2)."
   fi
 fi
 
