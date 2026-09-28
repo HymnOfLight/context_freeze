@@ -24,6 +24,7 @@ def pct(values: list[float], p: float) -> float | None:
 
 def load(path: str) -> dict:
     meta, budget, steps, warm, resumes, finished = None, None, {}, [], 0, False
+    segments: list[dict] = []
     with open(path) as f:
         for line in f:
             if not line.strip():
@@ -41,13 +42,15 @@ def load(path: str) -> dict:
                 warm.append(r)
             elif t == "step":
                 steps[r["t"]] = r    # a step re-executed after a resume replaces the torn one
+            elif t == "trace":
+                segments = r.get("segments") or []
             elif t == "resume":
                 resumes += 1
             elif t == "end":
                 finished = True
     return {"path": path, "meta": meta or {}, "budget": budget or {},
             "steps": [steps[k] for k in sorted(steps)], "warmup": warm,
-            "resumes": resumes, "finished": finished}
+            "resumes": resumes, "finished": finished, "segments": segments}
 
 
 def _delta(steps: list[dict], key: str, sub: str = "vmstat") -> int | None:
@@ -69,6 +72,40 @@ def kill_reasons(steps: list[dict]) -> str:
             key = info.get("description") or info.get("reason") or "?"
             c[key] = c.get(key, 0) + 1
     return ",".join(f"{k}:{v}" for k, v in sorted(c.items(), key=lambda kv: -kv[1]))
+
+
+def _scenario_of(cfg: dict) -> str:
+    tr = cfg.get("trace", {})
+    kind = tr.get("kind", "zipf")
+    if kind == "scenario":
+        sc = tr.get("scenario", "office")
+        return sc if isinstance(sc, str) else sc.get("name", "custom")
+    return kind
+
+
+def segment_rows(run: dict) -> list[dict]:
+    """Per-scenario breakdown of a 'day' (or any segmented) trace: launch states and latency per segment."""
+    segs = run.get("segments") or []
+    if len(segs) < 2:
+        return []
+    steps = {s["t"]: s for s in run["steps"]}
+    cfg = run["meta"].get("config", {})
+    out = []
+    for g in segs:
+        ss = [steps[t] for t in range(g["start"], g["end"]) if t in steps]
+        if not ss:
+            continue
+        lat = [s["launch"]["total_time_ms"] for s in ss if s["launch"].get("total_time_ms") is not None]
+        st = [s["launch"].get("launch_state") for s in ss]
+        mbg = [s["M_bg_kb"] / 1024 for s in ss if "M_bg_kb" in s]
+        out.append({"policy": cfg.get("policy"), "eta": cfg.get("eta"), "segment": g["scenario"],
+                    "steps": len(ss), "n_hot": st.count("HOT"), "n_warm": st.count("WARM"),
+                    "n_cold": st.count("COLD"),
+                    "lat_p50_ms": round(pct(lat, 50), 0) if lat else None,
+                    "lat_p95_ms": round(pct(lat, 95), 0) if lat else None,
+                    "bg_pss_avg_mb": round(sum(mbg) / len(mbg), 1) if mbg else None,
+                    "swap_write_mb": round((_delta(ss, "pswpout") or 0) * 4 / 1024, 1) if len(ss) > 1 else None})
+    return out
 
 
 def summarize(run: dict) -> dict:
@@ -152,6 +189,7 @@ def summarize(run: dict) -> dict:
         "resumes": run.get("resumes", 0),
         "finished": run.get("finished", True),
         "seed": cfg.get("trace", {}).get("seed"),
+        "scenario": _scenario_of(cfg),
         "guest_ram_mb": (caps.get("mem_total_kb") or 0) // 1024 or None,
         "m_fg_source": run["budget"].get("m_fg_source", "measured"),
         "kill_reasons": kill_reasons(steps),
@@ -169,16 +207,16 @@ def print_table(rows: list[dict], cols: Iterable[str] | None = None) -> None:
         print("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols))
 
 
-AGG_MAIN_COLS = ["policy", "eta", "guest_ram_mb", "n_runs", "mem_saving_pct", "mem_saving_pct_sd", "achieved_eta",
+AGG_MAIN_COLS = ["policy", "scenario", "eta", "guest_ram_mb", "n_runs", "mem_saving_pct", "mem_saving_pct_sd", "achieved_eta",
                  "lat_p50_ms", "lat_p95_ms", "lat_p95_ms_sd", "swap_write_mb", "swap_write_mb_sd", "n_cold", "n_killed",
                  "budget_violations"]
 
-MAIN_COLS = ["policy", "eta", "seed", "guest_ram_mb", "T", "budget_mb", "bg_pss_avg_mb", "bg_pss_peak_mb", "zram_phys_avg_mb",
+MAIN_COLS = ["policy", "scenario", "eta", "seed", "guest_ram_mb", "T", "budget_mb", "bg_pss_avg_mb", "bg_pss_peak_mb", "zram_phys_avg_mb",
              "swap_write_mb", "swap_read_mb", "refault_anon", "pgmajfault", "lat_p50_ms", "lat_p95_ms",
              "lat_p99_ms", "n_cold", "n_killed", "budget_violations", "decision_p99_ms", "action_p95_ms"]
 
 
-GROUP_KEYS = ("policy", "eta", "guest_ram_mb")
+GROUP_KEYS = ("policy", "scenario", "eta", "guest_ram_mb")
 
 # columns averaged over replicates (same policy / eta / guest RAM, different seeds or repeats)
 AGG_COLS = ["mem_saving_pct", "achieved_eta", "bg_pss_avg_mb", "bg_pss_peak_mb", "zram_phys_avg_mb",
@@ -210,7 +248,7 @@ def aggregate(rows: list[dict]) -> list[dict]:
             r["achieved_eta"] = r["bg_pss_avg_mb"] / r["sum_m_fg_mb"]
             groups.setdefault(tuple(r.get(k) for k in GROUP_KEYS), []).append(r)
     out = []
-    for key, rs in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1] or 0, kv[0][2] or 0)):
+    for key, rs in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1]), kv[0][2] or 0, kv[0][3] or 0)):
         a = dict(zip(GROUP_KEYS, key))
         a["n_runs"] = len(rs)
         a["seeds"] = ",".join(str(r.get("seed")) for r in rs)
@@ -229,7 +267,7 @@ def aggregate(rows: list[dict]) -> list[dict]:
 
 def pareto_rows(rows: list[dict]) -> list[dict]:
     """Memory saving vs latency vs flash writes: one point per (policy, eta, guest RAM), replicates averaged."""
-    cols = ["policy", "eta", "guest_ram_mb", "n_runs", "mem_saving_pct", "mem_saving_pct_sd", "achieved_eta",
+    cols = ["policy", "scenario", "eta", "guest_ram_mb", "n_runs", "mem_saving_pct", "mem_saving_pct_sd", "achieved_eta",
             "lat_p95_ms", "lat_p95_ms_sd", "lat_p50_ms", "swap_write_mb", "swap_write_mb_sd", "n_cold", "n_killed",
             "budget_violations"]
     return [{c: a.get(c) for c in cols} for a in aggregate(rows)]
@@ -248,6 +286,11 @@ def plot_pareto(prow: list[dict], path: str, x: str = "saving") -> None:
     except ImportError:
         print("matplotlib not installed; skipping plot (pip install matplotlib)")
         return
+    scens = sorted({str(r.get("scenario")) for r in prow})
+    if len(scens) > 1:
+        # several usage scenarios in one plot: one series per (policy, scenario); `none` stays pooled as the band
+        prow = [dict(r, policy=r["policy"] if r["policy"] == "none" else f"{r['policy']}@{r.get('scenario')}")
+                for r in prow]
     if x == "eta":
         xkey, xsd, xlabel, invert = "achieved_eta", "achieved_eta_sd", "achieved η = background PSS / Σ m̄ᶠᵍ", True
     else:
@@ -317,9 +360,15 @@ def main(argv=None) -> int:
                     help="Pareto x-axis: memory saving %% (default) or achieved eta")
     ap.add_argument("--agg", help="write the replicate-aggregated table (mean/sd per policy, eta, guest RAM) as CSV")
     args = ap.parse_args(argv)
-    rows = [summarize(load(f)) for f in args.files]
-    rows.sort(key=lambda r: (str(r["policy"]), r["eta"] or 0, r.get("guest_ram_mb") or 0, r.get("seed") or 0))
+    runs = [load(f) for f in args.files]
+    rows = [summarize(r) for r in runs]
+    rows.sort(key=lambda r: (str(r["policy"]), str(r.get("scenario")), r["eta"] or 0, r.get("guest_ram_mb") or 0,
+                             r.get("seed") or 0))
     print_table(rows, None if args.all_cols else MAIN_COLS)
+    seg = [x for r in runs for x in segment_rows(r)]
+    if seg:
+        print("\nper-scenario segments (day traces):")
+        print_table(seg)
     agg = aggregate(rows)
     if any(a["n_runs"] > 1 for a in agg) or len({a["guest_ram_mb"] for a in agg}) > 1:
         print("\naggregated over replicates (mean ± sd):")

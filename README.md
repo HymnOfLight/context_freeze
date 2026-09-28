@@ -11,11 +11,13 @@
 ├── docs/01_mac_m4_setup.md         # M4 + 16 GB 环境搭建 (AVD、6 GB 客体内存、root、zram)
 ├── docs/02_experiment_protocol.md  # 实验流程、指标 <-> 论文符号对照、断点续跑、注意事项
 ├── docs/03_adb_mechanisms.md       # 技术说明: 冻结 / 换出 / 换入 / 采样在 adb 层面到底做了什么
-├── scripts/                        # setup_avd / start_emulator / prepare_device / install_fdroid_apps / run_matrix
-├── configs/                        # 实验配置 (JSON)
+├── docs/04_cn_apps_scenarios.md    # 中国大陆应用集合 (微信/QQ/微博/网易云音乐/...) 的安装、首次启动与使用场景设计
+├── scripts/                        # setup_avd / start_emulator / prepare_device / install_cn_apps / first_run_cn_apps / run_matrix
+├── configs/                        # 实验配置 (JSON): emulator_base (Google 应用) / cn_apps (国产应用 + 场景)
 ├── cf/                             # Python 包
 │   ├── adb.py, device.py, parsers.py   # adb 封装; cgroup freezer / memcg 回收 / zram / tmpfs 气球; /proc 解析
-│   ├── trace.py                        # 请求序列 σ 生成 (zipf / markov / drift / replay)
+│   ├── trace.py                        # 请求序列 σ 生成 (zipf / markov / drift / replay / scenario / day)
+│   ├── scenarios.py                    # 国产应用目录 + 使用场景 (办公 / 刷社交媒体 / 通勤 / 购物 / 晚间娱乐 / 一天)
 │   ├── policies.py                     # none / lru / lfu / landlord / markov / hybrid / belady
 │   ├── runner.py                       # 真机(模拟器)实验循环 -> results/*.jsonl (+ .log, 每步 .ckpt 断点)
 │   ├── logging_util.py                 # 带时间戳的控制台 + 文件日志, 进度/ETA
@@ -45,6 +47,12 @@ scripts/prepare_device.sh --system-freezer disabled --zram-mb 1024
 python3 scripts/install_fdroid_apps.py
 scripts/list_launchable.sh                        # 核对 configs/emulator_base.json 里的包名
 
+# 4b. 国产应用集合 (微信/QQ/微博/网易云音乐/网易邮箱大师/抖音/小红书/哔哩哔哩/淘宝/京东/支付宝/钉钉/WPS/高德):
+#     APK 放进 apks/ 或从自己的手机导出, 然后手工过一遍首次启动的隐私协议 / 登录 (docs/04)
+python3 scripts/install_cn_apps.py --list
+python3 scripts/install_cn_apps.py --from-phone <手机serial>       # 或把 .apk/.xapk 放进 apks/ 后不带参数运行
+scripts/first_run_cn_apps.sh configs/cn_apps.json
+
 # 5. 探测设备能力 (freezer / memcg / zram / 各应用 uid 与启动 Activity)
 python3 run_experiment.py configs/emulator_base.json --probe
 
@@ -52,6 +60,13 @@ python3 run_experiment.py configs/emulator_base.json --probe
 python3 run_experiment.py configs/emulator_base.json --policy landlord --eta 0.3 --T 40 --name landlord_eta0.3
 #    矩阵 = 策略 x η x 种子, 同一目录、同一客体内存、同一预算分母 (第一格的 warmup m_fg 复用到所有格)
 POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" scripts/run_matrix.sh configs/emulator_base.json 40
+
+# 6c. 国产应用 + 使用场景: 办公 office / 刷社交媒体 social / 通勤 commute / 购物 shopping / 晚间娱乐 evening / 一天 day
+python3 run_experiment.py configs/cn_apps.json --scenario list                       # 每个场景在当前配置下的应用与路径
+python3 run_experiment.py configs/cn_apps.json --scenario office --policy landlord --eta 0.3 --T 60
+python3 run_experiment.py configs/cn_apps.json --scenario day --policy hybrid --eta 0.3 --T 100   # 分段 (场景) 汇总
+SCENARIOS="office social commute shopping evening" POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" \
+  scripts/run_matrix.sh configs/cn_apps.json 60
 
 # 6b. 断点续跑: Ctrl+C / 模拟器崩溃 / adb 超时后, 从最后一个完成的步骤继续 (轨迹、策略状态、冻结/压缩集合全部恢复)
 python3 run_experiment.py configs/emulator_base.json --resume results/landlord_eta0.3.jsonl
@@ -91,9 +106,9 @@ python3 -m pytest -q tests
 
 ## 验证状态
 
-* `tests/` (29 项): /proc、`am start -W` 输出解析 (含真实抓取的 HOT / FRONT / TIMEOUT 样本), 策略约束, Bellman DP 与穷举一致,
+* `tests/` (40 项): /proc、`am start -W` 输出解析 (含真实抓取的 HOT / FRONT / TIMEOUT 样本), 策略约束, Bellman DP 与穷举一致,
   在线策略代价 ≥ OPT, runner 端到端 (假设备), 崩溃后断点续跑 (landlord / hybrid / lru 三种策略状态恢复、无重复无缺步、计数器回绕), 严格 preflight、固定预算分母、
-  kill 原因采集、多种子 / 多客体内存的汇总聚合。
+  kill 原因采集、多种子 / 多客体内存的汇总聚合, 使用场景生成 (可用应用裁剪、枢纽 / 固定路径结构、一天分段) 与分段汇总。
 * 在 Linux 主机上用 **Android 15 (API 35) google_apis 系统镜像** 实测通过: `adb root`、cgroup v2 `cgroup.freeze` 冻结/解冻、
   memcg v1 每应用回收 (Clock: PSS 42 MB → 35 kB, SwapPss → 22 MB, zram/pswpout 同步增长)、解冻后按需换回 (majflt/pswpin)、
   tmpfs 气球、完整 `run_experiment.py` 循环与 `cf.analyze` 汇总。该主机无可用 KVM, 模拟器以软件模拟运行, 因而绝对时延无意义;

@@ -5,6 +5,8 @@ Generators return a list of app indices / names. Options mirror the experiment p
 - Markov chain with a random sparse transition matrix
 - distribution drift: popularity permuted at `drift_at` (habit change test)
 - replay of a recorded trace (JSONL from the runner or plain text)
+- usage scenarios of mainland-China apps (办公 / 刷社交媒体 / 通勤 / 购物 / 晚间娱乐, cf.scenarios)
+  and a "day" that chains them (natural drift)
 """
 from __future__ import annotations
 
@@ -84,9 +86,31 @@ def load_replay(path: str) -> list[str]:
     return seq
 
 
+def make_trace_meta(apps: Sequence[str], cfg: dict) -> tuple[list[str], dict]:
+    """Trace plus metadata: {"segments": [...], "dropped": [...]} for scenario-based kinds."""
+    from . import scenarios as S
+    kind = cfg.get("kind", "zipf")
+    T = int(cfg.get("T", 60))
+    seed = cfg.get("seed", 0)
+    if kind == "scenario":
+        spec = cfg.get("scenario", "office")
+        sc, dropped = S.restrict(S.scenario_from(spec), apps)
+        trace = S.gen_scenario(apps, T, sc, seed=seed)
+        return trace, {"segments": [{"scenario": sc.name, "start": 0, "end": T}], "dropped": dropped,
+                       "scenario": sc.name}
+    if kind == "day":
+        trace, segments = S.gen_day(apps, T, cfg.get("schedule"), seed=seed)
+        dropped = sorted({a for name, _ in (cfg.get("schedule") or S.DAY_SCHEDULE)
+                          for a in S.restrict(S.scenario_from(name), apps)[1]})
+        return trace, {"segments": segments, "dropped": dropped, "scenario": "day"}
+    return make_trace(apps, cfg), {}
+
+
 def make_trace(apps: Sequence[str], cfg: dict) -> list[str]:
     kind = cfg.get("kind", "zipf")
     T = int(cfg.get("T", 60))
+    if kind in ("scenario", "day"):
+        return make_trace_meta(apps, cfg)[0]
     if kind == "zipf":
         return gen_zipf(apps, T, s=cfg.get("s", 1.0), stickiness=cfg.get("stickiness", 0.3),
                         seed=cfg.get("seed", 0), drift_at=cfg.get("drift_at"))

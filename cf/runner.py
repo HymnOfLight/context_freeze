@@ -29,7 +29,7 @@ from .adb import Adb, AdbError
 from .device import Device
 from .logging_util import Logger, as_logger, fmt_dur, short_pkg
 from .policies import AppInfo, make_policy, residency
-from .trace import make_trace
+from .trace import make_trace_meta
 
 DEFAULTS = {
     "policy": "landlord",
@@ -506,8 +506,12 @@ class Experiment:
             self.emit({"type": "resume", "from_step": self.t_done + 1,
                        "checkpoint_saved_at": state["saved_at"]})
         else:
+            tk = self.cfg["trace"]["kind"]
+            if tk == "scenario":
+                sc = self.cfg["trace"].get("scenario", "office")
+                tk += f":{sc if isinstance(sc, str) else sc.get('name', 'custom')}"
             self.log.head(f"run {self.cfg['name']}: policy={self.cfg['policy']} eta={self.cfg['eta']} "
-                          f"T={T_cfg} trace={self.cfg['trace']['kind']} seed={self.cfg['trace']['seed']} -> {path}")
+                          f"T={T_cfg} trace={tk} seed={self.cfg['trace']['seed']} -> {path}")
             try:
                 self.prepare()
             except PreflightError:
@@ -516,8 +520,15 @@ class Experiment:
                     os.remove(path)          # nothing was measured; do not leave an empty result behind
                 raise
             self.warmup()
-            self.trace = make_trace(self.apps, self.cfg["trace"])
-            self.emit({"type": "trace", "trace": self.trace})
+            self.trace, tmeta = make_trace_meta(self.apps, self.cfg["trace"])
+            if tmeta.get("dropped"):
+                from .scenarios import display_name
+                self.log.warn(f"scenario apps not available on this device/config, sampled without them: "
+                              + ", ".join(f"{display_name(a)} ({a})" for a in tmeta["dropped"]))
+            if tmeta.get("segments"):
+                self.log.info("trace segments: " + ", ".join(
+                    f"{g['scenario']} [{g['start']}..{g['end'] - 1}]" for g in tmeta["segments"]))
+            self.emit({"type": "trace", "trace": self.trace, **{k: v for k, v in tmeta.items() if k != "dropped"}})
             self.pol = make_policy(self.cfg["policy"], self.apps, **self.cfg["policy_kw"])
             self.current = set(self.apps)
             self.prev_pids = {p: set() for p in self.apps}
