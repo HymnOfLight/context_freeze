@@ -18,14 +18,27 @@
 
 镜像里没有这些应用, 它们也不在 Google Play; 各家官网提供 APK 但没有稳定的直链, 因此脚本不自动下载。两种来源:
 
+推荐从自己的手机导出 (`pm path` 拉取 base.apk + split_*.apk 再装进模拟器), 完整步骤:
+
 ```bash
-python3 scripts/install_cn_apps.py --list                 # 目录 + 官网下载页 + 是否已安装
-# (a) 把从官网下载的 .apk / .xapk / .apks 放进 apks/ 目录
-python3 scripts/install_cn_apps.py
-# (b) 从自己的手机导出: 手机与模拟器同时连 adb, 用 pm path 拉取 base.apk + split_*.apk 再装进模拟器
-python3 scripts/install_cn_apps.py --from-phone <手机serial>            # 整个目录
-python3 scripts/install_cn_apps.py --from-phone <手机serial> com.tencent.mm com.sina.weibo
+cd ~/context_freeze && source scripts/env.sh
+export ANDROID_SERIAL=emulator-5554            # 两台设备同时连着时, 所有 adb 命令默认指向模拟器
+
+# 手机: 设置 > 关于手机 > 连点 "版本号" 7 次 -> 开发者选项 > 打开 "USB 调试"; 数据线连 Mac; 手机弹窗选 "允许"
+$ADB devices -l                                 # 应看到两行 device: emulator-5554 和手机 (第一列即 serial)
+PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}'); echo "phone=$PHONE"
+
+python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json   # 拉取 14 个应用并装进模拟器
+python3 scripts/install_cn_apps.py --list        # 核对: installed 列; 缺的应用附官网下载页
+scripts/first_run_cn_apps.sh configs/cn_apps.json                # 逐个手工点掉隐私协议 / 登录 (微信 QQ 用备用账号)
+python3 run_experiment.py configs/cn_apps.json --probe          # uid / 启动 Activity 都能解析
+python3 run_experiment.py configs/cn_apps.json --scenario list  # 每个场景实际会用到的应用
 ```
+
+没有手机时: 打开 `--list` 里的官网页面, 把下载的 `.apk` / `.xapk` 放进仓库的 `apks/` 目录, 然后 `python3 scripts/install_cn_apps.py`, 后续步骤相同。拉过一次的 APK 会留在 `apks/<包名>/`, 重建 AVD 后不带参数再跑一次即可。
+
+`--from-phone` 不加 `--config` 会拉取目录里全部 30 个应用 (约 6 GB, AVD 的 /data 只有 8 GB, 不建议); 也可以只列包名:
+`python3 scripts/install_cn_apps.py --from-phone "$PHONE" com.tencent.mm com.sina.weibo`。
 
 * 模拟器必须是 **arm64-v8a** 镜像 (M4 上 `scripts/setup_avd.sh` 创建的就是): 国产应用大多只带 arm 原生库, x86_64 镜像上会 `INSTALL_FAILED_NO_MATCHING_ABIS` 或走 ARM 翻译 (极慢且内存行为失真)。
 * 安装用 `-g` 一次性授予运行时权限, 减少首次启动的弹窗。

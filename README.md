@@ -48,9 +48,10 @@ python3 scripts/install_fdroid_apps.py
 scripts/list_launchable.sh                        # 核对 configs/emulator_base.json 里的包名
 
 # 4b. 国产应用集合 (微信/QQ/微博/网易云音乐/网易邮箱大师/抖音/小红书/哔哩哔哩/淘宝/京东/支付宝/钉钉/WPS/高德):
-#     APK 放进 apks/ 或从自己的手机导出, 然后手工过一遍首次启动的隐私协议 / 登录 (docs/04)
-python3 scripts/install_cn_apps.py --list
-python3 scripts/install_cn_apps.py --from-phone <手机serial>       # 或把 .apk/.xapk 放进 apks/ 后不带参数运行
+#     从自己的手机导出 APK 装进模拟器, 再手工过一遍首次启动的隐私协议 / 登录 —— 完整可复制的命令见下方 "国产应用: 从手机导出"
+export ANDROID_SERIAL=emulator-5554
+PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}')
+python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json
 scripts/first_run_cn_apps.sh configs/cn_apps.json
 
 # 5. 探测设备能力 (freezer / memcg / zram / 各应用 uid 与启动 Activity)
@@ -91,6 +92,25 @@ python3 -m cf.analyze results/matrix_<stamp>/*.jsonl --x eta --plot pareto_eta.p
 对预算 428 MB; 本步冻结 1 个、回收 1 个, 动作耗时 0.4 s)。有进程被系统杀掉时该行会带 `killed: calendar[bg anr]` ——
 方括号里是 ActivityManager 记录的死亡原因 (`dumpsys activity exit-info`), 汇总表 `kill_reasons` 列统计各原因次数。
 结束时打印 HOT/WARM/COLD 计数、时延 P50/P95/P99、后台 PSS 与预算、swap 读写的摘要。
+
+## 国产应用: 从手机导出并完成配置
+
+```bash
+cd ~/context_freeze && source scripts/env.sh
+export ANDROID_SERIAL=emulator-5554            # 两台设备同时连着时, 所有 adb 命令默认指向模拟器
+
+# 手机: 设置 > 关于手机 > 连点 "版本号" 7 次 -> 开发者选项 > 打开 "USB 调试"; 数据线连 Mac; 手机弹窗选 "允许"
+$ADB devices -l                                 # 应看到两行 device: emulator-5554 和手机 (第一列即 serial)
+PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}'); echo "phone=$PHONE"
+
+python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json   # 拉取 14 个应用并装进模拟器
+python3 scripts/install_cn_apps.py --list        # 核对: installed 列; 缺的应用附官网下载页
+scripts/first_run_cn_apps.sh configs/cn_apps.json                # 逐个手工点掉隐私协议 / 登录 (微信 QQ 用备用账号)
+python3 run_experiment.py configs/cn_apps.json --probe          # uid / 启动 Activity 都能解析
+python3 run_experiment.py configs/cn_apps.json --scenario list  # 每个场景实际会用到的应用
+```
+
+没有手机时: 打开 `--list` 里的官网页面, 把下载的 `.apk` / `.xapk` 放进仓库的 `apks/` 目录, 然后 `python3 scripts/install_cn_apps.py`, 后续步骤相同。拉过一次的 APK 会留在 `apks/<包名>/`, 重建 AVD 后不带参数再跑一次即可。
 
 ## 合成验证 (无需模拟器)
 

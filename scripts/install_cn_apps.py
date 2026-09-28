@@ -14,8 +14,13 @@ APKs have to come from one of two places:
     python3 scripts/install_cn_apps.py --list                    # catalogue + download pages + installed?
     python3 scripts/install_cn_apps.py                           # install everything found in apks/
     python3 scripts/install_cn_apps.py --dir ~/Downloads/apks    # another directory
-    python3 scripts/install_cn_apps.py --from-phone 1234ABCD     # pull from a phone, then install
+    python3 scripts/install_cn_apps.py --from-phone 1234ABCD     # pull the whole catalogue from a phone
+    python3 scripts/install_cn_apps.py --from-phone 1234ABCD --config configs/cn_apps.json   # only the config's apps
     python3 scripts/install_cn_apps.py --from-phone 1234ABCD com.tencent.mm com.sina.weibo
+
+With two devices attached (phone + emulator) adb needs to know which one is the target:
+export ANDROID_SERIAL=emulator-5554 (or pass --serial). The pulled APKs are kept in apks/<pkg>/ so
+a fresh AVD can be provisioned later without the phone (plain `python3 scripts/install_cn_apps.py`).
 
 Afterwards run scripts/first_run_cn_apps.sh once: these apps show a privacy agreement and often a
 login screen on first start, which must be dealt with by hand before the experiments.
@@ -23,6 +28,7 @@ login screen on first start, which must be dealt with by hand before the experim
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -145,6 +151,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("pkgs", nargs="*", help="restrict --from-phone to these packages (default: whole catalogue)")
     ap.add_argument("--dir", default=DEFAULT_DIR, help="APK directory (default apks/)")
     ap.add_argument("--from-phone", metavar="SERIAL", help="adb serial of a phone to pull the APKs from")
+    ap.add_argument("--config", metavar="JSON", help="with --from-phone: pull only the apps listed in this config")
     ap.add_argument("--serial", "-s", help="adb serial of the emulator (default: $ANDROID_SERIAL / the only device)")
     ap.add_argument("--list", action="store_true", help="print the catalogue with download pages and exit")
     args = ap.parse_args(argv)
@@ -168,10 +175,17 @@ def main(argv: list[str]) -> int:
     if args.from_phone:
         phone = Adb(args.from_phone)
         pkgs = args.pkgs or list(CATALOG)
+        if args.config and not args.pkgs:
+            with open(args.config, encoding="utf-8") as f:
+                pkgs = json.load(f)["apps"]
         pulled = pull_from_phone(phone, pkgs, args.dir)
         print(f"pulled {len(pulled)} packages into {args.dir}")
     install_from_dir(adb, args.dir)
     have = installed_packages(adb)
+    df = adb.shell("df -h /data | tail -1").split()
+    if len(df) >= 4:
+        print(f"\n/data: {df[2]} used, {df[3]} free (these apps take 0.3-1 GB each incl. data; "
+              f"AVD data partition is 8 GB by default)")
     missing = [p for p in CATALOG if p not in have]
     print(f"\n{len(set(CATALOG) & have)}/{len(CATALOG)} catalogue apps installed.")
     if missing:
