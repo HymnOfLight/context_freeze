@@ -55,6 +55,10 @@ def main(argv=None) -> int:
     ap.add_argument("--eta", type=float)
     ap.add_argument("--sweep-eta", type=float, nargs="+")
     ap.add_argument("--T", type=int)
+    ap.add_argument("--scenario", metavar="NAME",
+                    help="use a mainland-China usage scenario as the trace: office, social, commute, shopping, "
+                         "evening, or 'day' (all of them in sequence). --scenario list prints them")
+    ap.add_argument("--scenarios", nargs="+", metavar="NAME", help="sweep over several scenarios")
     ap.add_argument("--seed", type=int)
     ap.add_argument("--seeds", type=int, nargs="+", help="replicate every (policy, eta) cell with these trace seeds")
     ap.add_argument("--m-fg-from", metavar="JSONL",
@@ -78,6 +82,10 @@ def main(argv=None) -> int:
         base["out_dir"] = args.out_dir
     if args.no_strict:
         base["strict_preflight"] = False
+    if args.scenario == "list" or (args.scenarios and "list" in args.scenarios):
+        from cf.scenarios import describe
+        print(describe(base.get("apps")))
+        return 0
     if args.m_fg_from:
         base["fixed_m_fg_kb"], base["fixed_a_fg_kb"] = load_m_fg(args.m_fg_from)
         print(f"budget denominator fixed from {args.m_fg_from}: "
@@ -106,26 +114,34 @@ def main(argv=None) -> int:
         policies = args.policies or [args.policy or base.get("policy", "landlord")]
         etas = args.sweep_eta or [args.eta if args.eta is not None else base.get("eta", 0.3)]
         seeds = args.seeds or [args.seed]
+        scenarios = args.scenarios or [args.scenario]
         jobs = []
         for pol in policies:
             for eta in etas:
-                for seed in seeds:
-                    cfg = json.loads(json.dumps(base))
-                    cfg["policy"] = pol
-                    cfg["eta"] = eta
-                    if args.T:
-                        cfg.setdefault("trace", {})["T"] = args.T
-                    if seed is not None:
-                        cfg.setdefault("trace", {})["seed"] = seed
-                    single = len(policies) * len(etas) * len(seeds) == 1
-                    if args.name and single:
-                        cfg["name"] = args.name
-                    elif args.name and args.seeds:
-                        cfg["name"] = f"{args.name}_s{seed}"
-                    else:
-                        cfg["name"] = f"{pol}_eta{eta}" + (f"_s{seed}" if args.seeds else "") + \
-                            f"_{time.strftime('%Y%m%d-%H%M%S')}"
-                    jobs.append((cfg["name"], cfg))
+                for sc in scenarios:
+                    for seed in seeds:
+                        cfg = json.loads(json.dumps(base))
+                        cfg["policy"] = pol
+                        cfg["eta"] = eta
+                        if args.T:
+                            cfg.setdefault("trace", {})["T"] = args.T
+                        if seed is not None:
+                            cfg.setdefault("trace", {})["seed"] = seed
+                        if sc:
+                            tr = cfg.setdefault("trace", {})
+                            tr["kind"] = "day" if sc == "day" else "scenario"
+                            if sc != "day":
+                                tr["scenario"] = sc
+                        single = len(policies) * len(etas) * len(seeds) * len(scenarios) == 1
+                        tag = f"_{sc}" if sc else ""
+                        if args.name and single:
+                            cfg["name"] = args.name
+                        elif args.name:
+                            cfg["name"] = args.name + (tag if args.scenarios else "") + (f"_s{seed}" if args.seeds else "")
+                        else:
+                            cfg["name"] = f"{pol}{tag}_eta{eta}" + (f"_s{seed}" if args.seeds else "") + \
+                                f"_{time.strftime('%Y%m%d-%H%M%S')}"
+                        jobs.append((cfg["name"], cfg))
 
     outputs, failed = [], []
     for i, (name, cfg) in enumerate(jobs):
