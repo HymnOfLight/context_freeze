@@ -50,8 +50,9 @@ scripts/list_launchable.sh                        # 核对 configs/emulator_base
 # 4b. 国产应用集合 (微信/QQ/微博/网易云音乐/网易邮箱大师/抖音/小红书/哔哩哔哩/淘宝/京东/支付宝/钉钉/WPS/高德):
 #     从自己的手机导出 APK 装进模拟器, 再手工过一遍首次启动的隐私协议 / 登录 —— 完整可复制的命令见下方 "国产应用: 从手机导出"
 export ANDROID_SERIAL=emulator-5554
-PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}')
-python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json
+$ADB devices -l                                   # 手机必须出现且状态是 device (unauthorized = 去手机上点 "允许"; 只有模拟器 = 没连上 / 没开 USB 调试)
+PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}'); echo "phone=$PHONE"
+python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json   # PHONE 为空时会报错退出, 不会静默跳过
 scripts/first_run_cn_apps.sh configs/cn_apps.json
 
 # 5. 探测设备能力 (freezer / memcg / zram / 各应用 uid 与启动 Activity)
