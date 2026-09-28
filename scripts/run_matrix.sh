@@ -5,6 +5,11 @@
 #   POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" scripts/run_matrix.sh
 #   SCENARIOS="office social commute shopping evening day" scripts/run_matrix.sh configs/cn_apps.json 60
 #       (mainland-China app set with usage scenarios; one cell per policy x eta x scenario x seed)
+#   SCENARIOS="office social commute shopping evening" POLICIES="none lru landlord hybrid" ETAS="0.25 0.5" SEEDS=1 \
+#       OUT=results/cn_matrix scripts/run_matrix.sh configs/cn_apps.json 60
+#       (first experiment: 35 cells, <= 10 h; the full 3-eta x 3-seed matrix is 150 cells / ~30 h and can be
+#        added later into the same OUT - finished cells are skipped. The script prints the cell count and
+#        a wall-clock estimate before the first cell starts.)
 #
 # What the script guarantees (these are the things that made the first Pareto plot unreadable):
 #   * one matrix = one output directory = one guest-RAM configuration; cf.analyze is run on THIS
@@ -62,6 +67,32 @@ fi
 
 echo "== matrix dir: $OUT   (T=$T, policies: $POLICIES, etas: $ETAS, seeds: $SEEDS${SCENARIOS:+, scenarios: $SCENARIOS})"
 [ -n "$M_FG_FROM" ] && echo "== budget denominator (m_fg) from: $M_FG_FROM"
+
+# cell count + wall-clock estimate, so that the size of a sweep is visible before the first cell starts.
+# Per cell: T x (dwell + settle + ~4.5 s launch/reclaim/sampling) + warmup (n_apps x (warmup_dwell + 4 s))
+# + ~1 min setup. Finished cells (JSONL ending in {"type": "end"}) are subtracted.
+python3 - "$CONFIG" "$T" "$OUT" "$POLICIES" "$ETAS" "$SEEDS" "$SCENARIOS" <<'PYEOF' || true
+import glob, json, os, sys
+cfg_path, T, out, pols, etas, seeds, scs = sys.argv[1:8]
+cfg = json.load(open(cfg_path))
+T = int(T); pols = pols.split(); n_eta = len(etas.split()); n_seed = len(seeds.split())
+n_sc = max(1, len(scs.split()))
+cells = n_sc * n_seed * ((1 if "none" in pols else 0) + len([p for p in pols if p != "none"]) * n_eta)
+done = 0
+for f in glob.glob(os.path.join(out, "*.jsonl")):
+    try:
+        with open(f, "rb") as fh:
+            fh.seek(max(0, os.path.getsize(f) - 4096)); tail = fh.read().decode("utf-8", "replace")
+        done += '"type": "end"' in tail
+    except OSError:
+        pass
+n_apps = len(cfg.get("apps", []))
+step_s = cfg.get("dwell_s", 4.0) + cfg.get("settle_s", 1.5) + 4.5
+cell_s = T * step_s + n_apps * (cfg.get("warmup_dwell_s", 6.0) + 4) + 60
+left = max(0, cells - done)
+print(f"== {cells} cells ({done} already finished), ~{cell_s / 60:.0f} min each -> "
+      f"~{left * cell_s / 3600:.1f} h remaining (rough: emulator speed and app launch times vary)")
+PYEOF
 echo "== interrupt any time; re-run with:  OUT=$OUT $0 $CONFIG $T"
 FAILED=0
 

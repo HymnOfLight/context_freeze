@@ -66,8 +66,10 @@ POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" scripts/r
 python3 run_experiment.py configs/cn_apps.json --scenario list                       # 每个场景在当前配置下的应用与路径
 python3 run_experiment.py configs/cn_apps.json --scenario office --policy landlord --eta 0.3 --T 60
 python3 run_experiment.py configs/cn_apps.json --scenario day --policy hybrid --eta 0.3 --T 100   # 分段 (场景) 汇总
-SCENARIOS="office social commute shopping evening" POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" \
-  scripts/run_matrix.sh configs/cn_apps.json 60
+#    初次实验 (35 格, <= 10 小时): 五场景 x 4 策略 x η {0.25, 0.5} x 1 种子; 完整矩阵 (150 格, 约 30–40 小时) 在同一 OUT 里
+#    把 ETAS="0.25 0.35 0.5" SEEDS="1 2 3" 续跑补齐即可 (docs/04 §5); run_matrix.sh 开跑前打印格数与预计时长
+SCENARIOS="office social commute shopping evening" POLICIES="none lru landlord hybrid" ETAS="0.25 0.5" SEEDS="1" \
+  OUT=results/cn_matrix scripts/run_matrix.sh configs/cn_apps.json 60
 
 # 6b. 断点续跑: Ctrl+C / 模拟器崩溃 / adb 超时后, 从最后一个完成的步骤继续 (轨迹、策略状态、冻结/压缩集合全部恢复)
 python3 run_experiment.py configs/emulator_base.json --resume results/landlord_eta0.3.jsonl
@@ -97,12 +99,15 @@ python3 -m cf.analyze results/matrix_<stamp>/*.jsonl --x eta --plot pareto_eta.p
 
 ```bash
 git clone https://github.com/HymnOfLight/context_freeze.git ~/context_freeze 2>/dev/null; cd ~/context_freeze && git pull -q
-bash scripts/bootstrap_cn.sh            # QUICK=1 bash scripts/bootstrap_cn.sh 先做 5 分钟冒烟测试
+QUICK=1 bash scripts/bootstrap_cn.sh    # 先做冒烟测试: 1 场景, none + landlord, T=20, 2 格约 15 分钟
+bash scripts/bootstrap_cn.sh            # 初次实验: 5 场景 x 4 策略 x η {0.25, 0.5} x 1 种子 = 35 格, 约 7–9.5 小时 (<= 10 小时)
+FULL=1 bash scripts/bootstrap_cn.sh     # 完整矩阵: η {0.25, 0.35, 0.5} x 种子 {1, 2, 3} = 150 格, 约 30–40 小时; 同一目录, 只补跑初次实验没有的 115 格
 ```
 
 `scripts/bootstrap_cn.sh` 按顺序完成: 安装 SDK / Java → 创建 6 GB 客体、16 GB /data 的 AVD → 启动 → 关系统 freezer、开 2 GB zram →
 从手机 (或 `apks/`) 安装 14 个应用 → 首次启动手工过协议 (只做一次) → probe → 场景 × 策略 × η × 种子矩阵 → 汇总与 Pareto 图。
-每一步都会检查是否已完成, 中断后重新运行同一条命令即可续跑; 只有插手机和点隐私协议两步需要人。手动逐步执行见下。
+每一步都会检查是否已完成, 中断后重新运行同一条命令即可续跑; 只有插手机和点隐私协议两步需要人。默认矩阵就是 **初次实验** (≤ 10 小时,
+docs/04 §5 说明了为什么这样裁: 保留全部场景与策略, η 取两端、种子取 1 个、不减 T), 开跑前 `run_matrix.sh` 会打印格数和预计时长。手动逐步执行见下。
 
 ## 国产应用: 从手机导出并完成配置 (手动逐步)
 

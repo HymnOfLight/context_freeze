@@ -12,10 +12,18 @@
 # checkpointed per step (docs/02 §6). The only stages that need you are (1) plugging in the phone
 # with USB debugging on and (2) tapping through privacy agreements / logins once.
 #
+# Matrix sizes (T=60 steps, 14 apps: one cell is ~12-16 min incl. warmup; see docs/04 §4):
+#   default   FIRST experiment, budget 10 h: 5 scenarios x {none, lru, landlord, hybrid} x eta {0.25, 0.5}
+#             x 1 seed = 35 cells, ~7-9.5 h. Two budget points per policy (tight / loose) already give
+#             the direction of every Pareto curve and the gap to the `none` baseline.
+#   FULL=1    complete matrix: eta {0.25, 0.35, 0.5} x seeds {1, 2, 3} = 150 cells, ~30-40 h. The first
+#             experiment is a strict subset of it and lives in the same OUT directory, so FULL=1 after
+#             the default run only adds the 115 missing cells (finished cells are skipped).
+#   QUICK=1   smoke test: one scenario, none + landlord, one eta, one seed, T=20 (2 cells, ~15 min)
+#
 # Knobs (environment variables):
-#   QUICK=1                       smoke test: one scenario, one seed, T=20 (~5 min instead of ~30 h)
 #   SCENARIOS="office social ..." default: office social commute shopping evening
-#   POLICIES="none lru landlord hybrid"   ETAS="0.25 0.35 0.5"   SEEDS="1 2 3"   T=60
+#   POLICIES="none lru landlord hybrid"   ETAS="0.25 0.5"   SEEDS="1"   T=60   (override any of them)
 #   OUT=results/cn_matrix         matrix directory (fixed so that re-runs resume)
 #   DATA_GB=16                    /data partition of a *new* AVD (the default 8 GB is too small)
 #   SKIP_FIRST_RUN=1              do not run the interactive first-run pass again
@@ -28,9 +36,15 @@ AVD="${AVD:-cf_api35}"; RAM_MB="${RAM_MB:-6144}"; DATA_GB="${DATA_GB:-16}"
 ZRAM_MB="${ZRAM_MB:-2048}"; CONFIG="${CONFIG:-configs/cn_apps.json}"
 OUT="${OUT:-results/cn_matrix}"; T="${T:-60}"
 SCENARIOS="${SCENARIOS:-office social commute shopping evening}"
-POLICIES="${POLICIES:-none lru landlord hybrid}"; ETAS="${ETAS:-0.25 0.35 0.5}"; SEEDS="${SEEDS:-1 2 3}"
+POLICIES="${POLICIES:-none lru landlord hybrid}"
+if [ "${FULL:-0}" = 1 ]; then
+  ETAS="${ETAS:-0.25 0.35 0.5}"; SEEDS="${SEEDS:-1 2 3}"; TIER="FULL matrix (~30-40 h)"
+else
+  ETAS="${ETAS:-0.25 0.5}"; SEEDS="${SEEDS:-1}"; TIER="first experiment (<= 10 h; FULL=1 for the complete matrix)"
+fi
 if [ "${QUICK:-0}" = 1 ]; then
   SCENARIOS="office"; POLICIES="none landlord"; ETAS="0.3"; SEEDS="1"; T=20; OUT="results/cn_quick"
+  TIER="QUICK smoke test (~15 min)"
 fi
 export ANDROID_SERIAL="${ANDROID_SERIAL:-emulator-5554}"
 
@@ -145,8 +159,9 @@ python3 run_experiment.py "$CONFIG" --probe
 python3 run_experiment.py "$CONFIG" --scenario list
 
 # ------------------------------------------------------------------ 7. matrix
-step "7/7 matrix -> $OUT   (scenarios: $SCENARIOS | policies: $POLICIES | etas: $ETAS | seeds: $SEEDS | T=$T)"
-echo "   Ctrl+C any time; the same command resumes."
+step "7/7 matrix -> $OUT   [$TIER]"
+echo "   scenarios: $SCENARIOS | policies: $POLICIES | etas: $ETAS | seeds: $SEEDS | T=$T"
+echo "   Ctrl+C any time; the same command resumes (run_matrix.sh prints the cell count and the time estimate)."
 SCENARIOS="$SCENARIOS" POLICIES="$POLICIES" ETAS="$ETAS" SEEDS="$SEEDS" OUT="$OUT" scripts/run_matrix.sh "$CONFIG" "$T"
 echo
 echo "==== done. Results: $OUT/summary.csv, summary_agg.csv, pareto.png, pareto_eta.png"
