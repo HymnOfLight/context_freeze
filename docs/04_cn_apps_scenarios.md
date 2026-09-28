@@ -18,14 +18,27 @@
 
 镜像里没有这些应用, 它们也不在 Google Play; 各家官网提供 APK 但没有稳定的直链, 因此脚本不自动下载。两种来源:
 
+推荐从自己的手机导出 (`pm path` 拉取 base.apk + split_*.apk 再装进模拟器), 完整步骤:
+
 ```bash
-python3 scripts/install_cn_apps.py --list                 # 目录 + 官网下载页 + 是否已安装
-# (a) 把从官网下载的 .apk / .xapk / .apks 放进 apks/ 目录
-python3 scripts/install_cn_apps.py
-# (b) 从自己的手机导出: 手机与模拟器同时连 adb, 用 pm path 拉取 base.apk + split_*.apk 再装进模拟器
-python3 scripts/install_cn_apps.py --from-phone <手机serial>            # 整个目录
-python3 scripts/install_cn_apps.py --from-phone <手机serial> com.tencent.mm com.sina.weibo
+cd ~/context_freeze && source scripts/env.sh
+export ANDROID_SERIAL=emulator-5554            # 两台设备同时连着时, 所有 adb 命令默认指向模拟器
+
+# 手机: 设置 > 关于手机 > 连点 "版本号" 7 次 -> 开发者选项 > 打开 "USB 调试"; 数据线连 Mac; 手机弹窗选 "允许"
+$ADB devices -l                                 # 应看到两行 device: emulator-5554 和手机 (第一列即 serial)
+PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}'); echo "phone=$PHONE"
+
+python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json   # 拉取 14 个应用并装进模拟器
+python3 scripts/install_cn_apps.py --list        # 核对: installed 列; 缺的应用附官网下载页
+scripts/first_run_cn_apps.sh configs/cn_apps.json                # 逐个手工点掉隐私协议 / 登录 (微信 QQ 用备用账号)
+python3 run_experiment.py configs/cn_apps.json --probe          # uid / 启动 Activity 都能解析
+python3 run_experiment.py configs/cn_apps.json --scenario list  # 每个场景实际会用到的应用
 ```
+
+没有手机时: 打开 `--list` 里的官网页面, 把下载的 `.apk` / `.xapk` 放进仓库的 `apks/` 目录, 然后 `python3 scripts/install_cn_apps.py`, 后续步骤相同。拉过一次的 APK 会留在 `apks/<包名>/`, 重建 AVD 后不带参数再跑一次即可。
+
+`--from-phone` 不加 `--config` 会拉取目录里全部 30 个应用 (约 6 GB, AVD 的 /data 只有 8 GB, 不建议); 也可以只列包名:
+`python3 scripts/install_cn_apps.py --from-phone "$PHONE" com.tencent.mm com.sina.weibo`。
 
 * 模拟器必须是 **arm64-v8a** 镜像 (M4 上 `scripts/setup_avd.sh` 创建的就是): 国产应用大多只带 arm 原生库, x86_64 镜像上会 `INSTALL_FAILED_NO_MATCHING_ABIS` 或走 ARM 翻译 (极慢且内存行为失真)。
 * 安装用 `-g` 一次性授予运行时权限, 减少首次启动的弹窗。
@@ -76,10 +89,15 @@ python3 run_experiment.py configs/cn_apps.json --scenario list
 python3 run_experiment.py configs/cn_apps.json --scenario office --policy landlord --eta 0.3 --T 60
 # 一天 (分段分析)
 python3 run_experiment.py configs/cn_apps.json --scenario day --policy hybrid --eta 0.3 --T 100
-# 场景 x 策略 x η x 种子 的矩阵 (同目录、同预算分母、严格 preflight, 见 docs/02 §8)
+# 初次实验 (<= 10 小时): 五场景 x 4 策略 x η {0.25, 0.5} x 1 种子 = 35 格 (同目录、同预算分母、严格 preflight, 见 docs/02 §8)
+SCENARIOS="office social commute shopping evening" POLICIES="none lru landlord hybrid" ETAS="0.25 0.5" SEEDS="1" \
+  OUT=results/cn_matrix scripts/run_matrix.sh configs/cn_apps.json 60
+# 完整矩阵 (30–40 小时): 同一目录补齐 η=0.35 与种子 2、3; 已完成的 35 格会被跳过
 SCENARIOS="office social commute shopping evening" POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" \
-  scripts/run_matrix.sh configs/cn_apps.json 60
+  OUT=results/cn_matrix scripts/run_matrix.sh configs/cn_apps.json 60
 ```
+
+`bash scripts/bootstrap_cn.sh` 默认就是上面的初次实验, `FULL=1 bash scripts/bootstrap_cn.sh` 是完整矩阵, 见 §5。
 
 结果文件名带场景: `landlord_office_eta0.3_s1.jsonl`。`cf.analyze` 的汇总表多了 `scenario` 列, 聚合按 (策略, 场景, η, 客体 RAM) 分组; 多个场景画在一张 Pareto 图上时每条曲线是 `策略@场景`; `day` 轨迹额外打印按段 (通勤 / 办公 / ...) 的 HOT/WARM/COLD 计数、时延 P50/P95、后台 PSS 与 swap 写入。
 
@@ -89,4 +107,22 @@ SCENARIOS="office social commute shopping evening" POLICIES="none lru landlord h
 * **后台唤醒 → 冻结期间的 ANR / binder 积压 kill**: 会比 Google 应用多得多, `kill_reasons` 列会看到 `Sync transaction while frozen` 与 `bg anr`。这不是 bug, 而是冻结策略在真实负载上必须付出的代价之一; 对比 `none` 基线 (不冻结) 的 kill 数即可量化。想抑制可对个别应用 `never_freeze`, 或在 `first_run` 时关掉它们的通知与自启动。
 * **内存随时间增长**: 信息流应用 (微博 / 抖音 / 小红书) 前台驻留期间持续加载内容, m̄ᶠᵍ 在 warmup 时测一次会偏低; 用 `--m-fg-from` 固定分母只保证运行间可比, 不保证等于真实峰值。
 * **网络**: 这些应用启动即拉取信息流, 模拟器要能访问国内服务; 网络慢时 `TotalTime` 里会混入等待首屏数据的时间 (`am start -W` 只等首帧, 通常影响不大, 但启动页广告会把首帧提前、把真正的主页推后)。
-* **时长**: 单步 dwell 5 s + settle 2 s + 启动 1–3 s + 回收 1–4 s, 60 步约 12–15 分钟; 五场景 × 4 策略 × 3 η × 3 种子的完整矩阵约 30 小时, 请靠 `run_matrix.sh` 的断点续跑分多次完成。
+* **时长**: 单步 dwell 5 s + settle 2 s + 启动 1–3 s + 回收 1–4 s, 加上 14 个应用的 warmup (每个 10 s dwell) 与 zram 准备, 60 步一格约 12–16 分钟; 五场景 × 4 策略 × 3 η × 3 种子的完整矩阵 150 格约 30–40 小时。所以实验分两级做 (§5): 初次实验 35 格 (≤ 10 小时), 完整矩阵在同一目录补齐。`run_matrix.sh` 开跑前打印格数与预计时长, 并靠断点续跑分多次完成。
+
+## 5. 分级实验计划: 初次实验 ≤ 10 小时, 完整矩阵 30–40 小时
+
+一格 (T=60, 14 个应用) 约 12–16 分钟, 10 小时的预算约 35–45 格。完整矩阵 150 格无法一次跑完, 于是把 η 与种子两个维度分成两级, 第一级是第二级的**严格子集**, 同一输出目录 (`results/cn_matrix`) 续跑即可升级:
+
+| 级别 | 命令 | 场景 | 策略 | η | 种子 | 格数 | 预计时长 |
+|---|---|---|---|---|---|---|---|
+| 冒烟 | `QUICK=1 bash scripts/bootstrap_cn.sh` | office | none, landlord | 0.3 | 1 | 2 (T=20) | ~15 分钟 |
+| **初次实验** (默认) | `bash scripts/bootstrap_cn.sh` | 全部 5 个 | none, lru, landlord, hybrid | 0.25, 0.5 | 1 | 5 × (1 + 3 × 2) = **35** | **7–9.5 小时** |
+| 完整矩阵 | `FULL=1 bash scripts/bootstrap_cn.sh` | 全部 5 个 | 同上 | 0.25, 0.35, 0.5 | 1, 2, 3 | 5 × (3 + 3 × 3 × 3) = 150 | 30–40 小时 (续跑只补 115 格) |
+
+初次实验为什么这样裁:
+
+* **保留全部五个场景**: 场景 (枢纽、固定路径、应用体量) 是这套应用集合区别于 Google 应用集合的核心变量, 少一个场景就少一类结论; 五个场景各 7 格, 每个场景内部仍是完整的 策略 × η 对照。
+* **保留全部四个策略**: 对照的对象不能少; `none` 每个场景一格作为基线。
+* **η 从 3 点减到 2 点 (0.25 / 0.5)**: 取最紧与最松两个预算, Pareto 曲线的两个端点已经给出每条曲线的方向和与 `none` 基线的距离; 中间点 0.35 留给完整矩阵补齐。不用 0.3/0.5 是为了让初次实验的每一格都能被完整矩阵直接复用。
+* **种子从 3 个减到 1 个**: 单种子没有误差棒 (`summary_agg.csv` 里 `*_sd` 为 0, `n_runs`=1), 图上是点而不是 mean ± sd; 结论只能到"方向", 显著性要等完整矩阵。**不减 T**: T 决定每格的样本数 (P95 需要足够多的恢复事件), 60 步是下限。
+* 初次实验结束后先看 `pareto.png`; 若某个场景 / 策略的差异已经很明显, 完整矩阵可以只对它补种子: `SCENARIOS=shopping SEEDS="2 3" ...` (其它参数不变, 同一 `OUT`)。

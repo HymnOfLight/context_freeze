@@ -48,9 +48,10 @@ python3 scripts/install_fdroid_apps.py
 scripts/list_launchable.sh                        # 核对 configs/emulator_base.json 里的包名
 
 # 4b. 国产应用集合 (微信/QQ/微博/网易云音乐/网易邮箱大师/抖音/小红书/哔哩哔哩/淘宝/京东/支付宝/钉钉/WPS/高德):
-#     APK 放进 apks/ 或从自己的手机导出, 然后手工过一遍首次启动的隐私协议 / 登录 (docs/04)
-python3 scripts/install_cn_apps.py --list
-python3 scripts/install_cn_apps.py --from-phone <手机serial>       # 或把 .apk/.xapk 放进 apks/ 后不带参数运行
+#     从自己的手机导出 APK 装进模拟器, 再手工过一遍首次启动的隐私协议 / 登录 —— 完整可复制的命令见下方 "国产应用: 从手机导出"
+export ANDROID_SERIAL=emulator-5554
+PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}')
+python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json
 scripts/first_run_cn_apps.sh configs/cn_apps.json
 
 # 5. 探测设备能力 (freezer / memcg / zram / 各应用 uid 与启动 Activity)
@@ -65,8 +66,10 @@ POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" scripts/r
 python3 run_experiment.py configs/cn_apps.json --scenario list                       # 每个场景在当前配置下的应用与路径
 python3 run_experiment.py configs/cn_apps.json --scenario office --policy landlord --eta 0.3 --T 60
 python3 run_experiment.py configs/cn_apps.json --scenario day --policy hybrid --eta 0.3 --T 100   # 分段 (场景) 汇总
-SCENARIOS="office social commute shopping evening" POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" \
-  scripts/run_matrix.sh configs/cn_apps.json 60
+#    初次实验 (35 格, <= 10 小时): 五场景 x 4 策略 x η {0.25, 0.5} x 1 种子; 完整矩阵 (150 格, 约 30–40 小时) 在同一 OUT 里
+#    把 ETAS="0.25 0.35 0.5" SEEDS="1 2 3" 续跑补齐即可 (docs/04 §5); run_matrix.sh 开跑前打印格数与预计时长
+SCENARIOS="office social commute shopping evening" POLICIES="none lru landlord hybrid" ETAS="0.25 0.5" SEEDS="1" \
+  OUT=results/cn_matrix scripts/run_matrix.sh configs/cn_apps.json 60
 
 # 6b. 断点续跑: Ctrl+C / 模拟器崩溃 / adb 超时后, 从最后一个完成的步骤继续 (轨迹、策略状态、冻结/压缩集合全部恢复)
 python3 run_experiment.py configs/emulator_base.json --resume results/landlord_eta0.3.jsonl
@@ -91,6 +94,39 @@ python3 -m cf.analyze results/matrix_<stamp>/*.jsonl --x eta --plot pareto_eta.p
 对预算 428 MB; 本步冻结 1 个、回收 1 个, 动作耗时 0.4 s)。有进程被系统杀掉时该行会带 `killed: calendar[bg anr]` ——
 方括号里是 ActivityManager 记录的死亡原因 (`dumpsys activity exit-info`), 汇总表 `kill_reasons` 列统计各原因次数。
 结束时打印 HOT/WARM/COLD 计数、时延 P50/P95/P99、后台 PSS 与预算、swap 读写的摘要。
+
+## 国产应用: 一键脚本
+
+```bash
+git clone https://github.com/HymnOfLight/context_freeze.git ~/context_freeze 2>/dev/null; cd ~/context_freeze && git pull -q
+QUICK=1 bash scripts/bootstrap_cn.sh    # 先做冒烟测试: 1 场景, none + landlord, T=20, 2 格约 15 分钟
+bash scripts/bootstrap_cn.sh            # 初次实验: 5 场景 x 4 策略 x η {0.25, 0.5} x 1 种子 = 35 格, 约 7–9.5 小时 (<= 10 小时)
+FULL=1 bash scripts/bootstrap_cn.sh     # 完整矩阵: η {0.25, 0.35, 0.5} x 种子 {1, 2, 3} = 150 格, 约 30–40 小时; 同一目录, 只补跑初次实验没有的 115 格
+```
+
+`scripts/bootstrap_cn.sh` 按顺序完成: 安装 SDK / Java → 创建 6 GB 客体、16 GB /data 的 AVD → 启动 → 关系统 freezer、开 2 GB zram →
+从手机 (或 `apks/`) 安装 14 个应用 → 首次启动手工过协议 (只做一次) → probe → 场景 × 策略 × η × 种子矩阵 → 汇总与 Pareto 图。
+每一步都会检查是否已完成, 中断后重新运行同一条命令即可续跑; 只有插手机和点隐私协议两步需要人。默认矩阵就是 **初次实验** (≤ 10 小时,
+docs/04 §5 说明了为什么这样裁: 保留全部场景与策略, η 取两端、种子取 1 个、不减 T), 开跑前 `run_matrix.sh` 会打印格数和预计时长。手动逐步执行见下。
+
+## 国产应用: 从手机导出并完成配置 (手动逐步)
+
+```bash
+cd ~/context_freeze && source scripts/env.sh
+export ANDROID_SERIAL=emulator-5554            # 两台设备同时连着时, 所有 adb 命令默认指向模拟器
+
+# 手机: 设置 > 关于手机 > 连点 "版本号" 7 次 -> 开发者选项 > 打开 "USB 调试"; 数据线连 Mac; 手机弹窗选 "允许"
+$ADB devices -l                                 # 应看到两行 device: emulator-5554 和手机 (第一列即 serial)
+PHONE=$($ADB devices | awk 'NR>1 && $2=="device" && $1 !~ /^emulator-/ {print $1; exit}'); echo "phone=$PHONE"
+
+python3 scripts/install_cn_apps.py --from-phone "$PHONE" --config configs/cn_apps.json   # 拉取 14 个应用并装进模拟器
+python3 scripts/install_cn_apps.py --list        # 核对: installed 列; 缺的应用附官网下载页
+scripts/first_run_cn_apps.sh configs/cn_apps.json                # 逐个手工点掉隐私协议 / 登录 (微信 QQ 用备用账号)
+python3 run_experiment.py configs/cn_apps.json --probe          # uid / 启动 Activity 都能解析
+python3 run_experiment.py configs/cn_apps.json --scenario list  # 每个场景实际会用到的应用
+```
+
+没有手机时: 打开 `--list` 里的官网页面, 把下载的 `.apk` / `.xapk` 放进仓库的 `apks/` 目录, 然后 `python3 scripts/install_cn_apps.py`, 后续步骤相同。拉过一次的 APK 会留在 `apks/<包名>/`, 重建 AVD 后不带参数再跑一次即可。
 
 ## 合成验证 (无需模拟器)
 
