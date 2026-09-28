@@ -172,7 +172,26 @@ def main(argv: list[str]) -> int:
         print(f"!! emulator ABI is {abi}: most mainland-China apps ship arm64/armeabi native code only and will "
               f"fail with INSTALL_FAILED_NO_MATCHING_ABIS or run through ARM translation (very slow). "
               f"Use the arm64-v8a system image (scripts/setup_avd.sh on Apple Silicon).")
-    if args.from_phone:
+    if args.from_phone is not None:
+        # `--from-phone "$PHONE"` with an empty PHONE (no phone detected) used to fall through silently
+        # to the apks/ directory; fail here and show what adb actually sees instead.
+        devices = [l.split() for l in adb.run("devices", "-l").splitlines()[1:] if l.strip()]
+        phones = [d for d in devices if not d[0].startswith("emulator-")]
+        if not args.from_phone.strip():
+            print("!! --from-phone got an empty serial: no phone was detected. adb devices -l:")
+            for d in devices:
+                print(f"     {d[0]:<24s} {d[1]}" + ("   <- tap 允许/Allow USB debugging on the phone" if d[1] == "unauthorized" else ""))
+            if not phones:
+                print("   Plug the phone in with USB debugging on (设置 > 关于手机 > 连点版本号 7 次 -> 开发者选项 > USB 调试),"
+                      " choose 传输文件/MTP if it only charges, then re-run.")
+            print("   Or download .apk/.xapk files into apks/ and run without --from-phone "
+                  f"(pages: python3 {sys.argv[0]} --list)")
+            return 1
+        if args.from_phone not in [d[0] for d in devices if d[1] == "device"]:
+            print(f"!! phone {args.from_phone} is not an online adb device. adb devices -l:")
+            for d in devices:
+                print(f"     {d[0]:<24s} {d[1]}")
+            return 1
         phone = Adb(args.from_phone)
         pkgs = args.pkgs or list(CATALOG)
         if args.config and not args.pkgs:
