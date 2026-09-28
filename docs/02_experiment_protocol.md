@@ -91,6 +91,10 @@ python3 run_experiment.py configs/emulator_base.json --policies markov hybrid la
 # D. 内存压力: 2 GB 客体重跑 B
 scripts/start_emulator.sh cf_api35 2048 && scripts/prepare_device.sh --no-reboot && ...
 
+# F. 国产应用 + 使用场景 (docs/04): 场景 x 策略 x η x 种子; day 轨迹自带分布漂移并按段汇总
+SCENARIOS="office social commute shopping evening day" POLICIES="none lru landlord hybrid" ETAS="0.25 0.35 0.5" SEEDS="1 2 3" \
+  scripts/run_matrix.sh configs/cn_apps.json 60
+
 # E. 离线最优: 把真机轨迹回放进 sim, 用测得的 m_i, a_i, ρ 求 OPT(σ) 下界
 python3 -m cf.sim.run_sim --trace replay --trace-path results/matrix_*/landlord_eta0.3.jsonl --k 10 --T 60
 ```
