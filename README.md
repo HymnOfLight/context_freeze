@@ -93,7 +93,18 @@ python3 -m cf.analyze results/matrix_<stamp>/*.jsonl --x eta --plot pareto_eta.p
 方括号里是 ActivityManager 记录的死亡原因 (`dumpsys activity exit-info`), 汇总表 `kill_reasons` 列统计各原因次数。
 结束时打印 HOT/WARM/COLD 计数、时延 P50/P95/P99、后台 PSS 与预算、swap 读写的摘要。
 
-## 国产应用: 从手机导出并完成配置
+## 国产应用: 一键脚本
+
+```bash
+git clone https://github.com/HymnOfLight/context_freeze.git ~/context_freeze 2>/dev/null; cd ~/context_freeze && git pull -q
+bash scripts/bootstrap_cn.sh            # QUICK=1 bash scripts/bootstrap_cn.sh 先做 5 分钟冒烟测试
+```
+
+`scripts/bootstrap_cn.sh` 按顺序完成: 安装 SDK / Java → 创建 6 GB 客体、16 GB /data 的 AVD → 启动 → 关系统 freezer、开 2 GB zram →
+从手机 (或 `apks/`) 安装 14 个应用 → 首次启动手工过协议 (只做一次) → probe → 场景 × 策略 × η × 种子矩阵 → 汇总与 Pareto 图。
+每一步都会检查是否已完成, 中断后重新运行同一条命令即可续跑; 只有插手机和点隐私协议两步需要人。手动逐步执行见下。
+
+## 国产应用: 从手机导出并完成配置 (手动逐步)
 
 ```bash
 cd ~/context_freeze && source scripts/env.sh
