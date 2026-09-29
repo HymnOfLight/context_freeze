@@ -19,6 +19,7 @@
 镜像里没有这些应用, 它们也不在 Google Play。`scripts/install_cn_apps.py --download` 从国内应用商店自动下载并安装:
 
 ```bash
+setopt interactivecomments 2>/dev/null   # zsh: 让行尾 "# 注释" 不被当成参数
 cd ~/context_freeze && source scripts/env.sh
 export ANDROID_SERIAL=emulator-5554
 
