@@ -96,7 +96,7 @@ python3 run_experiment.py configs/emulator_base.json --probe   # 检查 uid / Ac
 k=10 左右即可, Bellman 离线最优 (模拟器轨迹回放到 `cf.sim`) 支持 k ≤ 12。
 
 以中国大陆应用 (微信 / QQ / 微博 / 网易云音乐 / 网易邮箱大师 / 抖音 / 小红书 / 淘宝 / 支付宝 / 钉钉 / WPS / 高德 ...) 为主的
-实验用 `configs/cn_apps.json`: APK 来自官网或自己的手机 (`scripts/install_cn_apps.py`), 首次启动的隐私协议 / 登录要手工过一遍
+实验用 `configs/cn_apps.json`: APK 由 `scripts/install_cn_apps.py --download` 从应用宝 / 酷安自动下载 (或从自己的手机导出), 首次启动的隐私协议 / 登录要手工过一遍
 (`scripts/first_run_cn_apps.sh`), 切换路径由使用场景 (办公 / 刷社交媒体 / 通勤 / 购物 / 晚间娱乐 / 一天) 生成 —— 见 `docs/04_cn_apps_scenarios.md`。
 这些应用单个前台 PSS 250–800 MB, 6 GB 客体不要超过 14 个, zram 设 2 GB。
 
