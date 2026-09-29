@@ -6,7 +6,7 @@
 |---|---|---|
 | 客体 (Android) RAM | **6144 MB 默认**, 3072 MB 为内存压力变体 | 3 GB 客体时 Android 的 lmkd 在我们的控制器动作之前就把压缩后的后台进程杀掉 (上一轮日志里 COLD 启动占多数), 策略之间无从比较; 6 GB 让 "谁离开 DRAM" 由控制器而非 lmkd 决定。16 GB 主机: 6 GB 客体 + 约 2 GB 模拟器进程开销 + macOS ≈ 10–11 GB, 跑矩阵时请关闭 IDE / 浏览器 |
 | 客体 CPU | 4 核 | `-cores 4`; M4 大核充足 |
-| 磁盘 | ≥ 15 GB | 系统镜像 ~1.5 GB, AVD userdata 8 GB, APK 缓存 |
+| 磁盘 | ≥ 25 GB | 系统镜像 ~1.5 GB, AVD userdata 16 GB (稀疏文件, 按实际占用计), 国产应用 APK 缓存 ~3.2 GB |
 | 镜像 ABI | `arm64-v8a` | Apple Silicon 通过 Hypervisor.framework 原生运行 arm64 镜像; x86 镜像走翻译, 极慢且不代表真机 |
 | 镜像类型 | `google_apis` 或 `default` | 两者都允许 `adb root`; **`google_apis_playstore` 不允许 root**, 无法操作 cgroup/zram |
 | API 级别 | 35 (Android 15) 推荐, 34 也可 | Android 15 模拟器内核 6.6, cgroup v2 上有 `memory.reclaim`, freezer 位于 `/sys/fs/cgroup/uid_*/pid_*` |
@@ -41,7 +41,9 @@ scripts/start_emulator.sh cf_api35 6144        # 等待 sys.boot_completed=1
 此后所有 `am start -W` 的 `TotalTime` 都被渲染而非内存主导 (上一轮日志中后半段时延整体抬高即此原因)。
 
 `setup_avd.sh` 写入 `~/.android/avd/cf_api35.avd/config.ini`: `hw.ramSize`, `hw.cpu.ncore=4`,
-`disk.dataPartition.size=8G`, `fastboot.forceColdBoot=yes` (每次冷启动, 避免快照把上次实验的内存状态带进来)。
+`disk.dataPartition.size=16G` (第 5 个参数 `DATA_GB`; 14 个国产应用装完并登录后要 ~10 GB, 旧的 8 GB 默认值装到第 10 个就满了), `fastboot.forceColdBoot=yes` (每次冷启动, 避免快照把上次实验的内存状态带进来)。
+
+已经建好的 AVD 要加大 /data 用 `scripts/resize_data.sh cf_api35 16`: 模拟器只在 (重新) 创建 userdata 镜像时读取 `disk.dataPartition.size`, 所以这一步等于 `-wipe-data`, 模拟器里装的应用、登录、zram / freezer 设置全部清空; 主机上的 `apks/` 缓存和 `results/` 不受影响, 之后 `prepare_device.sh` + `install_cn_apps.py --download` 几分钟装回来 (或直接重跑 `bootstrap_cn.sh`)。
 
 `start_emulator.sh` 使用 `-no-snapshot -no-boot-anim -no-audio -gpu host`; 若要无窗口跑批量实验加 `-no-window`。
 **不用 `-gpu auto`**: auto 模式下宿主可用内存一旦低于 5 GB, 模拟器就静默改用 SwiftShader 软件渲染 (9/16 那轮 6 GB 客体正是如此,
@@ -113,4 +115,5 @@ k=10 左右即可, Bellman 离线最优 (模拟器轨迹回放到 `cf.sim`) 支�
 | 主机内存告急 / 模拟器日志出现 "Software GL" | 关闭 IDE/浏览器, 重启模拟器; 仍不够时客体降到 4096 MB; 不要在同一台机器上同时开两个模拟器 |
 | `run_experiment.py` 报 `PreflightError` 拒绝开跑 | 系统 freezer 未关 (`settings get global cached_apps_freezer` 应为 `disabled`, 用 `prepare_device.sh --system-freezer disabled` 并重启) 或模拟器在软件渲染 (用 `start_emulator.sh` 重启); 只有跑 "Android 默认" 基线才用 `--no-strict` |
 | 进度行出现 `killed: xxx[bg anr]` 等 | 系统杀了后台进程, 方括号是 ActivityManager 的原因; 与内存无关的原因见 docs/02 §8 表格; 实时看: `adb logcat -b events \| grep -E 'am_kill\|am_anr'` |
+| 安装应用时 `INSTALL_FAILED_INSUFFICIENT_STORAGE`, `df /data` 只剩几百 MB | AVD 的 /data 太小 (旧默认 8 GB); `scripts/resize_data.sh cf_api35 16` 加大到 16 GB (会清空模拟器 /data, `apks/` 缓存保留), 再 `prepare_device.sh` 和 `install_cn_apps.py --download --config configs/cn_apps.json`; `install_cn_apps.py` 现在在空间不够时会拒绝开始安装 |
 | 实验中途被打断 (Ctrl+C、模拟器崩溃、adb 超时) | 数据不丢: 每步都写 `results/<name>.ckpt`, `python3 run_experiment.py <config> --resume results/<name>.jsonl` 继续; 矩阵用 `OUT=<matrix_dir> scripts/run_matrix.sh ...` (见 docs/02 §6) |

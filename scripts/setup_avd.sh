@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Create a rootable Android Virtual Device for the freeze/swap experiments.
 #
-#   scripts/setup_avd.sh [API_LEVEL=35] [AVD_NAME=cf_api35] [RAM_MB=6144] [TAG=google_apis]
+#   scripts/setup_avd.sh [API_LEVEL=35] [AVD_NAME=cf_api35] [RAM_MB=6144] [TAG=google_apis] [DATA_GB=16]
+#   (the 14 mainland-China apps need ~10 GB of /data once installed and logged in; 8 GB fills up after ~10 apps)
 #
 # Notes for MacBook (Apple Silicon, 16 GB):
 #   * use arm64-v8a images (native under Hypervisor.framework; x86 images are unusably slow)
@@ -17,6 +18,7 @@ API="${1:-35}"
 AVD="${2:-cf_api${API}}"
 RAM="${3:-6144}"
 TAG="${4:-google_apis}"
+DATA_GB="${5:-16}"
 ARCH="$(host_arch)"
 IMG="system-images;android-${API};${TAG};${ARCH}"
 
@@ -52,12 +54,12 @@ set_ini() { # key value
 }
 set_ini hw.ramSize "$RAM"
 set_ini hw.cpu.ncore 4
-set_ini disk.dataPartition.size 8G
+set_ini disk.dataPartition.size "${DATA_GB}G"
 set_ini hw.gpu.enabled yes
 set_ini hw.gpu.mode auto
 set_ini hw.keyboard yes
 set_ini fastboot.forceColdBoot yes
 rm -f "$INI.bak"
 
-echo "== AVD $AVD ready (RAM ${RAM} MB, image $IMG)"
+echo "== AVD $AVD ready (RAM ${RAM} MB, /data ${DATA_GB} GB, image $IMG)"
 echo "   start it with: scripts/start_emulator.sh $AVD $RAM"

@@ -36,7 +36,7 @@ python3 run_experiment.py configs/cn_apps.json --scenario list  # 每个场景�
 * API 31 起 arm64 模拟器镜像是**纯 64 位** (`ro.product.cpu.abilist=arm64-v8a`), 带 armeabi-v7a 原生库的包装不上 (`INSTALL_FAILED_NO_MATCHING_ABIS`)。应用宝给 小红书 / 哔哩哔哩 / 京东 / 支付宝 / 钉钉 的恰好是 32 位包, 所以下载前脚本先用两次 Range 请求读远端 APK 的 ZIP 中央目录, 看 `lib/<abi>/` 与模拟器的 abilist 是否有交集, 不匹配就换下一个来源, 不浪费流量。`--download --dry-run` 只打印每个来源会给什么, 不下载。
 * 下载到 `apks/<包名>/<包名>-<版本>.apk`, 写到 `.part` 完成后校验大小 / md5 (应用宝) / ZIP 结构再改名; 中断后重跑同一条命令用 Range 续传; 目录里已有 APK 的应用直接跳过。
 * 商店接口不是公开 API, 某天失效时 `--download` 会对该应用打印 `no installable build found`; 这时手工从 `--list` 给出的官网下载 `.apk` / `.xapk` 放进 `apks/`, 不带参数运行即可; 或从自己的手机导出: `--from-phone <serial> --config configs/cn_apps.json` (手机开 USB 调试, `$ADB devices -l` 里状态为 `device`; 用 `pm path` 拉 base.apk + split_*.apk)。
-* 不加 `--config` 会处理目录里全部 30 个应用 (约 6 GB, 不建议; AVD `/data` 默认 8 GB, `bootstrap_cn.sh` 建的是 16 GB); 也可以只列包名: `python3 scripts/install_cn_apps.py --download com.tencent.mm com.sina.weibo`。
+* 不加 `--config` 会处理目录里全部 30 个应用 (约 6 GB, 不建议; AVD `/data` 现在默认 16 GB, 旧 AVD 用 `scripts/resize_data.sh` 加大); 也可以只列包名: `python3 scripts/install_cn_apps.py --download com.tencent.mm com.sina.weibo`。
 
 * 模拟器必须是 **arm64-v8a** 镜像 (M4 上 `scripts/setup_avd.sh` 创建的就是): 国产应用大多只带 arm 原生库, x86_64 镜像上会 `INSTALL_FAILED_NO_MATCHING_ABIS` 或走 ARM 翻译 (极慢且内存行为失真)。
 * 安装用 `-g` 一次性授予运行时权限, 减少首次启动的弹窗。

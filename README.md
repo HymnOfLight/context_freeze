@@ -12,7 +12,7 @@
 ├── docs/02_experiment_protocol.md  # 实验流程、指标 <-> 论文符号对照、断点续跑、注意事项
 ├── docs/03_adb_mechanisms.md       # 技术说明: 冻结 / 换出 / 换入 / 采样在 adb 层面到底做了什么
 ├── docs/04_cn_apps_scenarios.md    # 中国大陆应用集合 (微信/QQ/微博/网易云音乐/...) 的安装、首次启动与使用场景设计
-├── scripts/                        # setup_avd / start_emulator / prepare_device / install_cn_apps / first_run_cn_apps / run_matrix
+├── scripts/                        # setup_avd / start_emulator / resize_data / prepare_device / install_cn_apps / first_run_cn_apps / run_matrix
 ├── configs/                        # 实验配置 (JSON): emulator_base (Google 应用) / cn_apps (国产应用 + 场景)
 ├── cf/                             # Python 包
 │   ├── adb.py, device.py, parsers.py   # adb 封装; cgroup freezer / memcg 回收 / zram / tmpfs 气球; /proc 解析
@@ -37,8 +37,8 @@
 brew install --cask android-commandlinetools      # 或安装 Android Studio 后勾选 "Android SDK Command-line Tools"
 python3 -m pip install -r requirements.txt
 
-# 1. 创建可 root 的 arm64 AVD (google_apis, 非 Play 镜像), 客体内存 6 GB
-scripts/setup_avd.sh 35 cf_api35 6144
+# 1. 创建可 root 的 arm64 AVD (google_apis, 非 Play 镜像), 客体内存 6 GB, /data 16 GB (第 5 个参数; 已有的 AVD 用 scripts/resize_data.sh 加大)
+scripts/setup_avd.sh 35 cf_api35 6144 google_apis 16
 
 # 2. 启动模拟器并等待开机 (脚本会检查宿主可用内存与是否退化为软件渲染; 内存压力实验可改为 3072)
 scripts/start_emulator.sh cf_api35 6144
@@ -118,7 +118,8 @@ setopt interactivecomments 2>/dev/null   # zsh: 让行尾 "# 注释" 不被当�
 cd ~/context_freeze && source scripts/env.sh
 export ANDROID_SERIAL=emulator-5554
 
-python3 scripts/install_cn_apps.py --download --config configs/cn_apps.json   # 自动下载 14 个 64 位 APK (~3.2 GB) 并装进模拟器
+python3 scripts/install_cn_apps.py --download --config configs/cn_apps.json   # 自动下载 14 个 64 位 APK (~3.2 GB) 并装进模拟器; /data 不够会先停下
+# /data 不够 (旧 AVD 是 8 GB, 装到第 10 个就满): scripts/resize_data.sh cf_api35 16  会清空模拟器 /data 后重建为 16 GB, 再 prepare_device.sh 并重跑上一行
 python3 scripts/install_cn_apps.py --list        # 核对: installed 列
 scripts/first_run_cn_apps.sh configs/cn_apps.json                # 逐个手工点掉隐私协议 / 登录 (微信 QQ 用备用账号)
 python3 run_experiment.py configs/cn_apps.json --probe          # uid / 启动 Activity 都能解析
