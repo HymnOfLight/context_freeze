@@ -32,6 +32,44 @@ INSTALLED="$("$ADB" shell pm list packages | tr -d '\r')"
 
 names() { python3 -c "import sys; sys.path.insert(0,'.'); from cf.scenarios import display_name; print(display_name('$1'))"; }
 
+# pkg -> "pkg/Activity" of the LAUNCHER activity, the same way cf/device.py does it.
+# `am start -a MAIN -c LAUNCHER <pkg>` (implicit intent) only resolves when the launcher
+# <intent-filter> also declares android.intent.category.DEFAULT; the CN apps (and every app built
+# from the Android Studio template) do not, so that form fails with "unable to resolve Intent"
+# although the app is installed fine. Resolve the component first and start it with -n.
+launcher_activity() {
+  "$ADB" shell "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $1" \
+    | tr -d '\r' | awk -v pkg="$1" '{ gsub(/^[ \t]+|[ \t]+$/, ""); if (index($0, pkg "/") == 1 && $0 !~ / /) comp = $0 } END { print comp }'
+}
+
+start_app() {   # start_app <pkg> <component>: prints LaunchState / TotalTime / Error lines
+  local pkg="$1" comp="$2"
+  if [ -n "$comp" ]; then
+    "$ADB" shell "am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n $comp" \
+      | tr -d '\r' | grep -E "LaunchState|TotalTime|Error" || true
+  else
+    # no resolvable launcher activity: let monkey pick one (it does not need CATEGORY_DEFAULT either)
+    "$ADB" shell "monkey -p $pkg -c android.intent.category.LAUNCHER 1" >/dev/null 2>&1 \
+      && echo "   started via monkey (no LaunchState/TotalTime available)" \
+      || echo "   Error: could not start $pkg"
+  fi
+}
+
+diagnose() {   # why is the installed package not launchable?
+  local pkg="$1"
+  echo "   !! no LAUNCHER activity resolves for $pkg. Diagnostics:"
+  "$ADB" shell "pm path $pkg" | tr -d '\r' | sed 's/^/      /'
+  "$ADB" shell "dumpsys package $pkg" | tr -d '\r' \
+    | grep -E "installed=|enabled=|hidden=|suspended=|stopped=|versionName=|primaryCpuAbi=" | sed 's/^/      /' | head -8
+  echo "      activities with MAIN/LAUNCHER (cmd package query-activities):"
+  local acts
+  acts=$("$ADB" shell "cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER" \
+    | tr -d '\r' | grep -F "$pkg/" || true)
+  echo "${acts:-(none)}" | sed 's/^[[:space:]]*/      /'
+  echo "      -> if 'installed=false' / 'enabled=2|3': pm install -r -g the APK again;"
+  echo "         if 'primaryCpuAbi=armeabi-v7a' on an arm64-only image: the build is 32-bit, re-download (install_cn_apps.py --download)"
+}
+
 echo "== first-run pass; the emulator window must be visible. Press Enter after each app is on its home screen."
 for pkg in $PKGS; do
   if ! grep -q "package:$pkg\$" <<<"$INSTALLED"; then
@@ -43,7 +81,13 @@ for pkg in $PKGS; do
   echo "== $name ($pkg)"
   "$ADB" shell am set-standby-bucket "$pkg" active >/dev/null 2>&1 || true
   "$ADB" shell cmd appops set "$pkg" RUN_IN_BACKGROUND allow >/dev/null 2>&1 || true
-  "$ADB" shell "am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $pkg" | tr -d '\r' | grep -E "LaunchState|TotalTime|Error" || true
+  comp=$(launcher_activity "$pkg")
+  if [ -n "$comp" ]; then
+    echo "   launcher activity: $comp"
+  else
+    diagnose "$pkg"
+  fi
+  start_app "$pkg" "$comp"
   read -r -p "   accept the agreement / log in / dismiss update prompts, then press Enter (s = skip, q = quit): " ans
   case "$ans" in
     q) break;;
@@ -51,8 +95,7 @@ for pkg in $PKGS; do
     *)
       # second start is what the experiment will see: it must be fast and land on the main Activity
       "$ADB" shell am force-stop "$pkg"; sleep 1
-      "$ADB" shell "am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER $pkg" | tr -d '\r' \
-        | grep -E "LaunchState|TotalTime" | tr '\n' ' '; echo
+      start_app "$pkg" "$comp" | grep -E "LaunchState|TotalTime|Error|monkey" | tr '\n' ' '; echo
       ;;
   esac
   "$ADB" shell input keyevent KEYCODE_HOME

@@ -53,6 +53,7 @@ scripts/first_run_cn_apps.sh configs/cn_apps.json
 * 微信 / QQ 需要登录; 用备用账号, 模拟器登录可能触发风控。微博 / 网易云音乐 / 哔哩哔哩 / 抖音 / 淘宝 / 京东可以不登录浏览。
 * 弹出"自启动 / 后台运行 / 通知权限"时选拒绝。这些应用后台唤醒频繁, 冻结后它们的 binder 事务会积压, ActivityManager 会以 `Sync transaction while frozen` / `bg anr` 杀掉进程 (runner 会记录原因), 这是国产应用集合上**预期会看到**的现象, 也是与 Google 应用集合最大的行为差异之一。
 * 脚本把应用放进 ACTIVE standby bucket 并允许 `RUN_IN_BACKGROUND`, 使 Android 对它们一视同仁, 避免系统自己的分级限制混进对照。
+* 拉起方式与 runner (`cf/device.py`) 相同: 先 `cmd package resolve-activity --brief -a MAIN -c LAUNCHER <pkg>` 解析出 `pkg/Activity`, 再 `am start -W -n pkg/Activity`。**不要**手工用 `am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER <pkg>` (只给包名的隐式 intent): 隐式启动要求 intent-filter 带 `android.intent.category.DEFAULT`, 国产应用的启动 Activity 都不带 (Android Studio 模板生成的也不带), 所以应用装得好好的也会报 `Error: Activity not started, unable to resolve Intent { ... pkg=com.tencent.mm }`。解析不到 Activity 时脚本打印 `pm path` / `dumpsys package` 里的 `installed= / enabled= / primaryCpuAbi=` 并退回 `monkey -p <pkg> -c LAUNCHER 1`。
 
 ## 2. 使用场景 (`cf/scenarios.py: SCENARIOS`)
 
