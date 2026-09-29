@@ -112,6 +112,7 @@ k=10 左右即可, Bellman 离线最优 (模拟器轨迹回放到 `cf.sim`) 支�
 | `LaunchState: TIMEOUT` | `am start -W` 内部等待首帧超时 (模拟器极慢时出现, 例如无 KVM 的 x86 软件模拟); 记录 `WaitTime` 作为时延下界。M4 上原生 arm64 镜像不会出现 |
 | 应用 `LaunchState: COLD` 频繁 | lmkd 在杀后台进程; 可提高客体 RAM, 或在配置里设置 `"stop_lmkd": true` (仅实验用, 由内核 OOM killer 兜底) |
 | `am start -W` 无 `TotalTime` | 该 Activity 已在前台 (记为 `FRONT`), trace 生成器默认不允许连续重复请求 |
+| `am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER <pkg>` 报 `unable to resolve Intent`, 但 `pm list packages` 里有 | 只给包名的隐式 intent 需要 filter 带 `CATEGORY_DEFAULT`, 国产应用都不带; 用 `cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER <pkg>` 取组件后 `am start -W -n pkg/Activity` (runner 与 `first_run_cn_apps.sh` 就是这样做的), 或 `monkey -p <pkg> -c android.intent.category.LAUNCHER 1` |
 | 主机内存告急 / 模拟器日志出现 "Software GL" | 关闭 IDE/浏览器, 重启模拟器; 仍不够时客体降到 4096 MB; 不要在同一台机器上同时开两个模拟器 |
 | `run_experiment.py` 报 `PreflightError` 拒绝开跑 | 系统 freezer 未关 (`settings get global cached_apps_freezer` 应为 `disabled`, 用 `prepare_device.sh --system-freezer disabled` 并重启) 或模拟器在软件渲染 (用 `start_emulator.sh` 重启); 只有跑 "Android 默认" 基线才用 `--no-strict` |
 | 进度行出现 `killed: xxx[bg anr]` 等 | 系统杀了后台进程, 方括号是 ActivityManager 的原因; 与内存无关的原因见 docs/02 §8 表格; 实时看: `adb logcat -b events \| grep -E 'am_kill\|am_anr'` |
