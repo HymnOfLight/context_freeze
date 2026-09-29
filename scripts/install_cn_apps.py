@@ -43,6 +43,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -259,7 +260,7 @@ def auto_download(adb: Adb, pkgs: list[str], d: str, dry_run: bool = False) -> l
             if ok:
                 break
         if not ok:
-            print(f"   !! no installable build found for {pkg}; download it by hand from {CATALOG[pkg][2]} into {d}/")
+            print(f"   !! no installable build found for {pkg}; download it by hand from {CATALOG.get(pkg, (None, None, 'the vendor site'))[2]} into {d}/")
     return got
 
 
@@ -383,6 +384,16 @@ def main(argv: list[str]) -> int:
     if args.config and not args.pkgs:
         with open(args.config, encoding="utf-8") as f:
             pkgs = json.load(f)["apps"]
+    bogus = [p for p in pkgs if p not in CATALOG and not re.fullmatch(r"[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)+", p)]
+    if bogus:
+        print(f"!! not Android package names: {' '.join(bogus)}")
+        if bogus[0].startswith("#"):
+            # macOS zsh does not treat `#` as a comment in an interactive shell, so a pasted line with a
+            # trailing `# ...` comment turns the comment into positional arguments.
+            print("   (a `# comment` at the end of the pasted command line? zsh passes it as arguments: run "
+                  "`setopt interactivecomments` once, or paste the command without the comment)")
+        print("   valid package names: python3 %s --list" % sys.argv[0])
+        return 2
     try:
         adb = Adb(args.serial)
         adb.shell("echo")
