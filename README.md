@@ -29,6 +29,9 @@
 
 ## 快速开始 (macOS, Apple Silicon)
 
+> macOS 默认的 zsh 在交互模式下**不把 `#` 当注释**: 整行连同 `# 说明` 一起粘贴时, 注释会变成命令参数 (例如 `install_cn_apps.py` 会把 `#`、`14`、`个应用,` 当成包名)。
+> 先执行一次 `setopt interactivecomments` (加进 `~/.zshrc` 永久生效), 或者粘贴时去掉行尾注释。
+
 ```bash
 # 0. 依赖
 brew install --cask android-commandlinetools      # 或安装 Android Studio 后勾选 "Android SDK Command-line Tools"
@@ -111,6 +114,7 @@ docs/04 §5 说明了为什么这样裁: 保留全部场景与策略, η 取两�
 ## 国产应用: 下载、安装并完成配置 (手动逐步)
 
 ```bash
+setopt interactivecomments 2>/dev/null   # zsh: 让行尾 "# 注释" 不被当成参数
 cd ~/context_freeze && source scripts/env.sh
 export ANDROID_SERIAL=emulator-5554
 
