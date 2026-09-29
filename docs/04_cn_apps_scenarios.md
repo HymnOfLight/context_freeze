@@ -45,8 +45,11 @@ python3 run_experiment.py configs/cn_apps.json --scenario list  # 每个场景�
 ### 1.2 首次启动 (必须手工做一遍)
 
 ```bash
-scripts/first_run_cn_apps.sh configs/cn_apps.json
+scripts/first_run_cn_apps.sh configs/cn_apps.json            # 交互: 每个应用处理完按回车 (s 跳过, q 退出)
+AUTO=1 DWELL=10 scripts/first_run_cn_apps.sh configs/cn_apps.json   # 不提问: 拉起 -> 停 DWELL 秒 -> force-stop -> 再拉起, 最后打印汇总表
 ```
+
+`AUTO=1` (stdin 不是终端时自动启用) 只用来核对全部应用能否拉起、第二次启动的 `LaunchState/TotalTime` 是多少; 协议 / 登录仍要在模拟器窗口里点 (可以趁 DWELL 那几秒点, 或先不带 AUTO 跑一遍)。
 
 每个应用第一次启动都有《个人信息保护指引》, 多数还有登录页 / 更新提示。`am start -W` 测的是"第一个 Activity 的首帧", 如果协议没点同意、账号没登录, 之后实验测到的就是协议页和登录页的启动时间, 而不是应用本身。脚本逐个拉起应用, 等你在模拟器窗口里处理完按回车, 然后 `force-stop` 再启动一次, 打印第二次的 `LaunchState/TotalTime` —— 这才是实验会看到的数字, 应该在几百 ms 到 1.5 s 之间并落在主页 Activity。
 

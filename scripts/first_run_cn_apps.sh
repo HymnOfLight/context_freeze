@@ -8,6 +8,12 @@
 # handle the dialogs in the emulator window; press Enter when the app shows its normal home screen.
 #
 #   scripts/first_run_cn_apps.sh [CONFIG=configs/cn_apps.json]
+#   AUTO=1 [DWELL=10] scripts/first_run_cn_apps.sh [CONFIG]   # no prompts: start, wait DWELL s, force-stop, start again
+#
+# AUTO mode (also chosen when stdin is not a terminal) never asks anything: it just brings every app
+# up once, waits DWELL seconds, cold-starts it again and prints both results plus a summary table.
+# Use it to verify that everything launches; the agreements / logins still have to be handled by hand
+# in the emulator window at some point (do it during the DWELL seconds, or run once without AUTO).
 #
 # Tips
 #   * 微信 / QQ need a logged-in account; use a secondary account - logging in from an emulator can
@@ -50,8 +56,8 @@ start_app() {   # start_app <pkg> <component>: prints LaunchState / TotalTime / 
   else
     # no resolvable launcher activity: let monkey pick one (it does not need CATEGORY_DEFAULT either)
     "$ADB" shell "monkey -p $pkg -c android.intent.category.LAUNCHER 1" >/dev/null 2>&1 \
-      && echo "   started via monkey (no LaunchState/TotalTime available)" \
-      || echo "   Error: could not start $pkg"
+      && echo "started via monkey (no LaunchState/TotalTime available)" \
+      || echo "Error: could not start $pkg"
   fi
 }
 
@@ -70,10 +76,20 @@ diagnose() {   # why is the installed package not launchable?
   echo "         if 'primaryCpuAbi=armeabi-v7a' on an arm64-only image: the build is 32-bit, re-download (install_cn_apps.py --download)"
 }
 
-echo "== first-run pass; the emulator window must be visible. Press Enter after each app is on its home screen."
+AUTO="${AUTO:-0}"; [ -t 0 ] || AUTO=1
+DWELL="${DWELL:-10}"
+one_line() { grep -E "LaunchState|TotalTime|Error|monkey" | tr '\n' ' ' | sed -E 's/ +$//'; }
+
+if [ "$AUTO" = 1 ]; then
+  echo "== first-run pass, AUTO mode: each app is started, left for ${DWELL}s, force-stopped and started again (DWELL=<s> to change)."
+else
+  echo "== first-run pass; the emulator window must be visible. Press Enter after each app is on its home screen (AUTO=1 for no prompts)."
+fi
+SUMMARY=""
 for pkg in $PKGS; do
   if ! grep -q "package:$pkg\$" <<<"$INSTALLED"; then
     echo "-- $pkg not installed, skipped"
+    SUMMARY+="$pkg|-|not installed|"$'\n'
     continue
   fi
   name=$(names "$pkg")
@@ -87,19 +103,29 @@ for pkg in $PKGS; do
   else
     diagnose "$pkg"
   fi
-  start_app "$pkg" "$comp"
-  read -r -p "   accept the agreement / log in / dismiss update prompts, then press Enter (s = skip, q = quit): " ans
+  first=$(start_app "$pkg" "$comp" | one_line); echo "   1st: $first"
+  if [ "$AUTO" = 1 ]; then
+    sleep "$DWELL"; ans=""
+  else
+    read -r -p "   accept the agreement / log in / dismiss update prompts, then press Enter (s = skip, q = quit): " ans
+  fi
+  second="skipped"
   case "$ans" in
     q) break;;
     s) ;;
     *)
       # second start is what the experiment will see: it must be fast and land on the main Activity
       "$ADB" shell am force-stop "$pkg"; sleep 1
-      start_app "$pkg" "$comp" | grep -E "LaunchState|TotalTime|Error|monkey" | tr '\n' ' '; echo
+      second=$(start_app "$pkg" "$comp" | one_line); echo "   2nd: $second"
       ;;
   esac
+  SUMMARY+="$name ($pkg)|$first|$second|"$'\n'
   "$ADB" shell input keyevent KEYCODE_HOME
 done
+
+echo
+echo "== summary (2nd start = what the experiment measures; UNKNOWN / no TotalTime = landed on a trampoline or was already in front)"
+printf '%s' "$SUMMARY" | column -t -s '|' 2>/dev/null || printf '%s' "$SUMMARY"
 echo
 echo "== done. Check with:  python3 run_experiment.py $CONFIG --probe"
 echo "   and list the scenarios usable with the installed apps:  python3 run_experiment.py $CONFIG --scenario list"
