@@ -25,7 +25,7 @@
 #   SCENARIOS="office social ..." default: office social commute shopping evening
 #   POLICIES="none lru landlord hybrid"   ETAS="0.25 0.5"   SEEDS="1"   T=60   (override any of them)
 #   OUT=results/cn_matrix         matrix directory (fixed so that re-runs resume)
-#   DATA_GB=16                    /data partition of a *new* AVD (the default 8 GB is too small)
+#   DATA_GB=16                    /data partition of a *new* AVD (scripts/resize_data.sh enlarges an existing one)
 #   SKIP_FIRST_RUN=1              do not run the interactive first-run pass again
 #   PHONE=<serial>                pull the APKs from this phone instead of downloading them
 set -euo pipefail
@@ -77,11 +77,7 @@ python3 -m pip install -q -r requirements.txt 2>/dev/null || python3 -m pip inst
 step "1/7 AVD $AVD ($RAM_MB MB RAM, ${DATA_GB} GB /data)"
 INI="$HOME/.android/avd/$AVD.avd/config.ini"
 if [ ! -f "$INI" ]; then
-  scripts/setup_avd.sh 35 "$AVD" "$RAM_MB"
-  # the data partition size is fixed when the disk is first created: set it before the first boot
-  sed -i '' "s/^disk.dataPartition.size=.*/disk.dataPartition.size=${DATA_GB}G/" "$INI" 2>/dev/null \
-    || sed -i "s/^disk.dataPartition.size=.*/disk.dataPartition.size=${DATA_GB}G/" "$INI"
-  grep -q "^disk.dataPartition.size=" "$INI" || echo "disk.dataPartition.size=${DATA_GB}G" >> "$INI"
+  scripts/setup_avd.sh 35 "$AVD" "$RAM_MB" google_apis "$DATA_GB"
 else
   echo "   exists: $INI ($(grep '^disk.dataPartition.size' "$INI" || echo 'dataPartition default'))"
 fi
@@ -96,9 +92,9 @@ fi
 FREE_DATA=$(sh_ df -m /data | awk 'NR==2{print $4}')
 echo "   /data free: ${FREE_DATA} MB"
 if [ "${FREE_DATA:-0}" -lt 6000 ] && ! sh_ pm list packages | grep -q com.tencent.mm; then
-  echo "!! less than 6 GB free on /data before installing the apps. This AVD was created with the 8 GB default."
-  echo "   Recreate it with a bigger partition (deletes the emulator's data):"
-  echo "     \$ADB emu kill; \$AVDMANAGER delete avd -n $AVD; DATA_GB=16 bash scripts/bootstrap_cn.sh"
+  echo "!! less than 6 GB free on /data before installing the apps (AVD created with the old 8 GB default?)."
+  echo "   Enlarge the partition - wipes the emulator's /data, cached APKs in apks/ are reused - then re-run this script:"
+  echo "     YES=1 scripts/resize_data.sh $AVD $DATA_GB $RAM_MB"
   die "not enough space on /data"
 fi
 

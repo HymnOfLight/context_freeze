@@ -285,6 +285,9 @@ def install_files(adb: Adb, files: list[str]) -> bool:
                   f"this APK is for another architecture (x86 image + arm-only app, or vice versa)")
         elif "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in msg:
             print("   !! a differently signed version is installed; `adb uninstall <pkg>` first")
+        elif "INSUFFICIENT_STORAGE" in msg or "not enough space" in msg.lower():
+            print("   !! /data is full. Enlarge it (wipes the emulator's data, cached APKs are reused): "
+                  "scripts/resize_data.sh cf_api35 16")
         else:
             print(f"   !! install failed: {msg.strip().splitlines()[-1] if msg.strip() else e}")
         return False
@@ -302,6 +305,42 @@ def bundle_members(path: str, tmp: str) -> list[str]:
     # base first, then splits
     out.sort(key=lambda p: (0 if os.path.basename(p) in ("base.apk",) or "split" not in os.path.basename(p) else 1, p))
     return out
+
+
+def data_free_mb(adb: Adb) -> int | None:
+    parts = adb.shell("df -m /data | tail -1").split()
+    try:
+        return int(parts[3])
+    except (IndexError, ValueError):
+        return None
+
+
+def check_space(adb: Adb, d: str, skip_installed: bool = True) -> bool:
+    """Refuse to start installing when /data cannot hold the APKs still to install. An installed app
+    costs ~2.5x its APK (APK + extracted native libs + dex/oat + first-run data), and these apps
+    keep growing; leaving less than ~1 GB free makes the first-run pass and the experiment fail."""
+    free = data_free_mb(adb)
+    if free is None or not os.path.isdir(d):
+        return True
+    have = installed_packages(adb) if skip_installed else set()
+    todo_mb = 0.0
+    for e in sorted(os.listdir(d)):
+        p = os.path.join(d, e)
+        if os.path.isdir(p):
+            if e in have:
+                continue
+            todo_mb += sum(os.path.getsize(os.path.join(p, f)) for f in os.listdir(p) if f.endswith(".apk")) / 1e6
+        elif e.lower().endswith((".apk", ".xapk", ".apks", ".zip")):
+            todo_mb += os.path.getsize(p) / 1e6
+    need = int(todo_mb * 2.5 + 1024)
+    if todo_mb and free < need:
+        print(f"!! /data has {free} MB free; installing {todo_mb:.0f} MB of APKs needs about {need} MB "
+              f"(2.5x APK size + 1 GB headroom for app data).")
+        print("   Enlarge the data partition (this wipes the emulator's /data; the downloaded APKs in apks/ are kept):")
+        print("       scripts/resize_data.sh cf_api35 16      # then prepare_device.sh and re-run this command")
+        print("   or install anyway with --ignore-space.")
+        return False
+    return True
 
 
 def install_from_dir(adb: Adb, d: str) -> None:
@@ -378,6 +417,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--config", metavar="JSON", help="with --download / --from-phone: only the apps listed in this config")
     ap.add_argument("--serial", "-s", help="adb serial of the emulator (default: $ANDROID_SERIAL / the only device)")
     ap.add_argument("--list", action="store_true", help="print the catalogue with download pages and exit")
+    ap.add_argument("--ignore-space", action="store_true", help="install even if /data looks too small for the APKs")
     args = ap.parse_args(argv)
     pkgs = args.pkgs or list(CATALOG)
     if args.config and not args.pkgs:
@@ -434,12 +474,14 @@ def main(argv: list[str]) -> int:
             print(f"{len(got)}/{len(todo)} apps have an installable build (dry run, nothing downloaded)")
             return 0
         print(f"{len(got)}/{len(todo)} APKs on disk")
+    if not args.ignore_space and not check_space(adb, args.dir):
+        return 1
     install_from_dir(adb, args.dir)
     have = installed_packages(adb)
     df = adb.shell("df -h /data | tail -1").split()
     if len(df) >= 4:
         print(f"\n/data: {df[2]} used, {df[3]} free (these apps take 0.3-1 GB each incl. data; "
-              f"AVD data partition is 8 GB by default)")
+              f"scripts/resize_data.sh enlarges the partition)")
     print(f"\n{len(set(CATALOG) & have)}/{len(CATALOG)} catalogue apps installed.")
     missing_cfg = [p for p in pkgs if p not in have]
     if missing_cfg:
