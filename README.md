@@ -54,7 +54,7 @@ scripts/list_launchable.sh                        # 核对 configs/emulator_base
 #     自动从应用宝 / 酷安下载 64 位 APK 并安装 (约 3.2 GB, 可断点续传), 再手工过一遍首次启动的隐私协议 / 登录
 export ANDROID_SERIAL=emulator-5554
 python3 scripts/install_cn_apps.py --download --config configs/cn_apps.json
-scripts/first_run_cn_apps.sh configs/cn_apps.json
+scripts/first_run_cn_apps.sh configs/cn_apps.json          # AUTO=1 不提问, 只核对能否拉起并打印汇总
 
 # 5. 探测设备能力 (freezer / memcg / zram / 各应用 uid 与启动 Activity)
 python3 run_experiment.py configs/emulator_base.json --probe
