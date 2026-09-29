@@ -44,8 +44,6 @@ SEEDS="${SEEDS:-1 2 3}"
 SCENARIOS="${SCENARIOS:-}"          # empty: the trace kind of the config (zipf/markov/...)
 OUT="${OUT:-results/matrix_$(date +%Y%m%d-%H%M%S)}"
 M_FG_FROM="${M_FG_FROM:-}"
-EXTRA=()
-[ "${NO_STRICT:-0}" = 1 ] && EXTRA+=(--no-strict)
 mkdir -p "$OUT"
 export PYTHONUNBUFFERED=1
 
@@ -98,12 +96,14 @@ FAILED=0
 
 run_one() { # name policy eta seed [scenario]
   local name="$1" pol="$2" eta="$3" seed="$4" sc="${5:-}" rc
-  local mfg=() scn=()
-  [ -n "$M_FG_FROM" ] && mfg=(--m-fg-from "$M_FG_FROM")
-  [ -n "$sc" ] && scn=(--scenario "$sc")
+  # one always-non-empty array: macOS ships bash 3.2, where "${empty[@]}" aborts under `set -u`
+  local cmd=(python3 -u run_experiment.py "$CONFIG" --policy "$pol" --eta "$eta" --T "$T" --seed "$seed"
+             --name "$name" --out-dir "$OUT")
+  [ -n "$M_FG_FROM" ] && cmd+=(--m-fg-from "$M_FG_FROM")
+  [ -n "$sc" ] && cmd+=(--scenario "$sc")
+  [ "${NO_STRICT:-0}" = 1 ] && cmd+=(--no-strict)
   set +e
-  python3 -u run_experiment.py "$CONFIG" --policy "$pol" --eta "$eta" --T "$T" --seed "$seed" \
-    --name "$name" --out-dir "$OUT" "${mfg[@]}" "${scn[@]}" "${EXTRA[@]}" 2>&1 | tee -a "$OUT/${name}.console.log"
+  "${cmd[@]}" 2>&1 | tee -a "$OUT/${name}.console.log"
   rc=${PIPESTATUS[0]}
   set -e
   if [ "$rc" = 130 ]; then                     # Ctrl+C: stop the whole sweep, keep checkpoints
@@ -126,7 +126,8 @@ if echo " $POLICIES " | grep -q " none "; then
   for sc in ${SCENARIOS:-""}; do
     for seed in $SEEDS; do run_one "none${sc:+_$sc}_eta1.0_s${seed}" none 1.0 "$seed" "$sc"; done
   done
-  POLICIES=$(echo "$POLICIES" | sed 's/\bnone\b//')
+  # (not sed 's/\bnone\b//': BSD sed on macOS has no \b, so `none` would be run again per eta)
+  REST=""; for pol in $POLICIES; do [ "$pol" = none ] || REST="$REST $pol"; done; POLICIES="$REST"
 fi
 
 for pol in $POLICIES; do
@@ -139,6 +140,10 @@ for pol in $POLICIES; do
   done
 done
 
+if ! ls "$OUT"/*.jsonl >/dev/null 2>&1; then
+  echo "!! no result files in $OUT - every cell failed before writing anything; see $OUT/*.console.log"
+  exit 1
+fi
 python3 -m cf.analyze "$OUT"/*.jsonl --csv "$OUT/summary.csv" --agg "$OUT/summary_agg.csv" \
   --pareto "$OUT/pareto.csv" --plot "$OUT/pareto.png" || true
 python3 -m cf.analyze "$OUT"/*.jsonl --x eta --plot "$OUT/pareto_eta.png" >/dev/null 2>&1 || true
