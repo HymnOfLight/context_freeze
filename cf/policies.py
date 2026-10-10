@@ -7,7 +7,8 @@ its anonymous pages are pushed to ZRAM.  Residency must satisfy
     M(S) = sum_{i in S} m_i + sum_{i not in S} rho_i * a_i  <=  B.
 
 Policies:
-  none        keep everything resident (ignores the budget) - baseline "不冻结"
+  none        keep everything resident (ignores the budget) - baseline "不冻结 / 不限制"
+  static      only the current app resident: every background app treated (ignores the budget)
   lru / lfu   classic recency / frequency ordering
   landlord    Landlord / GreedyDual-Size credits (robust, no prediction)
   markov      first-order Markov predictor, keep apps with highest p_hat * C_resume
@@ -92,6 +93,16 @@ class NonePolicy(Policy):
 
     def choose_resident(self, t, req, infos, budget, current):
         return set(infos)
+
+
+class StaticPolicy(Policy):
+    """Only the current app is resident: every background app gets the full background treatment
+    (Android: frozen + compressed; Linux: CPU-limited + memory.high).  Ignores the budget - this is
+    the "limit whatever loses the foreground window" rule and the lower bound on background memory."""
+    name = "static"
+
+    def choose_resident(self, t, req, infos, budget, current):
+        return {req} if req in infos else set()
 
 
 class LRUPolicy(Policy):
@@ -350,6 +361,7 @@ def weighted_inversions(tau_hat: dict[str, float], tau: dict[str, float],
 
 POLICIES = {
     "none": NonePolicy,
+    "static": StaticPolicy,
     "lru": LRUPolicy,
     "lfu": LFUPolicy,
     "landlord": LandlordPolicy,

@@ -234,12 +234,13 @@ def _mean_std(vals: list[float]) -> tuple[float | None, float | None]:
     return m, sd
 
 
-def aggregate(rows: list[dict]) -> list[dict]:
+def aggregate(rows: list[dict], extra_cols: Iterable[str] = ()) -> list[dict]:
     """Collapse replicate runs into one row per (policy, eta, guest RAM): mean and sample std.
 
     Runs of the same cell from different guest-RAM configurations are *not* merged - they are
     different experiments and must not be connected in one curve (this is what made the first
-    Pareto plot unreadable)."""
+    Pareto plot unreadable).  `extra_cols` are averaged in addition to AGG_COLS (back-end specific)."""
+    agg_cols = list(AGG_COLS) + [c for c in extra_cols if c not in AGG_COLS]
     groups: dict[tuple, list[dict]] = {}
     for r in rows:
         if r.get("sum_m_fg_mb") and r.get("bg_pss_avg_mb") is not None:
@@ -256,7 +257,7 @@ def aggregate(rows: list[dict]) -> list[dict]:
         a["k"] = rs[0].get("k")
         a["budget_mb"] = _mean_std([r.get("budget_mb") for r in rs])[0]
         a["sum_m_fg_mb"] = _mean_std([r.get("sum_m_fg_mb") for r in rs])[0]
-        for c in AGG_COLS:
+        for c in agg_cols:
             m, sd = _mean_std([r.get(c) for r in rs])
             a[c] = None if m is None else round(m, 3 if c == "achieved_eta" else 1)
             a[c + "_sd"] = None if sd is None else round(sd, 3 if c == "achieved_eta" else 1)

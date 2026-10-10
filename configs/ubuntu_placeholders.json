@@ -1,0 +1,23 @@
+{
+  "_comment": "Pipeline smoke test without any vendor app: four bundled placeholder programs (python3 -m cf.linux.placeholder_app) standing in for the three categories. Each shows a progress counter and writes it to /tmp/cf_placeholder_<id>.json, so you can verify that throttled apps keep progressing (slower) and never lose state. Works on any X11 session, including Xvfb + a window manager.",
+  "apps": ["sim_download", "sim_push", "sim_compute", "xiaoyi_sim"],
+  "app_overrides": {
+    "sim_download": {"cmd": "python3 -m cf.linux.placeholder_app --app sim_download --title 下载占位 --cpu 0.3 --mem 250 --io-mbps 20"},
+    "sim_push":     {"cmd": "python3 -m cf.linux.placeholder_app --app sim_push --title 推送占位 --cpu 0.1 --mem 150 --notify-every 15",
+                     "notify_names": ["推送占位", "sim_push"]},
+    "sim_compute":  {"cmd": "python3 -m cf.linux.placeholder_app --app sim_compute --title 计算占位 --cpu 0.9 --workers 3 --mem 400"},
+    "xiaoyi_sim":   {"cmd": "python3 -m cf.linux.placeholder_app --app xiaoyi_sim --title '小艺(占位)' --cpu 0.6 --mem 300"}
+  },
+  "policy": "static",
+  "eta": 0.3,
+  "throttle": {"cpu_mode": "quota", "cpu_cores": 1.0, "cpu_weight": 20, "mem_frac": 0.5, "mem_min_mb": 64,
+               "mem_hard": false, "swap_max_mb": null, "proactive_reclaim": true},
+  "cpu_throttle_resident": true,
+  "trace": {"kind": "zipf", "T": 12, "seed": 1, "s": 1.0, "stickiness": 0.3},
+  "dwell_s": 4.0,
+  "settle_s": 1.0,
+  "warmup_dwell_s": 3.0,
+  "notifications": true,
+  "min_ram_mb": 2048,
+  "out_dir": "results"
+}

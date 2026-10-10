@@ -1,0 +1,52 @@
+{
+  "_comment": "Ubuntu 22.04 (在 MacBook 的 UTM/Parallels 虚拟机里) 桌面应用集合: 下载 (百度网盘 / 浏览器 / 腾讯视频 / 哔哩哔哩), 通知推送 (微信 / QQ / 钉钉), 计算处理 (WPS / 剪映 / 中望CAD / 悟空图像 / 小艺). 窗口失去前台后不冻结, 而是把它的 cgroup 限到 1 个逻辑核心、memory.high = mem_frac x 前台 PSS、可选 swap 上限; 进程、窗口与状态全部保留. 未安装的应用按 catalogue 里的 substitute 替代 (剪映->kdenlive, 小艺->内置占位程序), 都没有就跳过并 WARN. 用 `python3 run_linux.py configs/ubuntu_cn_desktop.json --probe / --catalog / --discover` 核对.",
+  "apps": [
+    "wechat", "qq", "dingtalk",
+    "baidunetdisk", "firefox", "chrome", "tencent_video", "bilibili",
+    "wps", "jianying", "zwcad", "photosir", "xiaoyi"
+  ],
+  "_comment_app_overrides": "厂商包的命令名 / WM_CLASS 可能与 catalogue 不同; 用 --discover 看到实际值后在这里覆盖, 字段同 cf/linux/apps.py 的 LinuxApp (cmd, match, wm_class, name_rx, notify_names, exe, package). 也可以加入新应用 (键 = 新 id, 至少给 cmd / match / wm_class / category).",
+  "app_overrides": {
+    "tencent_video": {"cmd": "tencent-video"},
+    "xiaoyi_sim": {"cmd": "python3 -m cf.linux.placeholder_app --app xiaoyi_sim --title '小艺(占位)' --cpu 0.6 --mem 400"}
+  },
+  "never_throttle": [],
+  "policy": "static",
+  "policy_kw": {},
+  "eta": 0.3,
+  "throttle": {
+    "cpu_mode": "quota",
+    "cpu_cores": 1.0,
+    "cpuset_cpus": "last",
+    "cpu_weight": 20,
+    "mem_frac": 0.5,
+    "mem_min_mb": 192,
+    "mem_hard": false,
+    "mem_hard_factor": 1.5,
+    "swap_max_mb": null,
+    "io_weight": null,
+    "proactive_reclaim": true,
+    "_comment": "cpu_mode quota: 每个后台应用 cpu.max = cpu_cores 个核心的带宽 (默认 1 核); cpuset: 所有后台应用共享 cpuset_cpus 这 (几) 个核 (last = 编号最大的核); both 两者都用. mem_frac: 预算外 (shrunk) 应用的 memory.high = mem_frac x m_fg (不低于 mem_min_mb). mem_hard=false 时不设 memory.max, 内核只回收 / 节流, 不会 OOM kill -> 不丢状态. swap_max_mb 限制单个应用的 swap 用量 (null 不限); 注意 memory.high + 很小的 swap 上限 = 应用几乎不能分配内存, 只会慢, 仍不会死."
+  },
+  "cpu_throttle_resident": true,
+  "_comment_tiers": "cpu_throttle_resident=true: 预算内的后台应用 (S_t) 也限 CPU (tier bg), 只有预算外的才额外限内存 (tier shrunk) -> 所有切走的窗口都受 CPU 限制, 策略只决定内存分层; false: 预算内的后台应用完全不受限.",
+  "trace": {
+    "kind": "scenario",
+    "scenario": "office",
+    "T": 60,
+    "seed": 1,
+    "_comment": "scenario: office 办公 | design 设计/计算 | download 下载 | chat 消息; kind=day 按 chat 15% -> office 40% -> download 15% -> design 30% 依次经历 (自带分布漂移). 也可内联 {\"apps\":{id:权重},\"hub\":id,\"flows\":[[id,id,...]],\"p_hub\":0.3,\"p_flow\":0.25,\"stickiness\":0.2}."
+  },
+  "dwell_s": 8.0,
+  "settle_s": 2.0,
+  "warmup_dwell_s": 10.0,
+  "minimize_background": false,
+  "default_rho": null,
+  "notifications": true,
+  "adopt_strays": true,
+  "sudo_adopt": false,
+  "launch_timeout_s": 90,
+  "ping_timeout_s": 15,
+  "min_ram_mb": 6144,
+  "out_dir": "results"
+}
