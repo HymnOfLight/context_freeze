@@ -108,7 +108,7 @@ def main(argv=None) -> int:
     if args.discover:
         from cf.linux import x11
         print(f"session {x11.session_type() or '?'}  DISPLAY {os.environ.get('DISPLAY', '-')}  wm {x11.wm_name() or '?'}")
-        print(x11.discover_table())
+        print(x11.discover_table(cat, CgroupTree().leaf_of))
         return 0
     if args.release:
         n = LinuxDesktop(cat=cat).release_all()

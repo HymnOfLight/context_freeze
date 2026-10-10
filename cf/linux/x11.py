@@ -277,11 +277,20 @@ def wm_name() -> str:
     return parse_xprop(_run(["xprop", "-id", str(ids[0]), "_NET_WM_NAME"])).get("name", "")
 
 
-def discover_table() -> str:
-    """For filling the config: every managed window with pid / WM_CLASS / title / command."""
-    rows = [("WID", "PID", "WM_CLASS", "TITLE", "CMDLINE")]
+def discover_table(cat: Optional[dict] = None, leaf_of=None) -> str:
+    """For filling the config: every managed window with pid / WM_CLASS / title / command, plus the
+    cgroup leaf the process lives in and the catalogue id whose wm_class / name_rx / pid matches."""
+    rows = [("WID", "PID", "WM_CLASS", "TITLE", "CGROUP", "APP", "CMDLINE")]
     for w in windows(with_cmdline=True):
-        rows.append((hex(w["wid"]), str(w.get("pid") or "-"), ",".join(w.get("wm_class", [])) or "-",
-                     (w.get("name") or "-")[:40], (w.get("cmdline") or "-")[:70]))
+        pid = w.get("pid")
+        leaf = (leaf_of(pid) if (leaf_of and pid) else None) or "-"
+        app = leaf if leaf in (cat or {}) else "-"
+        if app == "-":
+            for id_, a in (cat or {}).items():
+                if windows_for([], a.wm_class, a.name_rx or None, [w]):
+                    app = id_
+                    break
+        rows.append((hex(w["wid"]), str(pid or "-"), ",".join(w.get("wm_class", [])) or "-",
+                     (w.get("name") or "-")[:32], leaf, app, (w.get("cmdline") or "-")[:60]))
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     return "\n".join("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)) for r in rows)
