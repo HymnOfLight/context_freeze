@@ -16,14 +16,17 @@ case "${1:-}" in
   --list)
     python3 - <<'PY'
 from cf.linux import apps as A
+print("Ubuntu desktop builds (install these first); '-> mobile' = the app's own Android build used only when the deb is absent\n")
 for a in A.CATALOG.values():
-    if a.id.startswith("sim_") or a.id == "xiaoyi_sim":
+    if a.kind != "desktop":
         continue
     arch = "/".join(a.arch)
-    print(f"{a.id:14s} {a.name:18s} [{a.category:8s}] arch={arch:16s} pkg={a.package or '-'}")
+    chain = " -> ".join(A.substitute_chain(a.id)[1:]) or "-"
+    print(f"{a.id:14s} {a.name:18s} [{a.category:8s}] arch={arch:16s} pkg={a.package or '-':20s} fallback: {chain}")
     print(f"               {a.install}")
     if a.note:
         print(f"               note: {a.note}")
+print("\nmobile builds: scripts/ubuntu/install_mobile_apps.sh --list   (Waydroid, scripts/ubuntu/setup_waydroid.sh)")
 PY
     exit 0 ;;
   --check)
