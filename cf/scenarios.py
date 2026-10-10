@@ -68,8 +68,14 @@ CATALOG: dict[str, tuple[str, str, str]] = {
 }
 
 
+# other back-ends (cf.linux.apps) register their own id -> display name here
+EXTRA_NAMES: dict[str, str] = {}
+
+
 def display_name(pkg: str) -> str:
-    return CATALOG.get(pkg, (pkg.rsplit(".", 1)[-1],))[0]
+    if pkg in CATALOG:
+        return CATALOG[pkg][0]
+    return EXTRA_NAMES.get(pkg, pkg.rsplit(".", 1)[-1])
 
 
 # ------------------------------------------------------------------ scenarios
