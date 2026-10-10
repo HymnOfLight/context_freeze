@@ -49,8 +49,9 @@ UTM 设置里勾 *Display → Retina Mode* 关掉 (DPI 缩放不要变)。装系
 ```bash
 cd ~/context_freeze
 sudo scripts/ubuntu/install_deps.sh            # xdotool x11-utils python3-xlib dbus-x11 libnotify-bin numpy matplotlib ...
-sudo scripts/ubuntu/install_deps.sh --subs     # 再装开源替代品 kdenlive / librecad / gimp (剪映 / 中望CAD / 悟空图像 没装时顶上)
 sudo scripts/ubuntu/install_deps.sh --hwe      # 22.04 原始内核 5.15 没有 memory.reclaim; 装 HWE 内核 (6.x) 后重启
+sudo scripts/ubuntu/setup_waydroid.sh --install  # 只在有应用没有 Ubuntu 桌面版时需要 (剪映 / 小艺): Android 运行时, 见 §4.2
+sudo scripts/ubuntu/install_deps.sh --subs     # (可选, 默认不会用到) 开源替代品 kdenlive / librecad / gimp, 仅当配置里 substitute_kinds 含 "oss"
 scripts/ubuntu/check_env.sh                    # 一页式体检: 会话类型 / 工具 / cgroup v2 / zram / snap 浏览器
 ```
 
@@ -78,33 +79,98 @@ sudo scripts/ubuntu/setup_zram.sh 4096    # 4 GB zstd zram, 优先级高于 /swa
 
 ## 4. 安装应用
 
+规则 (与需求一致): **每个应用优先用它的 Ubuntu 桌面版**; 确实没有桌面版 (剪映、小艺), 或这个架构拿不到 deb 时,
+**用同一个应用的手机版** (Android APK), 跑在同一台 Ubuntu 桌面上的 Waydroid 里 (§4.2), 受同样的 cgroup 限流。
+开源 "长得像" 的程序 (kdenlive / librecad / gimp) 和内置占位程序 **默认不会被用上**, 只有配置里 `substitute_kinds`
+显式写了 `"oss"` / `"placeholder"` 才允许。
+
 ```bash
-scripts/ubuntu/install_cn_apps.sh --list      # 每个应用: 下载页 / 架构 / deb 包名 / 备注
-sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads    # apt install ./*.deb (自动跳过架构不符的包)
-scripts/ubuntu/install_cn_apps.sh --check     # = run_linux.py --catalog: 哪些算 "已安装", 哪些会被替代
+scripts/ubuntu/install_cn_apps.sh --list       # 每个桌面版: 下载页 / 架构 / deb 包名 / 备注 / 它的手机版 fallback
+sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads     # apt install ./*.deb (自动跳过架构不符的包)
+python3 run_linux.py configs/ubuntu_cn_desktop.json --catalog   # 整个目录: kind / 是否已装 / 没装时会退到哪一条
+scripts/ubuntu/install_mobile_apps.sh --list   # 按配置里的 apps 逐个列: 桌面版状态 / 手机版状态 / 实际会跑哪一个
 ```
 
-| id | 应用 | 类别 | Linux 版 | arm64 | 备注 |
+### 4.1 桌面版 (第一优先)
+
+| id | 应用 | 类别 | Ubuntu 桌面版 | arm64 | 没有时 → 手机版 (Waydroid) |
 |---|---|---|---|---|---|
-| `baidunetdisk` | 百度网盘 | 下载 | deb (pan.baidu.com/download#linux) | 统信/麒麟商店有 arm64 包 | 登录后挂一个大文件下载 = 后台下载负载 |
-| `firefox` | Firefox | 下载 | **Mozilla APT 仓库的 deb** | 是 | **不要用 22.04 默认 snap** (见 §10) |
-| `chrome` / `edge` | Chrome / Edge | 下载 | deb | **仅 x86_64** | arm64 虚拟机里装不上, 会被跳过; 用 `chromium` (ppa:xtradeb/apps 的 deb) 代替 |
-| `tencent_video` | 腾讯视频 | 下载 | deb (v.qq.com/download.html) | 是 | 开一个 "缓存" 任务; 命令名以 `--discover` 为准, 写进 `app_overrides` |
-| `bilibili` | 哔哩哔哩 | 下载 | deb (github.com/msojocs/bilibili-linux) | 是 | 开一个缓存任务 |
-| `wechat` | 微信 | 推送 | 官方 deb (linux.weixin.qq.com) | 是 | 每次启动要手机扫码; 用 `cf_launch.sh wechat` 启动并登录, 之后 runner 只切窗口不重启 |
-| `qq` | QQ | 推送 | 官方 deb (im.qq.com/linuxqq) | 是 | Electron |
-| `dingtalk` | 钉钉 | 推送 | deb | 是 | |
-| `wps` | WPS Office | 计算 | deb (linux.wps.cn) | 是 | 打开几十页带图文档, 让它拼写检查 / 重排 |
-| `jianying` | 剪映 | 计算 | **无** | – | 默认替代 **kdenlive**; 也可 Wine 跑 Windows 版并在 `app_overrides` 给出 cmd/match/wm_class |
-| `zwcad` | 中望CAD | 计算 | deb/run (zwsoft.cn) | 国产平台版 | 没装时替代 **librecad** |
-| `photosir` | 悟空图像 | 计算 | deb (photosir.com) | 是 | 没装时替代 **gimp** |
-| `xiaoyi` | 小艺 | 计算 | **无** (鸿蒙 PC 自带) | – | 默认替代内置占位程序 **`xiaoyi_sim`** (周期 CPU 计算 + 固定内存 + 进度计数) |
+| `baidunetdisk` | 百度网盘 | 下载 | deb (pan.baidu.com/download#linux) | 统信/麒麟商店有 arm64 包 | `com.baidu.netdisk` |
+| `firefox` | Firefox | 下载 | **Mozilla APT 仓库的 deb** | 是 | – (浏览器总有桌面版; **不要用 22.04 默认 snap**, 见 §10) |
+| `chrome` / `edge` | Chrome / Edge | 下载 | deb | **仅 x86_64** | – (arm64 虚拟机用 `chromium`: ppa:xtradeb/apps 的 deb) |
+| `tencent_video` | 腾讯视频 | 下载 | deb (v.qq.com/download.html) | 是 | `com.tencent.qqlive` |
+| `bilibili` | 哔哩哔哩 | 下载 | deb (github.com/msojocs/bilibili-linux; 统信商店有官方版) | 是 | `tv.danmaku.bili` |
+| `wechat` | 微信 | 推送 | 官方 deb (linux.weixin.qq.com) | 是 | `com.tencent.mm` |
+| `qq` | QQ | 推送 | 官方 deb (im.qq.com/linuxqq) | 是 | `com.tencent.mobileqq` |
+| `dingtalk` | 钉钉 | 推送 | deb (page.dingtalk.com) | 是 | `com.alibaba.android.rimet` |
+| `wps` | WPS Office | 计算 | deb (linux.wps.cn) | 是 | `cn.wps.moffice_eng` |
+| `jianying` | 剪映 | 计算 | **无** (剪映专业版只有 Windows / macOS) | – | **`com.lemon.lv` (剪映手机版)**; 导出视频 = 后台计算负载 |
+| `zwcad` | 中望CAD | 计算 | deb / run (zwsoft.cn, 国产平台版) | 是 | 目录里没预置手机版包名 (中望 CAD 派客云图), `install_mobile_apps.sh --search 中望` 查到后按 §4.3 加 `zwcad_mobile` |
+| `photosir` | 悟空图像 | 计算 | deb (photosir.com) | 是 | 同上, `--search 悟空图像` |
+| `xiaoyi` | 小艺 | 计算 | **无** (鸿蒙 PC 自带) | – | **`com.huawei.vassistant`**: 华为系统应用, 应用市场无独立 APK, 需从华为手机 `--from-phone` 拉取并同时装 HMS Core (`com.huawei.hwid`); Waydroid 里通常只能跑起界面, 语音 / 云端能力未必可用。还是装不上时, 只有把 `"placeholder"` 加进 `substitute_kinds` 才会退到 `xiaoyi_sim` |
 
-替代关系写在 `cf/linux/apps.py` 的 `substitute` 字段, 运行时逐条打印 `WARN 剪映 (jianying) is not installed - using
-Kdenlive (kdenlive) instead`, 并记录在结果文件 `meta.substitutions` 与汇总列 `substitutions` 里。场景轨迹里的 id 也随之
-替换 (`remap_scenario_apps`), 所以 `design` 场景照常以 CAD 为枢纽。
+每个桌面版都记在 `cf/linux/apps.py` (`kind="desktop"`), 它的手机版是 `<id>_mobile` (`kind="mobile"`), 由 `substitute` 串成链
+`jianying -> jianying_mobile (-> kdenlive)`。`resolve()` 只沿着 `substitute_kinds` 允许的 kind 往下走 (默认 `["mobile"]`)。
+运行时逐条打印 `WARN 剪映 (jianying): no Ubuntu desktop build installed - using 剪映(手机版) (jianying_mobile, mobile) instead`,
+记录在结果文件 `meta.substitutions` / `meta.kinds` 与汇总列 `substitutions` 里; 场景轨迹里的 id 也随之替换
+(`remap_scenario_apps`), 所以 `design` 场景照常以 CAD 为枢纽。两边都没有的应用 WARN 后剔除 (`dropped`)。
 
-### 4.1 首次启动、登录、核对窗口
+### 4.2 手机版 (第二优先): Waydroid
+
+为什么是 Waydroid 而不是 Android 模拟器: Waydroid 是跑在 **宿主内核** 上的 LXC 容器 (LineageOS 用户空间), 里面每个 Android
+应用进程在宿主 `/proc` 里都看得见 (cmdline 就是包名 `com.lemon.lv` / `com.lemon.lv:push`), 所以能被移进 `/sys/fs/cgroup/cf/<app>`,
+吃到与桌面应用 **完全相同** 的 `cpu.max` / `memory.high` / swap 限制; arm64 APK 在 arm64 虚拟机里原生运行, 没有二次虚拟化。
+嵌套虚拟化的模拟器则把进程全藏在客体里, 没法按应用限流。
+
+```bash
+sudo scripts/ubuntu/setup_waydroid.sh --install   # 一次: repo.waydro.id + waydroid + linux-modules-extra (binder), waydroid init (下载 ~1 GB 镜像),
+                                                  #       单窗口模式, 写 /etc/sudoers.d/cf-adopt (让 runner 能把 Android 进程移进 /cf/<app>)
+scripts/ubuntu/setup_waydroid.sh                  # 每次登录: 起一个嵌套 weston (它是 Xorg 里的普通 X11 窗口) -> waydroid session -> adb connect
+scripts/ubuntu/install_mobile_apps.sh --missing   # 配置里桌面版缺失的那些应用, 自动下载手机版 APK (应用宝 / 酷安, 自动选 ABI) 并安装
+scripts/ubuntu/install_mobile_apps.sh com.lemon.lv                                   # 或指定包名
+scripts/ubuntu/install_mobile_apps.sh --from-phone <华为手机 adb 序列号> com.huawei.vassistant com.huawei.hwid   # 小艺
+python3 run_linux.py configs/ubuntu_cn_desktop.json --mobile-status                  # 会话 / adb / ABI / 每个手机版是否已装 / 宿主 pid
+```
+
+然后像桌面应用一样首次启动一遍 (`run_linux.py ... --launch jianying_mobile`), 在 Android 窗口里接受协议、登录。
+
+手机版在实验里的差别 (都已在 `cf/linux/mobile.py` / `device.py` 里处理, 这里只说明语义):
+
+| | 桌面版 | 手机版 (Waydroid) |
+|---|---|---|
+| 窗口 | 应用自己的 X11 窗口 | **所有 Android 应用共用一个 X11 窗口** (嵌套 weston, WM_CLASS `weston`)。切到手机版应用 = 激活这个窗口 + 在 Android 里 `am start -W` 它 |
+| 切换时延 `total_time_ms` | activate + `_NET_WM_PING` | activate + Android 报告的 **TotalTime** (与本仓库 Android 版同一个数); `launch_state` 用 Android 自己的 HOT / WARM / COLD; 没有 ping |
+| 进程 | runner 启动时就放进 `/cf/<app>` | zygote 把它们 fork 进容器自己的 cgroup, 每次启动后和每次采样时 **重新收养** 进 `/cf/<app>`; 这需要 root → 配置 `"sudo_adopt": true` (`setup_waydroid.sh --install` 已写 sudoers 免密)。收养不了的进程照样被测量, 但列在 `stray_pids` 里, 限制碰不到它们 |
+| 通知 | D-Bus `Notify` | Android 的 `dumpsys notification` 里该包名出现的不同通知 key 数 (结果里的键 `mobile:<包名>`) |
+| 后台负载 | 下载任务 / 推送 / 渲染 | 相同: 百度网盘手机版开一个下载; 剪映手机版导出一段视频; 微信手机版扫码登录后正常收推送 (走微信长连接, 不依赖 GMS) |
+| 状态丢失 | 进程 / 窗口消失 | 相同判据; 额外注意 Android 自己的 LMK 也可能杀后台进程 — 那同样记为 `state_lost`, 是手机版的真实代价。可以在 Waydroid 里 `setprop ro.lmk.kill_timeout_ms 0` 等参数或给虚拟机更多内存 |
+| 配置 | – | `"mobile": {"backend": "waydroid", "adb_serial": "192.168.240.112:5555", "wm_class": "^weston"}` (都有默认值; IP 以 `waydroid status` 为准) |
+
+x86_64 虚拟机 (非 Apple 芯片) 上的 arm64-only APK 需要 Waydroid 的 libhoudini / libndk 转译镜像 (`waydroid init -f -s VANILLA` 后按
+官方文档安装 `waydroid_script`); 本手册的目标机器是 arm64, 不涉及。
+
+### 4.3 在 `app_overrides` 里补一个手机版
+
+目录里没有预置包名的应用 (中望CAD、悟空图像) 或厂商改了包名时:
+
+```json
+"app_overrides": {
+  "zwcad_mobile": {"name": "中望CAD(手机版)", "category": "compute", "kind": "mobile",
+                   "package": "<install_mobile_apps.sh --search 查到的包名>",
+                   "match": "^<包名>(:|$)", "wm_class": "^weston", "cmd": ""},
+  "zwcad": {"substitute": "zwcad_mobile"}
+}
+```
+
+### 4.4 允许开源替代 / 占位 (可选)
+
+```json
+"substitute_kinds": ["mobile", "oss", "placeholder"]
+```
+
+顺序即链上的顺序: 桌面版 → 手机版 → 开源替代 (kdenlive / librecad / gimp, `install_deps.sh --subs`) → 占位程序。不写时只到手机版为止。
+
+### 4.5 首次启动、登录、核对窗口
 
 ```bash
 source scripts/ubuntu/cf_enter.sh
@@ -125,8 +191,10 @@ catalogue id (`APP`) / 命令行。常见修正:
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `apps` | 13 个 id | 实验集合; 没装的按 `substitute` 替代, 都没有则 WARN 并剔除 (少于 2 个时报错) |
-| `app_overrides` | `{}` | 对 catalogue 条目的字段覆盖, 或新增应用 (键 = 新 id, 至少 `cmd` `match` `wm_class` `category`, 可加 `name` `notify_names` `arch`) |
+| `apps` | 13 个 id | 实验集合 (桌面版 id); 没装的沿 `substitute` 链找 `substitute_kinds` 允许的替代, 都没有则 WARN 并剔除 (少于 2 个时报错) |
+| `substitute_kinds` | `["mobile"]` | 桌面版缺失时允许退到哪些 kind: `mobile` (同一应用的手机版, Waydroid) / `oss` (kdenlive 等) / `placeholder` (占位程序) |
+| `mobile` | `{}` | Android 运行时: `backend` (`waydroid` / `adb`), `adb_serial` (默认 `waydroid status` 的 IP:5555), `wm_class` (Android 窗口的 WM_CLASS 正则), `wayland_display` |
+| `app_overrides` | `{}` | 对 catalogue 条目的字段覆盖, 或新增应用 (键 = 新 id, 至少 `cmd` `match` `wm_class` `category`, 可加 `name` `notify_names` `arch` `kind` `package` `substitute`) |
 | `never_throttle` | `[]` | 永远 `fg` 的应用 (音乐播放器、录屏) |
 | `policy` / `eta` / `policy_kw` | `static` / 0.3 | 策略与预算系数, 同 Android 版; `static` `none` 忽略 η |
 | `throttle.cpu_mode` | `quota` | `quota`: 每个后台应用各自 `cpu.max` = `cpu_cores` 个核的带宽; `cpuset`: 所有后台应用挤在 `cpuset_cpus` 这 (几) 个核上 (`last` = 编号最大的核); `both`; `none` |
@@ -143,7 +211,7 @@ catalogue id (`APP`) / 命令行。常见修正:
 | `dwell_s` / `settle_s` / `warmup_dwell_s` | 8 / 2 / 10 | 每步停留 / 切换后等待 / warmup 每应用停留 (秒) |
 | `minimize_background` | false | 切走的窗口是否最小化 (真实用户不会, 默认不做) |
 | `notifications` | true | 用 `dbus-monitor` 统计推送类应用的 `Notify` 调用 |
-| `adopt_strays` / `sudo_adopt` | true / false | 把 cgroup 外的同名进程移进来; 用户权限移不动时是否 `sudo scripts/ubuntu/cf_adopt.sh` (需 sudoers 免密, 见脚本头) |
+| `adopt_strays` / `sudo_adopt` | true / false | 把 cgroup 外的同名进程移进来; 用户权限移不动时是否 `sudo scripts/ubuntu/cf_adopt.sh` (需 sudoers 免密, 见脚本头)。**有手机版应用时必须 `sudo_adopt: true`** (Android 进程属于其它 uid) |
 | `launch_timeout_s` / `ping_timeout_s` | 90 / 15 | 等窗口出现 / 等 `_NET_WM_PING` 回应 |
 | `min_ram_mb` | 6144 | 低于此 WARN |
 
@@ -205,7 +273,7 @@ Ctrl+C / SIGTERM 时解除全部限制。启动时也会先清一遍残留限制
 
 ## 7. 结果文件与指标
 
-`results/<name>.jsonl` 每行一条记录: `meta` (配置、主机能力、应用类别、替代关系、限流档位) → `warmup` × N → `budget`
+`results/<name>.jsonl` 每行一条记录: `meta` (配置、主机能力、应用类别、`kinds` (desktop / mobile …)、替代关系、限流档位) → `warmup` × N → `budget`
 → `trace` → `step` × T → (`interrupted` / `resume`)* → `end`。`step` 记录保留 Android 版的全部键 (`frozen`≡`throttled`,
 `compressed`≡`shrunk`, `was_compressed`≡`was_shrunk`, `M_bg_kb`, `budget_violation`, `after_launch` / `after_dwell` 采样 …),
 `cf.analyze` 原样可用; 新增 `tiers`, `bg` (每应用的 Δcpu / Δthrottled / Δwrite / 通知 / cg 内存), `state_lost`, `notifications`。
@@ -217,7 +285,7 @@ python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --csv s.csv --agg agg.
 
 | 列 | 含义 | 希望 |
 |---|---|---|
-| `lat_p50/p95/p99_ms` | 切换总时延 = activate + ping (COLD 再加启动) | 低 |
+| `lat_p50/p95/p99_ms` | 切换总时延 = activate + ping (COLD 再加启动); 手机版应用 = activate + Android `am start -W` 的 TotalTime | 低 |
 | `activate_p50_ms` | 窗口管理器完成切换的时间 | 基本恒定 (30–70 ms) |
 | `ping_resident_p50_ms` / `ping_shrunk_p50/p95_ms` | 从 `bg` / 从 `shrunk` 回来后应用事件循环回应 `_NET_WM_PING` 的时间 | shrunk 的值就是 "被压缩的代价" |
 | `n_hot` / `n_warm` / `n_cold` / `n_front` / `n_timeout` | 切换类型计数 | **`n_cold` 应为 0** (没有重启) |
@@ -229,7 +297,7 @@ python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --csv s.csv --agg agg.
 | `state_lost_events` / `oom_kills` | 进程 / 窗口消失、OOM kill | **必须为 0** |
 | `swap_write_mb` / `swap_read_mb` / `refaults` | zram 换出 / 换入 | 换入 = WARM 切换的代价 |
 | `psi_cpu_some_ms` | 全系统 CPU 压力 | 前台卡顿的旁证 |
-| `cpu` / `mem_frac` / `cpu_throttle_resident` / `substitutions` | 本格的限流档位与替代关系 | 用来分组 |
+| `cpu` / `mem_frac` / `cpu_throttle_resident` / `substitutions` | 本格的限流档位与替代关系 (桌面版缺失时用了谁的手机版) | 用来分组 |
 
 ## 8. 验证 "不丢状态和上下文"
 
@@ -250,7 +318,7 @@ python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --csv s.csv --agg agg.
 | m_i (工作集) | PSS + SwapPss (uid 下所有进程) | PSS + SwapPss (`/cf/<app>` 下所有进程, `smaps_rollup`) |
 | 压缩后占用 ρ·a_i | zram 压缩比 × anon | `memory.high` (内核把多出的页换到 zram, 剩下的留在内存); ρ_i = memory.high / m |
 | 冻结 / 换出 | `cgroup.freeze=1` + `memory.reclaim` | tier `bg` (`cpu.max`) / tier `shrunk` (+`memory.high`, `memory.reclaim`) |
-| 恢复 c_resume | `am start -W` 的 TotalTime 与 HOT 的差 | WARM 切换的 (activate + ping) 与 HOT 的差; 没有样本时按 (m − memory.high) / 1.2 GB/s 估算 |
+| 恢复 c_resume | `am start -W` 的 TotalTime 与 HOT 的差 | WARM 切换的 (activate + ping) 与 HOT 的差; 手机版应用用 activate + `am start -W` TotalTime; 没有样本时按 (m − memory.high) / 1.2 GB/s 估算 |
 | 预算 B | η × Σ m_fg (后台) | 同 |
 | 不能发生 | lmkd 杀 → COLD | 进程 / 窗口消失、OOM kill → `state_lost`; `n_cold` |
 
@@ -287,6 +355,20 @@ focus-new-windows` 为 `'smart'` (默认; `'strict'` 会拒绝 xdotool 的请求
 
 **内核 5.15 (`memory.reclaim: NO`)** — `sudo scripts/ubuntu/install_deps.sh --hwe` 后重启; 不装也能跑 (惰性回收)。
 
+**手机版: `no Android runtime is reachable`** — `scripts/ubuntu/setup_waydroid.sh` 没跑或 weston 没起来 (`--status`);
+`waydroid status` 的 Session 必须 RUNNING, `adb devices` 里要有 `<IP>:5555` (没有就 `waydroid prop set persist.sys.usb.config adb`
+后重启会话; 或者不装 adb, runner 会退到 `sudo -n waydroid shell`, 需要 sudoers 免密)。`modprobe binder_linux` 失败 = 内核没有
+binder, 装 `linux-modules-extra-$(uname -r)` 或 HWE 内核后重启。
+
+**手机版: `Android processes ... could not be moved`** — 没开 `sudo_adopt`, 或 `/etc/sudoers.d/cf-adopt` 里的仓库路径不对
+(`setup_waydroid.sh --install` 按当时的仓库位置写)。此时手机版应用会被测量但不受限 (`stray_pids` 非空)。
+
+**手机版: 切换时 `launch_state` 全是 FRONT / `total_time_ms` 为空** — `am start -W` 认为该 Activity 已在最前 (Waydroid 单窗口里
+确实如此时是正常的, 比如连续两步都是同一应用); 若所有手机版应用都这样, 检查 `persist.waydroid.multi_windows` 是否被设成了 true。
+
+**手机版: APK 装不上 (`INSTALL_FAILED_NO_MATCHING_ABIS`)** — 下载器已按 `ro.product.cpu.abilist` 选包; 出现这个说明是 x86_64
+虚拟机 + arm64-only 应用, 需要 libhoudini / libndk 转译镜像 (见 §4.2)。
+
 **结果里 `n_cold > 0`** — 看 `results/app_logs/<id>.log` (应用 stdout/stderr) 与对应 step 的 `state_lost`: 是应用自己崩了
 (腾讯视频 / 百度网盘的 Electron 渲染进程偶尔会), 还是 `mem_hard` 导致的 OOM; 后者把 `mem_hard` 关掉。
 
@@ -298,7 +380,8 @@ focus-new-windows` 为 `'smart'` (默认; `'strict'` 会拒绝 xdotool 的请求
 
 ```bash
 python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋钮值 / 伪 cgroupfs / xprop 解析 / 伪桌面上的完整 runner (静态与预算策略、
-                                                   # 无进程被杀、WARM、state_lost 注入、resume 重放档位) / focusd 决策 / 应用目录与替代 / Notify 解析
+                                                   # 无进程被杀、WARM、state_lost 注入、resume 重放档位) / focusd 决策 / 应用目录与 桌面->手机版 替代链 /
+                                                   # Notify 解析 / 手机版: waydroid status、dumpsys 解析, 伪 Android 运行时上的 启动-收养-通知 与 preflight
                                                    # 有 Xvfb + xfwm4/openbox + xdotool 时自动加跑一次真实窗口 发现 -> 激活 -> _NET_WM_PING 往返
                                                    # /sys/fs/cgroup/cf 已委托给当前用户时自动加跑一次真实 cgroup 的档位读写
 ```

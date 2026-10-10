@@ -1,5 +1,5 @@
 {
-  "_comment": "Ubuntu 22.04 (在 MacBook 的 UTM/Parallels 虚拟机里) 桌面应用集合: 下载 (百度网盘 / 浏览器 / 腾讯视频 / 哔哩哔哩), 通知推送 (微信 / QQ / 钉钉), 计算处理 (WPS / 剪映 / 中望CAD / 悟空图像 / 小艺). 窗口失去前台后不冻结, 而是把它的 cgroup 限到 1 个逻辑核心、memory.high = mem_frac x 前台 PSS、可选 swap 上限; 进程、窗口与状态全部保留. 未安装的应用按 catalogue 里的 substitute 替代 (剪映->kdenlive, 小艺->内置占位程序), 都没有就跳过并 WARN. 用 `python3 run_linux.py configs/ubuntu_cn_desktop.json --probe / --catalog / --discover` 核对.",
+  "_comment": "Ubuntu 22.04 (在 MacBook 的 UTM/Parallels 虚拟机里) 桌面应用集合: 下载 (百度网盘 / 浏览器 / 腾讯视频 / 哔哩哔哩), 通知推送 (微信 / QQ / 钉钉), 计算处理 (WPS / 剪映 / 中望CAD / 悟空图像 / 小艺). 窗口失去前台后不冻结, 而是把它的 cgroup 限到 1 个逻辑核心、memory.high = mem_frac x 前台 PSS、可选 swap 上限; 进程、窗口与状态全部保留. 每个应用优先用它的 Ubuntu 桌面版; 没有桌面版 (剪映 / 小艺) 或没装上的, 退而用同一个应用的手机版 APK 跑在 Waydroid 里 (substitute_kinds), 两者都没有就跳过并 WARN. 用 `python3 run_linux.py configs/ubuntu_cn_desktop.json --probe / --catalog / --discover` 核对.",
   "apps": [
     "wechat", "qq", "dingtalk",
     "baidunetdisk", "firefox", "chrome", "tencent_video", "bilibili",
@@ -10,6 +10,9 @@
     "tencent_video": {"cmd": "tencent-video"},
     "xiaoyi_sim": {"cmd": "python3 -m cf.linux.placeholder_app --app xiaoyi_sim --title '小艺(占位)' --cpu 0.6 --mem 400"}
   },
+  "_comment_substitutes": "substitute_kinds: 桌面版缺失时允许退到的 kind, 顺序即 catalogue 里 substitute 链的顺序: mobile = 同一应用的手机版 (Waydroid, scripts/ubuntu/setup_waydroid.sh + install_mobile_apps.sh --missing); 要再退到开源替代品 (kdenlive/librecad/gimp) 或内置占位程序才加 \"oss\" / \"placeholder\". mobile: Android 运行时参数, 默认取 `waydroid status` 的 IP:5555; 有手机版应用时请把 sudo_adopt 设为 true (Android 进程属于别的 uid, 移进 /cf/<app> 需要 root).",
+  "substitute_kinds": ["mobile"],
+  "mobile": {"backend": "waydroid"},
   "never_throttle": [],
   "policy": "static",
   "policy_kw": {},
