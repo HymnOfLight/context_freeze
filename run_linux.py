@@ -4,6 +4,7 @@
     python3 run_linux.py configs/ubuntu_cn_desktop.json --probe        # environment + per-app availability
     python3 run_linux.py configs/ubuntu_cn_desktop.json --discover     # windows on screen: pid / WM_CLASS / cmd
     python3 run_linux.py configs/ubuntu_cn_desktop.json --catalog      # the app catalogue and what is installed
+    python3 run_linux.py configs/ubuntu_cn_desktop.json --mobile-status  # Waydroid session / adb / installed APKs
     python3 run_linux.py configs/ubuntu_cn_desktop.json --launch wechat qq   # start apps into their cgroups (log in once)
     python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario list
     python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 40
@@ -30,7 +31,7 @@ from cf.runner import Experiment, PreflightError, ResumeError, load_config
 from cf.linux import apps as A
 from cf.linux.cgroup import CgroupTree
 from cf.linux.device import LinuxDesktop
-from cf.linux.runner import run_from_config
+from cf.linux.runner import make_mobile_runtime, run_from_config
 
 
 def load_m_fg(path: str) -> tuple[dict, dict]:
@@ -72,6 +73,7 @@ def main(argv=None) -> int:
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--probe", action="store_true"); ap.add_argument("--discover", action="store_true")
     ap.add_argument("--catalog", action="store_true")
+    ap.add_argument("--mobile-status", action="store_true", help="Waydroid / adb state and which mobile builds are installed")
     ap.add_argument("--launch", nargs="+", metavar="APP", help="start these apps into their cgroups and exit")
     ap.add_argument("--release", action="store_true", help="clear all limits under /sys/fs/cgroup/cf and exit")
     ap.add_argument("--verbose", "-v", action="store_true")
@@ -93,17 +95,42 @@ def main(argv=None) -> int:
     if args.no_resident_cpu:
         base["cpu_throttle_resident"] = False
     cat = A.with_overrides(base.get("app_overrides"))
+    kinds = base.get("substitute_kinds", list(A.DEFAULT_SUBSTITUTE_KINDS))
+
+    def mobile_runtime():
+        mb = make_mobile_runtime(base)
+        mb.probe()
+        return mb
+
+    def resolve_with(mb):
+        return A.resolve(base.get("apps", []), cat, installed=lambda a: A.is_installed(a, mobile=mb),
+                         substitute_kinds=kinds)
 
     if args.scenario == "list" or (args.scenarios and "list" in args.scenarios):
-        used, subs, missing = A.resolve(base.get("apps", []), cat)
+        used, subs, missing = resolve_with(mobile_runtime())
         for w, g in subs:
-            print(f"substitute: {w} -> {g}")
+            print(f"substitute: {w} -> {g} ({cat[g].kind})")
         for m in missing:
-            print(f"missing: {m}")
+            print(f"missing: {m}  (chain {' -> '.join(A.substitute_chain(m, cat))}; substitute_kinds={kinds})")
         print(A.describe(used, cat))
         return 0
     if args.catalog:
-        print(A.catalog_table(cat))
+        mb = mobile_runtime()
+        print(mb.describe())
+        print(A.catalog_table(cat, mobile=mb))
+        print(f"\nsubstitute_kinds = {kinds}  (desktop build first; '-> x' = next fallback in the chain)")
+        return 0
+    if args.mobile_status:
+        mb = mobile_runtime()
+        print(json.dumps(mb.caps, indent=1, ensure_ascii=False))
+        print(mb.describe())
+        if mb.available:
+            for a in cat.values():
+                if a.is_mobile:
+                    pids = mb.host_pids(a.package)
+                    print(f"{a.id:22s} {a.package:28s} installed={str(mb.installed(a.package)):5s} "
+                          f"host_pids={pids[:6]}")
+            print(f"foreground: {mb.foreground_pkg()}")
         return 0
     if args.discover:
         from cf.linux import x11
@@ -115,19 +142,23 @@ def main(argv=None) -> int:
         print(f"cleared limits on {n} cgroup(s) under {CgroupTree().base}")
         return 0
     if args.probe:
-        dev = LinuxDesktop(cat=cat, notifications=False)
+        dev = LinuxDesktop(cat=cat, notifications=False, mobile=make_mobile_runtime(base))
         caps = dev.probe()
         apps_info = caps.pop("apps")
         print(json.dumps(caps, indent=1, ensure_ascii=False))
-        used, subs, missing = A.resolve(base.get("apps", []), cat)
+        used, subs, missing = resolve_with(dev.mobile)
         print(f"\nrunnable: {used}\nsubstituted: {subs}\nmissing: {missing}")
         for id_ in base.get("apps", []):
             i = apps_info.get(id_, {})
-            print(f"{id_:15s} installed={str(i.get('installed')):5s} cmd={i.get('cmd')!r}")
+            line = f"{id_:15s} installed={str(i.get('installed')):5s} cmd={i.get('cmd')!r}"
+            for alt in A.substitute_chain(id_, cat)[1:]:
+                j = apps_info.get(alt, {})
+                line += f"\n{'':15s} -> {alt} ({j.get('kind')}) installed={j.get('installed')}"
+            print(line)
         dev.close()
         return 0
     if args.launch:
-        dev = LinuxDesktop(cat=cat, notifications=False)
+        dev = LinuxDesktop(cat=cat, notifications=False, mobile=make_mobile_runtime(base))
         dev.probe()
         if not dev.tree.inside():
             print("!! this shell is not inside /cf (run `sudo scripts/ubuntu/setup_cgroups.sh` first); "

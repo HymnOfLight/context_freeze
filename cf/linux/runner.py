@@ -29,6 +29,7 @@ from ..scenarios import display_name
 from . import apps as A
 from .cgroup import ThrottleProfile
 from .device import LinuxDesktop
+from .mobile import MobileRuntime
 
 DEFAULTS = {
     "policy": "landlord",
@@ -50,6 +51,11 @@ DEFAULTS = {
     "sudo_adopt": False,
     "adopt_strays": True,
     "app_overrides": {},
+    # when an app's Ubuntu desktop build is not installed: which `kind`s of catalogue entries may
+    # stand in for it, in chain order.  Default: only the app's own mobile build (Waydroid);
+    # add "oss" (kdenlive / librecad / gimp) or "placeholder" (bundled stand-in) explicitly.
+    "substitute_kinds": list(A.DEFAULT_SUBSTITUTE_KINDS),
+    "mobile": {},                      # cf.linux.mobile.MobileRuntime config (backend, adb_serial, wm_class)
     "notifications": True,
     "launch_timeout_s": 90.0,
     "ping_timeout_s": 15.0,
@@ -74,6 +80,7 @@ class ThrottleExperiment(Experiment):
         self.tiers: dict[str, str] = {}
         self.substitutions: list[tuple[str, str]] = []
         self.categories: dict[str, str] = {}
+        self.kinds: dict[str, str] = {}      # app -> desktop | mobile | oss | placeholder
         self.prev_notif: dict = {}
 
     # ------------------------------------------------------------ checkpoint
@@ -85,7 +92,8 @@ class ThrottleExperiment(Experiment):
             "trace": self.trace, "t_done": self.t_done, "policy": self.pol, "current": self.current,
             "throttled": self.throttled, "shrunk": self.shrunk, "tiers": self.tiers,
             "resume_hist": self.resume_hist, "prev_pids": self.prev_pids,
-            "substitutions": self.substitutions, "categories": self.categories, "saved_at": time.time(),
+            "substitutions": self.substitutions, "categories": self.categories, "kinds": self.kinds,
+            "saved_at": time.time(),
         }
         tmp = self.ckpt_path + ".tmp"
         with open(tmp, "wb") as f:
@@ -113,6 +121,7 @@ class ThrottleExperiment(Experiment):
         self.resume_hist, self.prev_pids = state["resume_hist"], state["prev_pids"]
         self.substitutions = state.get("substitutions", [])
         self.categories = state.get("categories", {})
+        self.kinds = state.get("kinds", {})
         self.step_times = []
 
     def _reapply_device_state(self) -> None:
@@ -153,19 +162,28 @@ class ThrottleExperiment(Experiment):
                       f"ping={caps.get('ping_available')} notifications={caps.get('notify_monitor', False)}")
         self.log.info("throttle profile: " + self.profile.describe()
                       + (" | residents CPU-limited too" if self.cfg["cpu_throttle_resident"] else " | residents untouched"))
+        if dev.mobile is not None:
+            self.log.info(dev.mobile.describe())
         self._preflight(caps)
         if self.resume:
             return
-        used, subs, missing = A.resolve(self.cfg["apps"], dev.cat)
+        kinds = list(self.cfg["substitute_kinds"] or [])
+        used, subs, missing = A.resolve(self.cfg["apps"], dev.cat, installed=dev.is_installed, substitute_kinds=kinds)
         for want, got in subs:
-            self.log.warn(f"{display_name(want)} ({want}) is not installed - using {display_name(got)} ({got}) instead")
+            self.log.warn(f"{display_name(want)} ({want}): no Ubuntu desktop build installed - using "
+                          f"{display_name(got)} ({got}, {dev.cat[got].kind}) instead")
         for m in missing:
-            self.log.warn(f"{display_name(m)} ({m}) not installed and no substitute available - dropped")
+            chain = A.substitute_chain(m, dev.cat)[1:]
+            hint = (f"; fallbacks {chain} not installed / not allowed by substitute_kinds={kinds}" if chain
+                    else "; no fallback defined")
+            self.log.warn(f"{display_name(m)} ({m}) not installed{hint} - dropped")
         if len(used) < 2:
             raise RuntimeError("need at least two runnable apps (see --probe / --catalog)")
         self.apps = used
         self.substitutions = subs
         self.categories = {a: A.category_of(a, dev.cat) for a in used}
+        self.kinds = {a: dev.cat[a].kind for a in used}
+        self._preflight_mobile(caps, used)
         # scenario traces are defined over catalogue ids; apply the substitutions inside them
         tr = A.resolve_trace_cfg(self.cfg["trace"])
         mapping = {w: g for w, g in subs}
@@ -188,7 +206,7 @@ class ThrottleExperiment(Experiment):
                                   f"limits will not apply to them (snap? started before setup? see manual §6)")
         self.emit({"type": "meta", "config": self.cfg, "apps": self.apps, "caps": dev.caps_dict(),
                    "backend": "linux", "categories": self.categories, "substitutions": self.substitutions,
-                   "profile": self.profile.to_dict(),
+                   "kinds": self.kinds, "profile": self.profile.to_dict(),
                    "device": {"model": caps.get("hypervisor"), "build": f"{caps.get('distro')} {caps.get('kernel')}"}})
 
     def _preflight(self, caps: dict) -> None:
@@ -237,6 +255,34 @@ class ThrottleExperiment(Experiment):
         if blocking and self.cfg["strict_preflight"]:
             raise PreflightError(f"{len(blocking)} blocking preflight problem(s); fix them or use --no-strict")
 
+    def _preflight_mobile(self, caps: dict, used: list[str]) -> None:
+        """Checks that only matter when at least one app runs as its Android build in Waydroid."""
+        mobile = [a for a in used if self.kinds.get(a) == "mobile"]
+        if not mobile:
+            return
+        mc = caps.get("mobile") or {}
+        names = ", ".join(display_name(a) for a in mobile)
+        blocking: list[str] = []
+        if not mc.get("available"):
+            blocking.append(f"{names}: run as Android apps but no Android runtime is reachable "
+                            f"({mc.get('adb_error') or 'waydroid session not running'}). "
+                            f"scripts/ubuntu/setup_waydroid.sh starts weston + the Waydroid session + adb")
+        elif not mc.get("per_app_cgroups"):
+            self.log.warn(f"{names}: Android processes are not visible on the host (backend {mc.get('backend')}); "
+                          f"they cannot be moved into /cf/<app>, so CPU / memory limits will not reach them "
+                          f"(Waydroid = LXC on the host kernel does expose them)")
+        elif not self.cfg["sudo_adopt"]:
+            self.log.warn(f"{names}: Android forks app processes into the container's cgroup; moving them into "
+                          f"/cf/<app> needs root -> set \"sudo_adopt\": true (setup_cgroups.sh installs the sudoers "
+                          f"rule for scripts/ubuntu/cf_adopt.sh). Without it the limits will not apply to them")
+        self.log.info(f"mobile apps ({len(mobile)}): {names} - one shared Android window; switch latency = "
+                      f"X11 activate + Android `am start -W` TotalTime; notifications via dumpsys")
+        for msg in blocking:
+            (self.log.err if self.cfg["strict_preflight"] else self.log.warn)(msg)
+        if blocking and self.cfg["strict_preflight"]:
+            raise PreflightError(f"{len(blocking)} blocking preflight problem(s) for mobile apps; fix them, "
+                                 f"drop the apps, or use --no-strict")
+
     def warmup(self) -> float:
         dev = self.dev
         self.log.head(f"warmup: bring up {len(self.apps)} apps (no restarts - logins are kept), dwell "
@@ -262,7 +308,11 @@ class ThrottleExperiment(Experiment):
                           f"{str(res.get('total_time_ms')):>6} ms (activate {res.get('activate_ms')}, ping {res.get('ping_ms')})"
                           + (f"  pids {len(smp.procs)}" if smp.alive else "  NO PROCESS"))
             if not smp.alive or self.m_fg[app] == 0:
-                self.log.warn(f"{app}: no process in its cgroup after launch - check cmd / match with --discover")
+                if self.kinds.get(app) == "mobile":
+                    self.log.warn(f"{app}: no Android process found after `am start` (status {res.get('status')}) - "
+                                  f"is {dev.cat[app].package} installed? see run_linux.py --mobile-status")
+                else:
+                    self.log.warn(f"{app}: no process in its cgroup after launch - check cmd / match with --discover")
             elif res.get("status") not in ("ok",):
                 self.log.warn(f"{app}: launch status {res.get('status')} - the window may be behind a dialog")
             if smp.stray_pids:
@@ -501,7 +551,11 @@ class ThrottleExperiment(Experiment):
         return super().run()
 
 
+def make_mobile_runtime(cfg: dict, log=None) -> MobileRuntime:
+    return MobileRuntime(cfg.get("mobile") or {}, log=log)
+
+
 def run_from_config(cfg: dict, verbose: bool = False, resume: bool = False, log=None) -> str:
-    dev = LinuxDesktop(log=log, notifications=cfg.get("notifications", True))
+    dev = LinuxDesktop(log=log, notifications=cfg.get("notifications", True), mobile=make_mobile_runtime(cfg, log))
     exp = ThrottleExperiment(cfg, dev, log=log, resume=resume)
     return exp.run()

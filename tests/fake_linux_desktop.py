@@ -82,6 +82,7 @@ class FakeLinuxDesktop:
         self.tree = FakeTree()
         self.profile = ThrottleProfile()
         self.notify = FakeNotify()
+        self.mobile = None                      # no Android runtime (subclass / set to fake one)
         self.sudo_adopt = False
         self.launch_timeout = 90.0
         self.ping_timeout = 15.0
@@ -119,6 +120,10 @@ class FakeLinuxDesktop:
 
     def caps_dict(self):
         return dict(self.caps)
+
+    def is_installed(self, a: LinuxApp) -> bool:
+        from cf.linux.apps import is_installed
+        return is_installed(a, mobile=self.mobile)
 
     def adopt(self, id_):
         return {"moved": [], "failed": {}}
