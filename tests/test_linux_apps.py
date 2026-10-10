@@ -21,19 +21,70 @@ def test_catalogue_covers_the_requested_apps_by_category():
     assert set(A.CATEGORIES) == {"download", "push", "compute"}
 
 
-def test_apps_without_linux_build_have_a_substitute_or_placeholder():
-    for a in A.CATALOG.values():
-        if not a.linux:
-            assert a.substitute in A.CATALOG, f"{a.id} has no runnable substitute"
-            assert A.CATALOG[a.substitute].category == a.category
-    assert A.CATALOG["jianying"].substitute == "kdenlive"
-    assert A.CATALOG["zwcad"].substitute == "librecad"
-    assert A.CATALOG["photosir"].substitute == "gimp"
-    assert A.CATALOG["xiaoyi"].substitute == "xiaoyi_sim"
+def test_requested_apps_are_desktop_entries_with_the_mobile_build_as_first_fallback():
+    """Brief: the Ubuntu desktop build of each app; only when none exists, the same app's mobile
+    version.  Open-source look-alikes / the placeholder come after that and are opt-in."""
+    for cat_, ids in REQUIRED.items():
+        for id_ in ids:
+            a = A.CATALOG[id_]
+            assert a.kind == "desktop", id_
+            chain = A.substitute_chain(id_)[1:]
+            if chain:                                        # first fallback is the app's own mobile build
+                first = A.CATALOG[chain[0]]
+                assert first.kind == "mobile" and first.category == a.category, id_
+                assert first.package and first.match == rf"^{first.package.replace('.', chr(92) + '.')}(:|$)"
+                assert first.id == f"{id_}_mobile"
+            if not a.linux:                                  # no desktop build at all -> must have a mobile entry
+                assert chain and A.CATALOG[chain[0]].kind == "mobile", id_
+    assert A.substitute_chain("jianying") == ["jianying", "jianying_mobile", "kdenlive"]
+    assert A.substitute_chain("xiaoyi") == ["xiaoyi", "xiaoyi_mobile", "xiaoyi_sim"]
+    assert A.substitute_chain("wechat") == ["wechat", "wechat_mobile"]
+    assert A.CATALOG["wechat_mobile"].package == "com.tencent.mm"
+    assert A.CATALOG["jianying_mobile"].package == "com.lemon.lv"
+    assert {A.CATALOG[x].kind for x in ("kdenlive", "librecad", "gimp")} == {"oss"}
     # placeholder entries are bundled X11 programs with a quoted title
     ph = A.CATALOG["xiaoyi_sim"]
+    assert ph.kind == "placeholder"
     assert ph.cmd.startswith("python3 -m cf.linux.placeholder_app") and "--title '小艺(占位)'" in ph.cmd
     assert ph.wm_class == "^cf-xiaoyi_sim$"
+
+
+class _FakeMobile:
+    wm_class = A.MOBILE_WM_CLASS
+
+    def __init__(self, pkgs):
+        self.pkgs = set(pkgs)
+
+    def installed(self, pkg):
+        return pkg in self.pkgs
+
+
+def test_is_installed_for_mobile_entries_needs_a_runtime():
+    a = A.CATALOG["wechat_mobile"]
+    assert A.is_installed(a) is False                        # no Android runtime -> never "installed"
+    assert A.is_installed(a, mobile=_FakeMobile([])) is False
+    assert A.is_installed(a, mobile=_FakeMobile(["com.tencent.mm"])) is True
+    # desktop entries ignore the runtime
+    assert A.is_installed(A.CATALOG["jianying"], mobile=_FakeMobile(["com.lemon.lv"])) is False
+
+
+def test_resolve_prefers_desktop_then_mobile_and_only_opts_into_oss_or_placeholder():
+    desktop = {"wechat", "wps"}
+    mobile = {"com.lemon.lv", "com.tencent.mm"}            # 剪映 and 微信 APKs present
+    mb = _FakeMobile(mobile)
+    inst = lambda a: A.is_installed(a, mobile=mb) if a.is_mobile else a.id in desktop or a.id in {"kdenlive", "xiaoyi_sim"}  # noqa: E731
+    used, subs, missing = A.resolve(["wechat", "wps", "jianying", "xiaoyi", "zwcad"], installed=inst)
+    assert used == ["wechat", "wps", "jianying_mobile"]       # desktop wins over the installed mobile build
+    assert subs == [("jianying", "jianying_mobile")]
+    assert missing == ["xiaoyi", "zwcad"]                    # xiaoyi_sim is a placeholder: not allowed by default
+    used, subs, missing = A.resolve(["jianying", "xiaoyi"], installed=inst, substitute_kinds=["mobile", "placeholder"])
+    assert used == ["jianying_mobile", "xiaoyi_sim"] and ("xiaoyi", "xiaoyi_sim") in subs and missing == []
+    inst_no_apk = lambda a: a.id in {"kdenlive"}  # noqa: E731
+    assert A.resolve(["jianying"], installed=inst_no_apk)[2] == ["jianying"]
+    used, subs, _ = A.resolve(["jianying"], installed=inst_no_apk, substitute_kinds=["mobile", "oss"])
+    assert used == ["kdenlive"] and subs == [("jianying", "kdenlive")]
+    # a mobile id may be requested directly
+    assert A.resolve(["wechat_mobile"], installed=inst)[0] == ["wechat_mobile"]
 
 
 def test_display_names_are_chinese_and_known_to_scenarios():
@@ -43,14 +94,22 @@ def test_display_names_are_chinese_and_known_to_scenarios():
 
 
 def test_resolve_substitutes_and_drops_missing():
-    installed = {"wechat", "qq", "wps", "kdenlive", "gimp", "firefox"}
+    installed = {"wechat", "qq", "wps", "kdenlive", "jianying_mobile", "firefox"}
     used, subs, missing = A.resolve(["wechat", "qq", "wps", "jianying", "zwcad", "photosir", "firefox", "nope"],
                                     installed=lambda a: a.id in installed)
-    assert used == ["wechat", "qq", "wps", "kdenlive", "gimp", "firefox"]
-    assert ("jianying", "kdenlive") in subs and ("photosir", "gimp") in subs
-    assert missing == ["zwcad", "nope"]           # librecad not installed either -> dropped
-    used2, subs2, _ = A.resolve(["jianying"], installed=lambda a: a.id == "kdenlive", allow_substitutes=False)
+    assert used == ["wechat", "qq", "wps", "jianying_mobile", "firefox"]
+    assert subs == [("jianying", "jianying_mobile")]
+    assert missing == ["zwcad", "photosir", "nope"]   # no desktop build, no mobile entry -> dropped
+    used2, subs2, _ = A.resolve(["jianying"], installed=lambda a: a.id == "jianying_mobile", allow_substitutes=False)
     assert used2 == [] and subs2 == []
+    # with_overrides can add a mobile entry for an app that has none (zwcad -> zwcad_mobile)
+    cat = A.with_overrides({"zwcad_mobile": {"name": "中望CAD(手机版)", "category": "compute", "kind": "mobile",
+                                             "package": "com.zwsoft.zwcad", "match": r"^com\.zwsoft\.zwcad(:|$)",
+                                             "wm_class": A.MOBILE_WM_CLASS, "cmd": ""},
+                            "zwcad": {"substitute": "zwcad_mobile"}})
+    assert cat["zwcad_mobile"].is_mobile and A.substitute_chain("zwcad", cat) == ["zwcad", "zwcad_mobile"]
+    used3, subs3, _ = A.resolve(["zwcad"], cat, installed=lambda a: a.id == "zwcad_mobile")
+    assert used3 == ["zwcad_mobile"] and subs3 == [("zwcad", "zwcad_mobile")]
 
 
 def test_with_overrides_changes_fields_and_adds_apps():
@@ -111,7 +170,10 @@ def test_scenario_trace_generation_through_cf_trace():
 def test_catalog_table_and_describe_render():
     txt = A.catalog_table(arch="aarch64")
     assert "微信" in txt and "剪映" in txt
-    assert "kdenlive" in txt
+    assert "kdenlive" in txt and "no (no android runtime)" in txt
+    txt2 = A.catalog_table(arch="aarch64", mobile=_FakeMobile(["com.lemon.lv"]))
+    row = next(l for l in txt2.splitlines() if l.startswith("jianying_mobile"))
+    assert "yes" in row and "com.lemon.lv" in row
     d = A.describe(["wechat", "jianying"])
     assert "微信" in d and "剪映" in d
 

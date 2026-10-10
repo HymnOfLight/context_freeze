@@ -15,16 +15,20 @@ WM_CLASS; `name_rx` on the title as a fallback).  Those three fields are what yo
 adjust after `python3 run_linux.py <config> --discover` on your machine, because vendor
 packages change paths between releases - override them per app in the config's `app_overrides`.
 
-Apps without a Linux build (剪映, 小艺) are kept in the catalogue with `linux=False` and a
-`substitute`: a real open-source program of the same kind (kdenlive for video editing) or the
-bundled placeholder (`python3 -m cf.linux.placeholder_app`), a small X11 program with a
-configurable CPU / memory workload and a visible progress counter.  Substitutions are logged,
-never silent.
+Preference order for every app: **its Ubuntu desktop build** first; when there is none (剪映,
+小艺) or the deb cannot be obtained for this architecture, **the app's own mobile (Android)
+version**, run inside Waydroid on the same Ubuntu desktop (cf.linux.mobile).  Each entry carries
+`kind`: desktop | mobile | oss | placeholder, and `substitute` chains them:
+`jianying -> jianying_mobile (-> kdenlive)`.  Which kinds `resolve()` may fall back to is a config
+decision (`substitute_kinds`, default ["mobile"]); open-source look-alikes (kdenlive / librecad /
+gimp) and the bundled placeholder program stay available but are opt-in.  Substitutions are
+logged, never silent.
 """
 from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 from dataclasses import dataclass, asdict
 from typing import Optional, Sequence
@@ -51,6 +55,11 @@ class LinuxApp:
     linux: bool = True                 # has a native Linux build
     substitute: Optional[str] = None   # catalogue id used when this one is not installed
     note: str = ""
+    kind: str = "desktop"              # desktop | mobile (Android build in Waydroid) | oss | placeholder
+
+    @property
+    def is_mobile(self) -> bool:
+        return self.kind == "mobile"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -60,7 +69,18 @@ def _p(id_: str, name: str, category: str = "compute", **kw) -> LinuxApp:
     """Placeholder entry (bundled X11 program)."""
     return LinuxApp(id_, name, category, cmd=PLACEHOLDER_CMD.format(id=id_, name=name),
                     match=rf"placeholder_app.*--app {id_}\b", wm_class=rf"^cf-{id_}$",
-                    install="bundled: python3 -m cf.linux.placeholder_app (needs python3-xlib)", **kw)
+                    install="bundled: python3 -m cf.linux.placeholder_app (needs python3-xlib)", kind="placeholder", **kw)
+
+
+MOBILE_WM_CLASS = r"^(weston|Waydroid|waydroid|org\.freedesktop\.Weston)"   # the Android display's X11 window
+
+
+def _m(id_: str, name: str, category: str, package: str, install: str, **kw) -> LinuxApp:
+    """Mobile (Android) build of an app, run in Waydroid.  Processes are the Android app processes
+    (host-visible, cmdline == package or package:service); the window is the shared Android display."""
+    return LinuxApp(f"{id_}_mobile", f"{name}(手机版)", category, cmd="", match=rf"^{re.escape(package)}(:|$)",
+                    wm_class=MOBILE_WM_CLASS, package=package, arch=("x86_64", "aarch64"),
+                    install=install, kind="mobile", **kw)
 
 
 CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
@@ -69,6 +89,7 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
              cmd="baidunetdisk", match=r"/opt/baidunetdisk/|baidunetdisk", wm_class=r"baidunetdisk",
              package="baidunetdisk", exe="/opt/baidunetdisk/baidunetdisk",
              install="https://pan.baidu.com/download#linux  (deb; x86_64 公开页, arm64 版见统信/麒麟应用商店或联系百度获取)",
+             substitute="baidunetdisk_mobile",
              note="登录后把一个大文件的下载任务挂着, 实验期间它就是后台下载负载"),
     LinuxApp("firefox", "Firefox", "download",
              cmd="firefox", match=r"(^|/)firefox(-esr)?(\s|$)|/usr/lib/firefox", wm_class=r"^(firefox|Navigator)",
@@ -89,7 +110,7 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
              install="https://www.microsoft.com/edge/download?platform=linux  (deb, 仅 x86_64)"),
     LinuxApp("tencent_video", "腾讯视频", "download",
              cmd="tencent-video", match=r"tencent.?video|qqlive|com\.tencent\.video", wm_class=r"tencent.?video|qqlive",
-             name_rx=r"腾讯视频", package="com.tencent.video", exe="",
+             name_rx=r"腾讯视频", package="com.tencent.video", exe="", substitute="tencent_video_mobile",
              install="https://v.qq.com/download.html  (Linux 版 deb, x86_64 / arm64; 命令名与包名以安装后 --discover 看到的为准)",
              note="打开一个剧集并开启 '缓存/下载' 任务, 作为后台下载负载; cmd / wm_class 请按 --discover 结果在 app_overrides 里改"),
     LinuxApp("bilibili", "哔哩哔哩", "download",
@@ -97,56 +118,79 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
              name_rx=r"哔哩哔哩|bilibili", package="io.github.msojocs.bilibili",
              exe="/opt/apps/io.github.msojocs.bilibili/files/bin/bilibili",
              install="https://github.com/msojocs/bilibili-linux/releases  (deb, amd64 / arm64; 统信应用商店有官方客户端)",
-             note="登录后开一个视频缓存任务"),
+             substitute="bilibili_mobile", note="登录后开一个视频缓存任务"),
     # ----------------------------------------------------------------- push
     LinuxApp("wechat", "微信", "push",
              cmd="wechat", match=r"/opt/wechat/|(^|/)wechat(\s|$)|WeChat", wm_class=r"^(wechat|WeChat)",
              name_rx=r"微信|WeChat", notify_names=("微信", "wechat", "WeChat"),
              package="wechat", exe="/opt/wechat/wechat",
-             install="https://linux.weixin.qq.com/  (官方 deb, x86_64 / arm64 / loongarch64)",
+             install="https://linux.weixin.qq.com/  (官方 deb, x86_64 / arm64 / loongarch64)", substitute="wechat_mobile",
              note="每次启动需手机扫码确认; 用 scripts/ubuntu/cf_launch.sh wechat 启动并登录后再跑实验 (runner 对已运行的应用只切窗口不重启)"),
     LinuxApp("qq", "QQ", "push",
              cmd="qq", match=r"/opt/QQ/|(^|/)qq(\s|$)", wm_class=r"^(qq|QQ)$",
              name_rx=r"^QQ", notify_names=("QQ", "qq"),
              package="linuxqq", exe="/opt/QQ/qq",
-             install="https://im.qq.com/linuxqq/  (官方 deb, x86_64 / arm64 / loongarch64; Electron)"),
+             install="https://im.qq.com/linuxqq/  (官方 deb, x86_64 / arm64 / loongarch64; Electron)", substitute="qq_mobile"),
     LinuxApp("dingtalk", "钉钉", "push",
              cmd="dingtalk", match=r"com\.alibabainc\.dingtalk|/opt/apps/.*dingtalk|dingtalk", wm_class=r"dingtalk",
              name_rx=r"钉钉|DingTalk", notify_names=("钉钉", "DingTalk", "dingtalk"),
              package="com.alibabainc.dingtalk", exe="/opt/apps/com.alibabainc.dingtalk/files/Elevator.sh",
-             install="https://page.dingtalk.com/wow/dingtalk/act/download  (Linux 版 deb, x86_64 / arm64)"),
+             install="https://page.dingtalk.com/wow/dingtalk/act/download  (Linux 版 deb, x86_64 / arm64)", substitute="dingtalk_mobile"),
     # -------------------------------------------------------------- compute
     LinuxApp("wps", "WPS Office", "compute",
              cmd="wps", match=r"/opt/kingsoft/wps-office/|wpsoffice|(^|/)(wps|et|wpp|wpspdf)(\s|$)",
              wm_class=r"^(wps|Wps|et|wpp|wpspdf|wpsoffice)", package="wps-office", exe="/usr/bin/wps",
-             install="https://linux.wps.cn/  (deb, x86_64 / arm64)",
+             install="https://linux.wps.cn/  (deb, x86_64 / arm64)", substitute="wps_mobile",
              note="打开一个几十页带图的文档并让它做拼写检查 / 重新分页, 作为后台计算负载"),
     LinuxApp("jianying", "剪映", "compute",
-             cmd="", match=r"jianying|capcut", wm_class=r"jianying|capcut", linux=False, substitute="kdenlive",
-             install="无 Linux 版 (剪映专业版只有 Windows / macOS). 默认替代: kdenlive (apt install kdenlive, 同类视频剪辑负载); 也可用 Wine/deepin-wine 运行 Windows 版, 自行在 app_overrides 里给出 cmd/match/wm_class"),
+             cmd="", match=r"jianying|capcut", wm_class=r"jianying|capcut", linux=False, substitute="jianying_mobile",
+             install="无 Linux 桌面版 (剪映专业版只有 Windows / macOS) -> 用手机版 剪映 (com.lemon.lv) 在 Waydroid 里跑 (jianying_mobile). "
+                     "也可用 Wine/deepin-wine 运行 Windows 版, 自行在 app_overrides 里给出 cmd/match/wm_class"),
     LinuxApp("zwcad", "中望CAD", "compute",
              cmd="zwcad", match=r"(?i)zwcad", wm_class=r"(?i)zwcad", name_rx=r"中望|ZWCAD",
              package="zwcad", exe="",
              install="https://www.zwsoft.cn/product/zwcad-linux  (Linux 版 deb / run, x86_64 / arm64 国产平台)",
-             substitute="librecad", note="没有安装时用 librecad (apt) 代替"),
+             note="有 Linux 桌面版 (统信 / 麒麟 / Ubuntu deb); 手机版 (中望CAD派客云图) 包名请用 install_mobile_apps.sh --search 确认后在 app_overrides 里加 zwcad_mobile"),
     LinuxApp("photosir", "悟空图像 PhotoSir", "compute",
              cmd="photosir", match=r"(?i)photosir|wukong", wm_class=r"(?i)photosir", name_rx=r"悟空|PhotoSir",
              package="photosir", exe="",
              install="https://www.photosir.com/  (Linux 版 deb, x86_64 / arm64)",
-             substitute="gimp", note="没有安装时用 gimp (apt) 代替"),
+             note="有 Linux 桌面版 (deb); 手机版包名请用 install_mobile_apps.sh --search 确认后在 app_overrides 里加 photosir_mobile"),
     LinuxApp("xiaoyi", "小艺", "compute",
-             cmd="", match=r"xiaoyi|celia", wm_class=r"xiaoyi|celia", linux=False, substitute="xiaoyi_sim",
-             install="华为小艺没有 Linux 桌面版 (鸿蒙 PC 自带). 默认替代: 内置占位程序 xiaoyi_sim (周期性 CPU 计算 + 固定内存, 显示进度计数, 可验证状态连续性)"),
+             cmd="", match=r"xiaoyi|celia", wm_class=r"xiaoyi|celia", linux=False, substitute="xiaoyi_mobile",
+             install="华为小艺没有 Linux 桌面版 (鸿蒙 PC 自带) -> 手机版 小艺 / 智慧语音 (com.huawei.vassistant) 在 Waydroid 里跑 (xiaoyi_mobile); "
+                     "装不上时 (见 mobile 条目) 最后才是内置占位程序 xiaoyi_sim (需 substitute_kinds 含 placeholder)"),
     # ----------------------------------------------- open-source substitutes
     LinuxApp("kdenlive", "Kdenlive (剪映替代)", "compute",
              cmd="kdenlive", match=r"(^|/)kdenlive(\s|$)", wm_class=r"^kdenlive", package="kdenlive",
-             exe="/usr/bin/kdenlive", install="apt install kdenlive"),
+             exe="/usr/bin/kdenlive", install="apt install kdenlive", kind="oss"),
     LinuxApp("librecad", "LibreCAD (中望CAD替代)", "compute",
              cmd="librecad", match=r"(^|/)librecad(\s|$)", wm_class=r"^librecad", package="librecad",
-             exe="/usr/bin/librecad", install="apt install librecad"),
+             exe="/usr/bin/librecad", install="apt install librecad", kind="oss"),
     LinuxApp("gimp", "GIMP (悟空图像替代)", "compute",
              cmd="gimp", match=r"(^|/)gimp(-[\d.]+)?(\s|$)", wm_class=r"^gimp", package="gimp",
-             exe="/usr/bin/gimp", install="apt install gimp"),
+             exe="/usr/bin/gimp", install="apt install gimp", kind="oss"),
+    # ------------------------------------- mobile (Android) builds, run in Waydroid (cf.linux.mobile)
+    # package names are the ones scripts/install_cn_apps.py downloads from 应用宝 / 酷安
+    _m("baidunetdisk", "百度网盘", "download", "com.baidu.netdisk",
+       "手机版 APK: scripts/ubuntu/install_mobile_apps.sh com.baidu.netdisk (应用宝 / 酷安 自动下载) "),
+    _m("tencent_video", "腾讯视频", "download", "com.tencent.qqlive",
+       "手机版 APK: scripts/ubuntu/install_mobile_apps.sh com.tencent.qqlive"),
+    _m("bilibili", "哔哩哔哩", "download", "tv.danmaku.bili",
+       "手机版 APK: scripts/ubuntu/install_mobile_apps.sh tv.danmaku.bili"),
+    _m("wechat", "微信", "push", "com.tencent.mm", "手机版 APK: scripts/ubuntu/install_mobile_apps.sh com.tencent.mm",
+       notify_names=("微信", "WeChat"), note="Waydroid 里的微信可以正常扫码登录 (手机确认), 推送走微信自己的长连接, 不依赖 GMS"),
+    _m("qq", "QQ", "push", "com.tencent.mobileqq", "手机版 APK: scripts/ubuntu/install_mobile_apps.sh com.tencent.mobileqq",
+       notify_names=("QQ",)),
+    _m("dingtalk", "钉钉", "push", "com.alibaba.android.rimet", "手机版 APK: scripts/ubuntu/install_mobile_apps.sh com.alibaba.android.rimet",
+       notify_names=("钉钉", "DingTalk")),
+    _m("wps", "WPS Office", "compute", "cn.wps.moffice_eng", "手机版 APK: scripts/ubuntu/install_mobile_apps.sh cn.wps.moffice_eng"),
+    _m("jianying", "剪映", "compute", "com.lemon.lv", "手机版 APK: scripts/ubuntu/install_mobile_apps.sh com.lemon.lv",
+       substitute="kdenlive", note="剪映手机版导出视频 = 后台计算负载; 首次启动会要求登录 (可跳过)"),
+    _m("xiaoyi", "小艺", "compute", "com.huawei.vassistant",
+       "小艺是华为系统应用 (EMUI/HarmonyOS 自带), 应用市场里没有独立 APK: 从一台华为手机 adb pull (scripts/install_cn_apps.py --from-phone <serial> "
+       "com.huawei.vassistant) 并同时安装 HMS Core (com.huawei.hwid); 在 Waydroid 里通常只能跑起界面, 语音 / 云端能力可能不可用",
+       substitute="xiaoyi_sim", note="装不上时按 substitute_kinds 决定是否退到占位程序"),
     _p("xiaoyi_sim", "小艺(占位)", "compute"),
     _p("sim_download", "下载占位", "download"),
     _p("sim_push", "推送占位", "push"),
@@ -186,7 +230,7 @@ def with_overrides(overrides: Optional[dict]) -> dict[str, LinuxApp]:
         else:
             d = {"id": id_, "name": ov.get("name", id_), "category": ov.get("category", "compute"),
                  "cmd": ov.get("cmd", id_), "match": ov.get("match", id_), "wm_class": ov.get("wm_class", id_)}
-            for k in ("name_rx", "package", "exe", "install", "note", "substitute"):
+            for k in ("name_rx", "package", "exe", "install", "note", "substitute", "kind"):
                 if k in ov:
                     d[k] = ov[k]
             if "notify_names" in ov:
@@ -202,7 +246,12 @@ def _first_token(cmd: str) -> str:
     return cmd.split()[0] if cmd.strip() else ""
 
 
-def is_installed(a: LinuxApp, arch: Optional[str] = None) -> bool:
+def is_installed(a: LinuxApp, arch: Optional[str] = None, mobile=None) -> bool:
+    """Desktop apps: binary / package present for this architecture.  Mobile apps: the package is
+    installed in the Android runtime (`mobile` = cf.linux.mobile.MobileRuntime or anything with
+    `.installed(package)`); without a runtime they count as not installed."""
+    if a.is_mobile:
+        return bool(mobile is not None and a.package and mobile.installed(a.package))
     arch = arch or platform.machine()
     if not a.linux or not a.cmd:
         return False
@@ -210,11 +259,8 @@ def is_installed(a: LinuxApp, arch: Optional[str] = None) -> bool:
         return False
     tok = _first_token(a.cmd)
     if tok == "python3":                       # placeholder: needs python3-xlib
-        try:
-            import Xlib  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        import importlib.util
+        return importlib.util.find_spec("Xlib") is not None
     if a.exe and os.path.exists(a.exe):
         return True
     if shutil.which(tok):
@@ -224,11 +270,20 @@ def is_installed(a: LinuxApp, arch: Optional[str] = None) -> bool:
     return False
 
 
+DEFAULT_SUBSTITUTE_KINDS: tuple[str, ...] = ("mobile",)
+
+
 def resolve(ids: Sequence[str], cat: Optional[dict[str, LinuxApp]] = None, installed=None,
-            allow_substitutes: bool = True) -> tuple[list[str], list[tuple[str, str]], list[str]]:
-    """Map requested ids to runnable ids. Returns (used, substituted [(wanted, used)], missing)."""
+            allow_substitutes: bool = True, substitute_kinds: Sequence[str] = DEFAULT_SUBSTITUTE_KINDS,
+            ) -> tuple[list[str], list[tuple[str, str]], list[str]]:
+    """Map requested ids to runnable ids. Returns (used, substituted [(wanted, used)], missing).
+
+    The chain `a.substitute -> ...` is followed only through entries whose `kind` is in
+    `substitute_kinds` (default: the app's own mobile build only; add "oss" / "placeholder" to allow
+    open-source look-alikes / the bundled stand-in).  The requested id itself may be of any kind."""
     cat = cat or CATALOG
     installed = installed or is_installed
+    kinds = set(substitute_kinds)
     used: list[str] = []
     subs: list[tuple[str, str]] = []
     missing: list[str] = []
@@ -242,7 +297,7 @@ def resolve(ids: Sequence[str], cat: Optional[dict[str, LinuxApp]] = None, insta
                 used.append(id_)
             continue
         cur, seen = a.substitute if allow_substitutes else None, {id_}
-        while cur and cur in cat and cur not in seen:
+        while cur and cur in cat and cur not in seen and cat[cur].kind in kinds:
             seen.add(cur)
             if installed(cat[cur]):
                 if cur not in used:
@@ -253,6 +308,16 @@ def resolve(ids: Sequence[str], cat: Optional[dict[str, LinuxApp]] = None, insta
         else:
             missing.append(id_)
     return used, subs, missing
+
+
+def substitute_chain(id_: str, cat: Optional[dict[str, LinuxApp]] = None) -> list[str]:
+    """[id, substitute, substitute's substitute, ...] for display."""
+    cat = cat or CATALOG
+    out, cur = [], id_
+    while cur and cur in cat and cur not in out:
+        out.append(cur)
+        cur = cat[cur].substitute
+    return out
 
 
 def category_of(id_: str, cat: Optional[dict[str, LinuxApp]] = None) -> str:
@@ -374,13 +439,19 @@ def describe(apps: Optional[Sequence[str]] = None, cat: Optional[dict[str, Linux
     return "\n".join(lines)
 
 
-def catalog_table(cat: Optional[dict[str, LinuxApp]] = None, arch: Optional[str] = None) -> str:
+def catalog_table(cat: Optional[dict[str, LinuxApp]] = None, arch: Optional[str] = None, mobile=None) -> str:
     cat = cat or CATALOG
-    rows = [("id", "name", "category", "installed", "cmd", "install / note")]
+    rows = [("id", "name", "kind", "category", "installed", "cmd / package", "install / note")]
     for a in cat.values():
-        inst = "yes" if is_installed(a, arch) else ("no (no linux build)" if not a.linux else "no")
+        if is_installed(a, arch, mobile):
+            inst = "yes"
+        elif a.is_mobile:
+            inst = "no (apk)" if mobile is not None else "no (no android runtime)"
+        else:
+            inst = "no (no linux build)" if not a.linux else "no"
         if a.substitute and inst != "yes":
             inst += f" -> {a.substitute}"
-        rows.append((a.id, a.name, a.category, inst, a.cmd or "-", (a.install or a.note)[:90]))
-    widths = [max(len(str(r[i])) for r in rows) for i in range(5)]
-    return "\n".join("  ".join(str(c).ljust(widths[i]) for i, c in enumerate(r[:5])) + "  " + r[5] for r in rows)
+        rows.append((a.id, a.name, a.kind, a.category, inst, (a.package if a.is_mobile else a.cmd) or "-",
+                     (a.install or a.note)[:90]))
+    widths = [max(len(str(r[i])) for r in rows) for i in range(6)]
+    return "\n".join("  ".join(str(c).ljust(widths[i]) for i, c in enumerate(r[:6])) + "  " + r[6] for r in rows)
