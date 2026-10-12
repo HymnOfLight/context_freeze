@@ -24,6 +24,93 @@
 
 ---
 
+## 0. 从零到第一次实验: 操作顺序速查
+
+§1–§6 是每一步的原理与细节; 这里只给顺序, 照着做一遍, 卡住再翻对应章节。
+
+**第 1 步 在 macOS 上建虚拟机 (UTM)**
+
+1. 装 UTM (https://mac.getutm.app 或 `brew install --cask utm`); 下载 **arm64 Desktop** 镜像 `ubuntu-22.04.x-desktop-arm64.iso`
+   (cdimage.ubuntu.com/releases/22.04/release/), 不是 amd64。
+2. UTM → *Create a New VM* → **Virtualize** (不要 Emulate) → Linux → 选 ISO → CPU **4 核**, 内存 **8192 MB**, 磁盘 **64 GB**;
+   建好后在 VM 设置里关掉 *Display → Retina Mode*, 不开 Balloon。
+3. 装系统: "最小安装", 不勾 "安装第三方软件"; 记住密码 (后面全程要 sudo)。
+4. 第一次进桌面就做三件事: **登录界面右下角齿轮 → "Ubuntu on Xorg"** 再登录; 设置 → 电源: 不熄屏、不自动锁屏
+   (`gsettings set org.gnome.desktop.session idle-delay 0`); 设置 → 显示: 固定分辨率, 之后不再改。
+5. 客体工具与仓库 (不要在 UTM 共享目录上直接运行, clone 到本地盘):
+
+```bash
+sudo apt update && sudo apt install -y spice-vdagent git
+echo $XDG_SESSION_TYPE                                 # 必须是 x11
+cd ~ && git clone <仓库地址> context_freeze && cd context_freeze
+git checkout cursor/ubuntu-throttle-on-unfocus-c246    # 注意分支名带 cursor/ 前缀
+```
+
+**第 2 步 依赖 + HWE 内核 (一次)**
+
+```bash
+sudo scripts/ubuntu/install_deps.sh --hwe     # xdotool x11-utils python3-xlib dbus-x11 libnotify-bin numpy ... + 6.x 内核 (memory.reclaim)
+sudo reboot                                   # 重新登录仍选 Ubuntu on Xorg
+scripts/ubuntu/check_env.sh                   # 一页体检: 会话类型 / 工具 / cgroup v2 / zram / snap 浏览器
+```
+
+**第 3 步 每次开机 (每个终端)**
+
+```bash
+cd ~/context_freeze
+sudo scripts/ubuntu/setup_cgroups.sh          # /sys/fs/cgroup/cf + 控制器 + chown + 把当前 shell 移进 /cf/host
+sudo scripts/ubuntu/setup_zram.sh 4096        # 4 GB zstd zram
+cat /proc/self/cgroup                         # 应为 0::/cf/host
+python3 run_linux.py configs/ubuntu_cn_desktop.json --probe     # cgroup writable=True runner_inside=True
+```
+
+其它终端 (含 tmux 每个 pane) 用 `source scripts/ubuntu/cf_enter.sh` 进入 /cf/host, 否则它启动的应用进不了 `/cf/<app>`。
+
+**第 4 步 不装应用先冒烟**
+
+```bash
+python3 run_linux.py configs/ubuntu_placeholders.json --policy static --T 12 --out-dir results/smoke
+```
+
+结尾应是 `COLD 0`、`state lost events 0`、后台合计 ≈ 1 核; 通过说明虚拟机 / cgroup / X11 都对了。
+
+**第 5 步 装应用: 桌面版优先**
+
+```bash
+scripts/ubuntu/install_cn_apps.sh --list      # 每个应用的下载页 / 架构 / 包名 / 手机版 fallback
+# 在虚拟机的浏览器里把各家 arm64 deb 下到 ~/Downloads (微信 / QQ / 钉钉 / WPS / 百度网盘 / 腾讯视频 / 哔哩哔哩 / 中望CAD / 悟空图像)
+sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads     # 自动跳过 x86_64-only 的包 (Chrome / Edge 在 arm64 装不上)
+# Firefox 用 Mozilla APT 仓库的 deb, Chromium 用 ppa:xtradeb/apps 的 deb; 不要用默认 snap (进程逃出 cgroup)
+python3 run_linux.py configs/ubuntu_cn_desktop.json --catalog   # 哪些已装, 哪些会退到手机版
+```
+
+没有桌面版的 (剪映、小艺) → 同一应用的手机版, 跑在 Waydroid 里 (§4.2):
+
+```bash
+sudo scripts/ubuntu/setup_waydroid.sh --install    # 一次: 仓库 + binder 模块 + waydroid init (~1 GB) + sudoers 规则
+scripts/ubuntu/setup_waydroid.sh                   # 每次登录: 嵌套 weston 窗口 + 会话 + adb connect
+scripts/ubuntu/install_mobile_apps.sh --missing    # 桌面版缺失的那些, 自动下载手机版 APK 装进去
+python3 run_linux.py configs/ubuntu_cn_desktop.json --mobile-status
+```
+
+然后把 `configs/ubuntu_cn_desktop.json` 的 `"sudo_adopt": false` 改成 `true` (Android 进程属于别的 uid, 移进 cgroup 要 root)。
+小艺从华为手机拉: `scripts/ubuntu/install_mobile_apps.sh --from-phone <序列号> com.huawei.vassistant com.huawei.hwid`。
+
+**第 6 步 首次登录、核对窗口、跑实验**
+
+```bash
+source scripts/ubuntu/cf_enter.sh
+scripts/ubuntu/cf_launch.sh wechat qq dingtalk wps baidunetdisk    # 逐个扫码 / 登录 / 关新手引导; 它们保持运行, 后面直接复用
+python3 run_linux.py configs/ubuntu_cn_desktop.json --discover     # WM_CLASS / 命令名与目录不同的, 写进 app_overrides
+python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 60
+scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60      # 场景 x 策略 x η
+python3 -m cf.linux.analyze results/ubuntu_matrix_*/*.jsonl
+```
+
+卡住时先看 §10: Wayland 会话、shell 不在 /cf、snap 进程逃出 cgroup、无 swap、Waydroid 的 binder / adb 都有条目。
+
+---
+
 ## 1. 在 MacBook 上建 Ubuntu 22.04 虚拟机
 
 | 项 | 建议 | 说明 |
