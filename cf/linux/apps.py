@@ -72,6 +72,30 @@ def _p(id_: str, name: str, category: str = "compute", **kw) -> LinuxApp:
                     install="bundled: python3 -m cf.linux.placeholder_app (needs python3-xlib)", kind="placeholder", **kw)
 
 
+PLACEHOLDER_ARGS = {          # per category: what the stand-in does in the background (see placeholder_app.py)
+    "download": "--cpu 0.3 --mem {mem} --io-mbps 20",
+    "push": "--cpu 0.1 --mem {mem} --notify-every 15",
+    "compute": "--cpu 0.9 --workers 3 --mem {mem}",
+}
+PLACEHOLDER_MEM_MB = {"download": (200, 350), "push": (120, 260), "compute": (300, 500)}
+
+
+def placeholder_for(a: LinuxApp) -> LinuxApp:
+    """A placeholder program standing in for `a` **under a's own id** (so scenario traces, flows and
+    hubs keep referring to the same ids).  Used by the runner's `placeholder_fill` to run the full
+    matrix before the vendor apps are installed; the stand-in's memory size is derived from the id
+    so that every app has a different, stable m_fg."""
+    lo, hi = PLACEHOLDER_MEM_MB.get(a.category, (200, 400))
+    mem = lo + sum(a.id.encode()) % (hi - lo + 1)
+    name = a.name if a.name.endswith("(占位)") else f"{a.name}(占位)"
+    cmd = (f"python3 -m cf.linux.placeholder_app --app {a.id} --title '{name}' "
+           + PLACEHOLDER_ARGS.get(a.category, PLACEHOLDER_ARGS["compute"]).format(mem=mem))
+    return LinuxApp(a.id, name, a.category, cmd=cmd, match=rf"placeholder_app.*--app {a.id}\b",
+                    wm_class=rf"^cf-{a.id}$", notify_names=(name, a.id), arch=("any",),
+                    install="bundled placeholder (placeholder_fill)", kind="placeholder",
+                    note=f"stand-in for {a.name}; install the desktop / mobile build to replace it")
+
+
 MOBILE_WM_CLASS = r"^(weston|Waydroid|waydroid|org\.freedesktop\.Weston)"   # the Android display's X11 window
 
 

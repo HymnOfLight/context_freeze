@@ -36,9 +36,13 @@ DEFAULTS = {
     "policy_kw": {},
     "eta": 0.3,
     "trace": {"kind": "scenario", "scenario": "office", "T": 60, "seed": 1},
-    "dwell_s": 8.0,
+    "dwell_s": 8.0,                    # number, or [lo, hi] -> uniform random dwell per step (seeded)
     "settle_s": 2.0,
     "warmup_dwell_s": 10.0,
+    "sample_every_s": 0.0,             # > 0: lightweight samples during the dwell -> step["timeline"] (time series)
+    # apps that are not installed (desktop, nor an allowed substitute) run as the bundled placeholder
+    # program under their own id, so the whole matrix can be run before the vendor apps are in place
+    "placeholder_fill": False,
     "throttle": ThrottleProfile().to_dict(),
     "cpu_throttle_resident": True,     # residents (in S_t) also get the CPU limit (tier bg)
     "never_throttle": [],              # always tier fg (music player, screen recorder ...)
@@ -81,6 +85,7 @@ class ThrottleExperiment(Experiment):
         self.substitutions: list[tuple[str, str]] = []
         self.categories: dict[str, str] = {}
         self.kinds: dict[str, str] = {}      # app -> desktop | mobile | oss | placeholder
+        self.placeholders: list[str] = []    # ids running as the bundled placeholder (placeholder_fill)
         self.prev_notif: dict = {}
 
     # ------------------------------------------------------------ checkpoint
@@ -93,7 +98,7 @@ class ThrottleExperiment(Experiment):
             "throttled": self.throttled, "shrunk": self.shrunk, "tiers": self.tiers,
             "resume_hist": self.resume_hist, "prev_pids": self.prev_pids,
             "substitutions": self.substitutions, "categories": self.categories, "kinds": self.kinds,
-            "saved_at": time.time(),
+            "placeholders": self.placeholders, "saved_at": time.time(),
         }
         tmp = self.ckpt_path + ".tmp"
         with open(tmp, "wb") as f:
@@ -122,6 +127,7 @@ class ThrottleExperiment(Experiment):
         self.substitutions = state.get("substitutions", [])
         self.categories = state.get("categories", {})
         self.kinds = state.get("kinds", {})
+        self.placeholders = state.get("placeholders", [])
         self.step_times = []
 
     def _reapply_device_state(self) -> None:
@@ -169,6 +175,21 @@ class ThrottleExperiment(Experiment):
             return
         kinds = list(self.cfg["substitute_kinds"] or [])
         used, subs, missing = A.resolve(self.cfg["apps"], dev.cat, installed=dev.is_installed, substitute_kinds=kinds)
+        self.placeholders = []
+        if missing and self.cfg["placeholder_fill"]:
+            for m in list(missing):
+                if m not in dev.cat:
+                    continue
+                dev.cat[m] = A.placeholder_for(dev.cat[m])
+                if dev.is_installed(dev.cat[m]):
+                    self.placeholders.append(m)
+                    A.EXTRA_NAMES[m] = dev.cat[m].name
+                    missing.remove(m)
+                    used.append(m)
+            if self.placeholders:
+                self.log.warn(f"placeholder_fill: {len(self.placeholders)} app(s) without an installed build run as the "
+                              f"bundled placeholder program: " + ", ".join(display_name(p) for p in self.placeholders))
+            used = [a for a in self.cfg["apps"] if a in used] + [a for a in used if a not in self.cfg["apps"]]
         for want, got in subs:
             self.log.warn(f"{display_name(want)} ({want}): no Ubuntu desktop build installed - using "
                           f"{display_name(got)} ({got}, {dev.cat[got].kind}) instead")
@@ -206,7 +227,7 @@ class ThrottleExperiment(Experiment):
                                   f"limits will not apply to them (snap? started before setup? see manual §6)")
         self.emit({"type": "meta", "config": self.cfg, "apps": self.apps, "caps": dev.caps_dict(),
                    "backend": "linux", "categories": self.categories, "substitutions": self.substitutions,
-                   "kinds": self.kinds, "profile": self.profile.to_dict(),
+                   "kinds": self.kinds, "placeholders": self.placeholders, "profile": self.profile.to_dict(),
                    "device": {"model": caps.get("hypervisor"), "build": f"{caps.get('distro')} {caps.get('kernel')}"}})
 
     def _preflight(self, caps: dict) -> None:
@@ -320,12 +341,27 @@ class ThrottleExperiment(Experiment):
         self.B_kb = self.cfg["eta"] * sum(self.m_fg.values())
         fixed = self.cfg.get("fixed_m_fg_kb") or {}
         source = "fixed" if fixed and all(p in fixed for p in self.apps) else ("mixed" if fixed else "measured")
+        # feasibility: shrunk apps keep memory.high bytes, so the background footprint cannot drop below
+        # floor = sum over the other apps of memory.high; a budget under that leaves every budgeted
+        # policy identical to `static` (everything shrunk, budget_violation on every step).
+        high_kb = {a: self.profile.mem_high_bytes(self.m_fg[a] * 1024) // 1024 for a in self.apps}
+        floor_kb = min((sum(h for b, h in high_kb.items() if b != a) for a in self.apps), default=0)
+        sum_kb = sum(self.m_fg.values())
+        eta_min = floor_kb / sum_kb if sum_kb > 0 else None
         self.emit({"type": "budget", "eta": self.cfg["eta"], "budget_kb": self.B_kb, "m_fg_source": source,
-                   "sum_m_fg_kb": sum(self.m_fg.values()), "m_fg_kb": self.m_fg, "a_fg_kb": self.a_fg})
+                   "sum_m_fg_kb": sum_kb, "m_fg_kb": self.m_fg, "a_fg_kb": self.a_fg,
+                   "shrunk_floor_kb": floor_kb, "eta_min": None if eta_min is None else round(eta_min, 3)})
         self.log.ok(f"budget B = {self.cfg['eta']} x {sum(self.m_fg.values()) // 1024} MB = {int(self.B_kb) // 1024} MB "
                     f"(m_fg {source}); shrunk apps get memory.high = "
-                    + ", ".join(f"{display_name(a)} {self.profile.mem_high_bytes(self.m_fg[a] * 1024) >> 20}"
-                                for a in self.apps) + " MB")
+                    + ", ".join(f"{display_name(a)} {high_kb[a] >> 10}" for a in self.apps) + " MB")
+        if sum_kb <= 0:
+            self.log.warn("no app has a measured working set (every warmup sample was empty): the budget is 0 and "
+                          "the tier decisions below are meaningless - fix the cgroup placement first (see the WARNs above)")
+        elif self.cfg["policy"] not in ("none", "static") and self.B_kb < floor_kb:
+            self.log.warn(f"eta {self.cfg['eta']} is below the shrunk floor: even with every background app shrunk "
+                          f"the footprint is {floor_kb // 1024} MB (eta_min = {eta_min:.2f}) > B; the '{self.cfg['policy']}' "
+                          f"policy will keep nothing resident and behave like static. Use eta >= {eta_min + 0.05:.2f} "
+                          f"or a smaller throttle.mem_frac / mem_min_mb.")
         return self.B_kb
 
     # ------------------------------------------------------------------ step
@@ -359,8 +395,8 @@ class ThrottleExperiment(Experiment):
         return infos
 
     def _tier_for(self, app: str, resident: bool) -> str:
-        if app in self.cfg["never_throttle"]:
-            return "fg"
+        if app in self.cfg["never_throttle"] or self.cfg["policy"] == "none":
+            return "fg"           # `none` = baseline: nothing is limited
         if resident:
             return "bg" if self.cfg["cpu_throttle_resident"] else "fg"
         return "shrunk"
@@ -404,7 +440,9 @@ class ThrottleExperiment(Experiment):
              "read_mb": round(max(0, b["read_bytes"] - a["read_bytes"]) / 2 ** 20, 2),
              "majflt": max(0, b["majflt"] - a["majflt"]),
              "high_events": max(0, (b["cg_events"].get("high", 0) - a["cg_events"].get("high", 0))),
-             "mem_mb": b["cg_mem_mb"], "swap_mb": b["cg_swap_mb"], "wall_s": round(wall_s, 2)}
+             "mem_mb": b["cg_mem_mb"], "swap_mb": b["cg_swap_mb"], "wall_s": round(wall_s, 2),
+             # memory.current charges the page cache the app wrote (downloads!); PSS is what the process maps
+             "pss_mb": round((b.get("pss_kb", 0) + b.get("swap_pss_kb", 0)) / 1024, 1)}
         d["cores"] = round(d["cg_cpu_ms"] / 1000 / wall_s, 3) if wall_s > 0 else None
         return d
 
@@ -438,7 +476,8 @@ class ThrottleExperiment(Experiment):
         action_ms = (time.time() - t_act) * 1000
         self.current = S
         t_dwell = time.time()
-        time.sleep(self.cfg["dwell_s"])
+        dwell = self._dwell_for(t)
+        timeline = self._dwell_sampling(dwell, t_dwell)
         s2 = self.dev.sample(self.apps)
         wall = time.time() - t_dwell
         d1 = {p: s1["apps"][p].to_dict() for p in self.apps}
@@ -470,11 +509,55 @@ class ThrottleExperiment(Experiment):
                "decision_ms": round(decision_ms, 3), "action_ms": round(action_ms, 1),
                "step_s": round(time.time() - t_step, 2), "killed_since_prev": killed, "kill_info": {},
                "state_lost": state_lost, "bg": bg, "notifications": notif,
+               "dwell_s": round(dwell, 2), "timeline": timeline,
                "after_launch": {"system": s1["system"], "apps": d1},
                "after_dwell": {"system": s2["system"], "apps": d2},
                "tau_hat": pol.predicted_next_use(req)}
         self._log_step(rec, t_step)
         return rec
+
+    def _dwell_for(self, t: int) -> float:
+        d = self.cfg["dwell_s"]
+        if isinstance(d, (list, tuple)) and len(d) == 2:
+            import random
+            # seeded per (trace seed, step) so a resumed run draws the same dwell for the same t
+            rng = random.Random(int(self.cfg["trace"].get("seed", 0)) * 7919 + t)
+            return rng.uniform(float(d[0]), float(d[1]))
+        return float(d)
+
+    TIMELINE_SYS_KEYS = ("psi", "psi_cpu", "psi_io", "zram", "loadavg")
+
+    def _dwell_sampling(self, dwell: float, t0: float) -> list[dict]:
+        """Sleep `dwell` seconds; with sample_every_s > 0 take lightweight samples on the way (cgroup
+        counters + io + system pressure) so the step record carries a time series, not just two points."""
+        every = float(self.cfg.get("sample_every_s") or 0)
+        if every <= 0 or every >= dwell:
+            time.sleep(dwell)
+            return []
+        out = []
+        end = t0 + dwell
+        while True:
+            nxt = t0 + (len(out) + 1) * every
+            if nxt >= end - min(0.2, every / 2):
+                break
+            time.sleep(max(0.0, nxt - time.time()))
+            s = self.dev.sample(self.apps, with_windows=False)
+            sysd = s["system"]
+            mi = sysd.get("meminfo") or {}
+            vm = sysd.get("vmstat") or {}
+            out.append({"dt": round(time.time() - t0, 2),
+                        "system": {**{k: sysd.get(k) for k in self.TIMELINE_SYS_KEYS if k in sysd},
+                                   "mem_available_kb": mi.get("MemAvailable"), "swap_free_kb": mi.get("SwapFree"),
+                                   "pswpin": vm.get("pswpin"), "pswpout": vm.get("pswpout"),
+                                   "pgmajfault": vm.get("pgmajfault")},
+                        "apps": {p: self._timeline_app(a.to_dict()) for p, a in s["apps"].items()}})
+        time.sleep(max(0.0, end - time.time()))
+        return out
+
+    @staticmethod
+    def _timeline_app(d: dict) -> dict:
+        return {k: d.get(k) for k in ("pss_kb", "swap_pss_kb", "cpu_ms", "write_bytes", "read_bytes", "majflt",
+                                      "cg_mem_mb", "cg_swap_mb", "cg_usage_ms", "cg_throttled_ms", "tier")}
 
     def _log_step(self, rec: dict, t_step: float) -> None:
         T = len(self.trace)

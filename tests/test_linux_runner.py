@@ -215,3 +215,78 @@ def test_android_checkpoint_is_rejected(tmp_path):
                              FakeLinuxDesktop(APPS), log=lambda *a: None, resume=True)
     with pytest.raises(ResumeError):
         exp.run()
+
+
+def test_none_policy_is_a_true_baseline(tmp_path):
+    cfg = cfg_for(tmp_path, "none", eta=1.0)
+    path = ThrottleExperiment(cfg, FakeLinuxDesktop(APPS, seed=2), log=lambda *a: None).run()
+    for s in steps_of(path):
+        assert set(s["tiers"].values()) <= {"fg"} and s["throttled"] == [] and s["shrunk"] == []
+        assert s["actions"]["tiers"] == {}
+    row = summarize(load(path))
+    assert row["bg_throttled_pct"] in (None, 0.0) and row["n_warm"] == 0
+
+
+def test_dwell_range_and_timeline_sampling(tmp_path):
+    cfg = cfg_for(tmp_path, "static", dwell_s=[0.2, 0.3], sample_every_s=0.05, trace={"kind": "zipf", "T": 4, "seed": 3})
+    path = ThrottleExperiment(cfg, FakeLinuxDesktop(APPS, seed=2), log=lambda *a: None).run()
+    steps = steps_of(path)
+    assert all(0.2 <= s["dwell_s"] <= 0.3 for s in steps) and len({s["dwell_s"] for s in steps}) > 1
+    assert all(len(s["timeline"]) >= 2 for s in steps)
+    pt = steps[0]["timeline"][0]
+    assert set(pt) == {"dt", "system", "apps"} and set(pt["apps"]) == set(APPS)
+    assert "cg_mem_mb" in pt["apps"][APPS[0]] and "tier" in pt["apps"][APPS[0]]
+    assert "pswpout" in pt["system"] and "psi_cpu" in pt["system"]
+    # same seed -> same dwell draw per step (resume-safe)
+    cfg2 = dict(cfg, name="again")
+    path2 = ThrottleExperiment(cfg2, FakeLinuxDesktop(APPS, seed=2), log=lambda *a: None).run()
+    assert [s["dwell_s"] for s in steps_of(path2)] == [s["dwell_s"] for s in steps]
+
+
+def test_placeholder_fill_runs_uninstalled_apps_as_placeholders(tmp_path, monkeypatch):
+    from cf.linux import apps as A
+    monkeypatch.setattr(A, "is_installed", lambda a, arch=None, mobile=None: a.kind == "placeholder" or a.id in OVERRIDES)
+    monkeypatch.setattr(A, "EXTRA_NAMES", dict(A.EXTRA_NAMES))      # placeholder display names must not leak
+    cfg = cfg_for(tmp_path, "static", apps=APPS[:2] + ["wechat", "jianying", "zwcad"], placeholder_fill=True,
+                  trace={"kind": "scenario", "scenario": {"name": "x", "title": "x", "apps": {"wechat": 3, "jianying": 2,
+                         "zwcad": 1, APPS[0]: 1, APPS[1]: 1}, "hub": "wechat", "flows": [["wechat", "jianying"]],
+                         "p_hub": .3, "p_flow": .3, "stickiness": .2, "description": ""}, "T": 6, "seed": 1})
+
+    class Dev(FakeLinuxDesktop):
+        def is_installed(self, a):
+            return A.is_installed(a)
+
+    exp = ThrottleExperiment(cfg, Dev(APPS[:2] + ["wechat", "jianying", "zwcad"], seed=1), log=lambda *a: None)
+    path = exp.run()
+    meta = records(path)[0]
+    assert sorted(meta["placeholders"]) == ["jianying", "wechat", "zwcad"]
+    assert meta["kinds"]["wechat"] == "placeholder" and meta["kinds"][APPS[0]] == "desktop"
+    assert exp.dev.cat["wechat"].cmd.startswith("python3 -m cf.linux.placeholder_app --app wechat ")
+    assert "--notify-every" in exp.dev.cat["wechat"].cmd and "--io-mbps" not in exp.dev.cat["wechat"].cmd
+    assert "--workers 3" in exp.dev.cat["jianying"].cmd
+    assert set(meta["apps"]) == set(APPS[:2]) | {"wechat", "jianying", "zwcad"}   # scenario ids unchanged
+    assert summarize(load(path))["n_placeholders"] == 3
+    assert A.CATALOG["wechat"].kind == "desktop"                                  # global catalogue untouched
+
+
+def test_per_app_rows_report_and_plots(tmp_path):
+    from cf.linux.analyze import per_app_rows, PER_APP_COLS, main as analyze_main
+    paths = []
+    for pol, eta in (("none", 1.0), ("static", 0.0), ("lru", 0.5)):
+        cfg = cfg_for(tmp_path, pol, eta=eta, name=f"{pol}_r", sample_every_s=0.01, dwell_s=0.06)
+        paths.append(ThrottleExperiment(cfg, FakeLinuxDesktop(APPS, seed=4), log=lambda *a: None).run())
+    rows = per_app_rows(load(paths[1]))
+    assert [r["app"] for r in rows] == APPS and all(set(PER_APP_COLS) <= set(r) for r in rows)
+    static_dl = next(r for r in rows if r["category"] == "download")
+    assert static_dl["t_shrunk_s"] >= 0 and static_dl["write_mb"] >= 0 and static_dl["state_lost"] == 0
+    assert any(r["lat_shrunk_p50_ms"] for r in rows)        # some app came back from shrunk
+    none_rows = per_app_rows(load(paths[0]))
+    assert all(r["cores_bg_avg"] is None and r["t_bg_s"] == 0 for r in none_rows)
+    pytest.importorskip("matplotlib")
+    out = tmp_path / "plots"
+    analyze_main(paths + ["--per-app", str(tmp_path / "per_app.csv"), "--plots-dir", str(out), "--md", str(tmp_path / "r.md")])
+    made = sorted(p.name for p in out.iterdir())
+    assert "latency_cdf.png" in made and "bg_tradeoff.png" in made and "static_r.png" in made and "static_r_timeline.png" in made
+    md = (tmp_path / "r.md").read_text()
+    assert "## Per run" in md and "## Per app" in md and "latency_cdf.png" in md and "state_lost_events" in md
+    assert (tmp_path / "per_app.csv").read_text().splitlines()[0].startswith("run,app,kind")

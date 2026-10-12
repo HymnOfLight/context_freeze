@@ -14,7 +14,8 @@
     python3 run_linux.py configs/ubuntu_cn_desktop.json --release      # lift every limit under /sys/fs/cgroup/cf
 
 Throttle profile overrides: --cpu-mode quota|cpuset|both|none --cpu-cores 1 --cpuset last --mem-frac 0.5
---swap-max-mb 1024 --mem-hard --no-resident-cpu.  Results: <out-dir>/<name>.jsonl (+ .log); summarise with
+--swap-max-mb 1024 --mem-hard --no-resident-cpu.  Data knobs: --dwell 8 | --dwell 5 15 (random per step),
+--sample-every 2 (time series inside each dwell), --placeholders (apps not installed yet run as placeholders).  Results: <out-dir>/<name>.jsonl (+ .log); summarise with
 `python3 -m cf.linux.analyze results/*.jsonl`.
 """
 from __future__ import annotations
@@ -68,6 +69,10 @@ def main(argv=None) -> int:
     ap.add_argument("--mem-hard", action="store_true", help="also set memory.max (OOM-kill risk; off by default)")
     ap.add_argument("--no-resident-cpu", action="store_true", help="apps inside the budget keep full CPU (only shrunk ones limited)")
     ap.add_argument("--no-strict", action="store_true", help="warn instead of abort on preflight problems")
+    ap.add_argument("--placeholders", action="store_true",
+                    help="apps without an installed build run as the bundled placeholder under their own id (placeholder_fill)")
+    ap.add_argument("--dwell", type=float, nargs="+", metavar="S", help="dwell per step: one value, or lo hi for a uniform range")
+    ap.add_argument("--sample-every", type=float, metavar="S", help="lightweight samples every S seconds during the dwell (time series)")
     ap.add_argument("--name"); ap.add_argument("--out-dir")
     ap.add_argument("--resume", nargs="?", const=True, default=False, metavar="JSONL")
     ap.add_argument("--overwrite", action="store_true")
@@ -94,6 +99,12 @@ def main(argv=None) -> int:
     base["throttle"] = thr
     if args.no_resident_cpu:
         base["cpu_throttle_resident"] = False
+    if args.placeholders:
+        base["placeholder_fill"] = True
+    if args.dwell:
+        base["dwell_s"] = args.dwell[0] if len(args.dwell) == 1 else args.dwell[:2]
+    if args.sample_every is not None:
+        base["sample_every_s"] = args.sample_every
     cat = A.with_overrides(base.get("app_overrides"))
     kinds = base.get("substitute_kinds", list(A.DEFAULT_SUBSTITUTE_KINDS))
 
