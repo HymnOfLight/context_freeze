@@ -30,20 +30,40 @@
 
 **第 1 步 在 macOS 上建虚拟机 (UTM)**
 
-1. 装 UTM (https://mac.getutm.app 或 `brew install --cask utm`); 下载 **arm64 Desktop** 镜像 `ubuntu-22.04.x-desktop-arm64.iso`
-   (cdimage.ubuntu.com/releases/22.04/release/), 不是 amd64。
+1. 装 UTM (https://mac.getutm.app 或 `brew install --cask utm`)。**Ubuntu 22.04 没有官方的 arm64 Desktop ISO**
+   (cdimage 上只有 amd64 桌面版和 arm64 Server 版), 两条路选一:
+   * **方案 A (本手册默认)**: `ubuntu-22.04.5-live-server-arm64.iso`
+     (https://cdimage.ubuntu.com/releases/22.04/release/ubuntu-22.04.5-live-server-arm64.iso,
+     sha256 `eafec62c…7505`, 用 `shasum -a 256` 核对), 装完再 `sudo apt install ubuntu-desktop-minimal`。
+   * **方案 B**: `ubuntu-24.04.x-desktop-arm64.iso` (https://cdimage.ubuntu.com/noble/daily-live/current/ 或
+     releases/24.04/release/) 直接是桌面版; cgroup v2 / Xorg / 本仓库脚本全部一样, 只是 24.04 的默认内核已是 6.8, 不用 `--hwe`。
 2. UTM → *Create a New VM* → **Virtualize** (不要 Emulate) → Linux → 选 ISO → CPU **4 核**, 内存 **8192 MB**, 磁盘 **64 GB**;
    建好后在 VM 设置里关掉 *Display → Retina Mode*, 不开 Balloon。
-3. 装系统: "最小安装", 不勾 "安装第三方软件"; 记住密码 (后面全程要 sudo)。
-4. 第一次进桌面就做三件事: **登录界面右下角齿轮 → "Ubuntu on Xorg"** 再登录; 设置 → 电源: 不熄屏、不自动锁屏
+3. 装系统 (方案 A 是文本安装器): 不勾任何 snap, 勾 **Install OpenSSH server**; 记住密码 (后面全程要 sudo)。
+   安装器显示完成后 **先在 UTM 里把 ISO 弹出 (CD/DVD → Clear) 再 reboot**, 否则重启又进安装器或黑屏光标闪动。
+4. 方案 A 装桌面 (**先** 装 Mozilla 仓库的 Firefox deb, 否则 `ubuntu-desktop-minimal` 依赖的 firefox 过渡包会去装 snap, 在
+   snap 商店连不上时 dpkg 直接报错, 见 §10):
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc >/dev/null
+gpg -n -q --import --import-options import-show /etc/apt/keyrings/packages.mozilla.org.asc | grep -q 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 && echo key-ok
+echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" | sudo tee /etc/apt/sources.list.d/mozilla.list
+printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/mozilla
+sudo apt update && sudo apt install -y firefox
+sudo apt install -y ubuntu-desktop-minimal      # ~1.5 GB; 之后 sudo systemctl set-default graphical.target && sudo reboot
+```
+
+5. 第一次进桌面就做三件事: **登录界面右下角齿轮 → "Ubuntu on Xorg"** 再登录; 设置 → 电源: 不熄屏、不自动锁屏
    (`gsettings set org.gnome.desktop.session idle-delay 0`); 设置 → 显示: 固定分辨率, 之后不再改。
-5. 客体工具与仓库 (不要在 UTM 共享目录上直接运行, clone 到本地盘):
+   想全程只用 ssh 操作 (推荐: 复制粘贴方便, 不受 UTM 窗口影响) 见 §2.4; 需要走 macOS 上的代理 (如 Clash 7897 端口) 见 §2.5。
+6. 客体工具与仓库 (不要在 UTM 共享目录上直接运行, clone 到本地盘):
 
 ```bash
 sudo apt update && sudo apt install -y spice-vdagent git
 echo $XDG_SESSION_TYPE                                 # 必须是 x11
-cd ~ && git clone <仓库地址> context_freeze && cd context_freeze
-git checkout cursor/ubuntu-throttle-on-unfocus-c246    # 注意分支名带 cursor/ 前缀
+cd ~ && git clone https://github.com/HymnOfLight/context_freeze.git && cd context_freeze
+git checkout cursor/ubuntu-throttle-on-unfocus-c246    # 注意分支名带 cursor/ 前缀; `git remote -v` 应指向 context_freeze
 ```
 
 **第 2 步 依赖 + HWE 内核 (一次)**
@@ -103,10 +123,10 @@ source scripts/ubuntu/cf_enter.sh
 scripts/ubuntu/cf_launch.sh wechat qq dingtalk wps baidunetdisk    # 逐个扫码 / 登录 / 关新手引导; 它们保持运行, 后面直接复用
 python3 run_linux.py configs/ubuntu_cn_desktop.json --discover     # WM_CLASS / 命令名与目录不同的, 写进 app_overrides
 python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 60
-scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60      # 场景 x 策略 x η
-python3 -m cf.linux.analyze results/ubuntu_matrix_*/*.jsonl
+PRESET=night scripts/ubuntu/run_all.sh                             # 一条命令: 体检 → 快照 → 冒烟 → 过夜矩阵 → report.md (tmux 里跑)
 ```
 
+应用还没装齐也能先把数据跑出来: `PLACEHOLDERS=1 PRESET=night scripts/ubuntu/run_all.sh` (没装的用占位程序顶替, id 不变; 装齐后同一命令重跑)。
 卡住时先看 §10: Wayland 会话、shell 不在 /cf、snap 进程逃出 cgroup、无 swap、Waydroid 的 binder / adb 都有条目。
 
 ---
@@ -116,7 +136,7 @@ python3 -m cf.linux.analyze results/ubuntu_matrix_*/*.jsonl
 | 项 | 建议 | 说明 |
 |---|---|---|
 | 虚拟机软件 | **UTM** (免费, Apple Virtualization 后端) / Parallels Desktop / VMware Fusion | 三者都用 Hypervisor.framework 原生跑 arm64 客体; 不要开 "模拟 x86_64" 模式 (慢 10 倍以上, 时延数据无意义) |
-| 镜像 | Ubuntu 22.04.x **Desktop arm64** (`ubuntu-22.04.x-desktop-arm64.iso`, 来自 cdimage.ubuntu.com) | Server 版 + `ubuntu-desktop` 也可; 24.04 同样能跑 (cgroup/X11 相同), 本手册以 22.04 为准 |
+| 镜像 | `ubuntu-22.04.5-live-server-arm64.iso` + `apt install ubuntu-desktop-minimal` (§0 第 1、4 步) | 22.04 **没有** 官方 arm64 桌面 ISO; 或直接用 `ubuntu-24.04.x-desktop-arm64.iso` (cgroup/X11 相同, 内核已是 6.8) |
 | CPU | **4 核** | 要能看出 "后台只给 1 核" 的效果, 客体至少 4 核; M4 的大核够用 |
 | 内存 | **8 GB** (16 GB 主机) | 13 个桌面应用 (微信/QQ/钉钉都是 Electron 或 Qt, 各 300–900 MB) 常驻约 6–8 GB; 6 GB 以下内核自己的回收会盖过我们的控制 (preflight 对 < 6144 MB 给 WARN)。跑矩阵时关掉 macOS 上的 IDE / 浏览器 |
 | 磁盘 | ≥ 60 GB | 系统 10 GB + 应用 (微信 1 GB、WPS 1.5 GB、浏览器各 0.5 GB …) + 下载任务的缓存文件 |
@@ -126,7 +146,9 @@ python3 -m cf.linux.analyze results/ubuntu_matrix_*/*.jsonl
 | 休眠 / 锁屏 | 设置 → 电源: 不休眠, 不自动锁屏; `gsettings set org.gnome.desktop.session idle-delay 0` | 锁屏后 X 服务器的焦点切换全部失败 |
 
 UTM 的最小步骤: *Create a New VM → Virtualize → Linux → 选 ISO →* CPU 4, 内存 8192 MB, 磁盘 64 GB → 装完后在
-UTM 设置里勾 *Display → Retina Mode* 关掉 (DPI 缩放不要变)。装系统时选 "最小安装", 不要勾 "安装第三方软件"。
+UTM 设置里勾 *Display → Retina Mode* 关掉 (DPI 缩放不要变)。Server 安装器里勾 OpenSSH server, 不勾 snap;
+安装完成后先弹出 ISO 再重启 (重启黑屏 + 光标闪动 = 还挂着 ISO 或显示输出停在串口, 强制关机 → Clear CD/DVD → 再开)。
+实际内存少于 8 GB (如 UTM 只给到 5.9 GB) 也能跑, preflight 对 < `min_ram_mb` (默认 6144) 只给 WARN, 但同时常驻的应用数要减少。
 
 把本仓库放进虚拟机 (`git clone`, 或 UTM 共享目录 → `cp -r` 到 `~/context_freeze`; **不要直接在共享目录上运行**,
 9p/virtiofs 上 `results/` 的频繁小写入很慢)。
@@ -144,6 +166,46 @@ scripts/ubuntu/check_env.sh                    # 一页式体检: 会话类型 /
 
 `memory.reclaim` 不是必需的: 没有它时 `shrunk` 应用的内存只在它下次分配时被内核按 `memory.high` 慢慢压下去 (惰性);
 有它时 `set_tier` 立刻把多出的部分回收掉, 后续切回时的页入成本才稳定可测。preflight 只给 WARN。
+
+### 2.4 只用 ssh 操作虚拟机
+
+全部实验都可以在 ssh 里完成, 虚拟机窗口只负责显示桌面 (不用装剪贴板共享)。要点是 ssh 会话要借到桌面会话的三个环境变量:
+
+```bash
+# 一次: 让桌面自动登录到 Xorg (这样重启后不用碰 UTM 窗口)
+sudo sed -i 's/^#\?WaylandEnable=.*/WaylandEnable=false/' /etc/gdm3/custom.conf
+sudo sed -i "s/^#\?\s*AutomaticLoginEnable.*/AutomaticLoginEnable=true/; s/^#\?\s*AutomaticLogin\s*=.*/AutomaticLogin=$USER/" /etc/gdm3/custom.conf
+grep -E 'Wayland|Automatic' /etc/gdm3/custom.conf
+# 之后每个 ssh 会话 (写进 ~/.bashrc 更省事):
+pid=$(pgrep -u $USER -x gnome-shell | head -1)
+for v in DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE; do export "$v=$(tr '\0' '\n' </proc/$pid/environ | sed -n "s/^$v=//p")"; done
+echo $DISPLAY $XDG_SESSION_TYPE          # :1 x11 (或 :0)
+xdotool getactivewindow getwindowname    # 能打印出桌面上当前窗口名 = 成功
+```
+
+`scripts/ubuntu/run_all.sh` 在没有 `DISPLAY` 时会自动做这一步。从 Mac 连: `ssh user@<VM IP>` (UTM 共享网络下 IP 在
+`ip -4 a` 里, 形如 192.168.64.x); 用 tmux 跑长实验 (`tmux new -s cf`), ssh 断了实验不受影响。
+
+### 2.5 走 macOS 上的代理 (Clash 等, 端口 7897)
+
+虚拟机 → 宿主的地址是网关 (`ip route | awk '/default/{print $3}'`, UTM 共享网络通常 192.168.64.1)。Clash 要勾 **Allow LAN**。
+
+```bash
+GW=$(ip route | awk '/default/{print $3}')
+# apt 单独配置 (sudo 默认不带环境变量)
+printf 'Acquire::http::Proxy "http://%s:7897";\nAcquire::https::Proxy "http://%s:7897";\n' $GW $GW | sudo tee /etc/apt/apt.conf.d/95proxy
+# 当前 shell / 全局 (重新登录生效)
+echo "http_proxy=http://$GW:7897
+https_proxy=http://$GW:7897
+all_proxy=socks5://$GW:7897
+no_proxy=localhost,127.0.0.1,192.168.0.0/16,.cn,.aliyun.com,.baidu.com,.qq.com,.weixin.qq.com,.bilibili.com,.hdslb.com,.dingtalk.com" | sudo tee -a /etc/environment
+echo 'Defaults env_keep += "http_proxy https_proxy all_proxy no_proxy"' | sudo tee /etc/sudoers.d/proxy
+curl -sI https://github.com | head -1          # HTTP/2 200
+```
+
+**跑下载类实验前把代理关掉** (`unset http_proxy https_proxy all_proxy` 或注释 /etc/environment 里的行再重新登录):
+代理会把下载应用的流量整形成 Clash 的速率, `download_mbps` 量的就不再是 "后台被限到 1 核后还能下多快"。
+`run_all.sh` 发现代理变量时会提示。`snap` 不读这些变量 (这也是 §0 第 4 步先装 Mozilla deb 的原因之一)。
 
 ## 3. 每次开机: cgroup 委托 + zram
 
@@ -295,7 +357,9 @@ catalogue id (`APP`) / 命令行。常见修正:
 | `throttle.proactive_reclaim` | true | 降档时立即写 `memory.reclaim` (内核 ≥ 5.19) |
 | `cpu_throttle_resident` | true | 预算内的后台应用也限 CPU (`bg`); false 则预算内的完全不受限, 策略只决定内存 |
 | `trace` | scenario office T=60 | `kind`: `scenario` (`office` `design` `download` `chat`) / `day` (四场景依次经历) / `zipf` / `markov`; 也可内联 `{"apps":{id:权重},"hub":id,"flows":[[...]]}` |
-| `dwell_s` / `settle_s` / `warmup_dwell_s` | 8 / 2 / 10 | 每步停留 / 切换后等待 / warmup 每应用停留 (秒) |
+| `dwell_s` / `settle_s` / `warmup_dwell_s` | [5, 12] / 2 / 10 | 每步停留 / 切换后等待 / warmup 每应用停留 (秒)。`dwell_s` 给一个数 = 固定; 给 `[lo, hi]` = 每步按 seed 均匀抽样 (同一 seed 下各策略的每一步停留相同, 可直接对比); 每条 `step` 记录带 `dwell_s` |
+| `sample_every_s` | 2.0 | > 0 时停留期间每隔这么多秒做一次轻量采样 (PSI cpu/mem/io、zram、MemAvailable、swap in/out、每应用 PSS / swap / cpu / 写盘 / 节流时间 / tier) → `step.timeline`, 画时间序列 (`--plots-dir` 的 `*_timeline.png`); 0 关闭 |
+| `placeholder_fill` | false | true (或 `--placeholders`): 没装上的应用用内置占位程序顶替, **id 不变**, 场景 / 轨迹不变 (`meta.placeholders` 列出); 在真实应用装齐之前就能跑完整矩阵, 之后同一命令重跑即用真实应用 |
 | `minimize_background` | false | 切走的窗口是否最小化 (真实用户不会, 默认不做) |
 | `notifications` | true | 用 `dbus-monitor` 统计推送类应用的 `Notify` 调用 |
 | `adopt_strays` / `sudo_adopt` | true / false | 把 cgroup 外的同名进程移进来; 用户权限移不动时是否 `sudo scripts/ubuntu/cf_adopt.sh` (需 sudoers 免密, 见脚本头)。**有手机版应用时必须 `sudo_adopt: true`** (Android 进程属于其它 uid) |
@@ -303,11 +367,15 @@ catalogue id (`APP`) / 命令行。常见修正:
 | `min_ram_mb` | 6144 | 低于此 WARN |
 
 命令行可以覆盖最常改的项: `--policy --eta --T --scenario --seed --cpu-mode --cpu-cores --cpuset --mem-frac
---swap-max-mb --mem-hard --no-resident-cpu --name --out-dir`。
+--swap-max-mb --mem-hard --no-resident-cpu --dwell S [S] --sample-every S --placeholders --name --out-dir`。
 
-**关于 η 与预算的语义** (与 Android 版的差别): 一个 `shrunk` 应用在预算模型里占 `memory.high` 那么多 (ρ_i = memory.high / m),
-所以 B = η × Σ m_fg 必须大于 Σ(后台应用的 memory.high) 才会有应用留在 `bg`。13 个应用、`mem_min_mb=192` 时这个底约 2.4 GB,
-η < 0.3 基本等价于 `static`。想比较策略之间的差别用 η ∈ {0.4, 0.5, 0.6} 或把 `mem_min_mb` 降到 96。
+**关于 η 与预算的语义 (重要, 与 Android 版的差别)**: 一个 `shrunk` 应用在预算模型里仍占 `memory.high` = max(mem_frac × m_fg, mem_min_mb)
+(ρ_i = memory.high / m), 所以后台总占用有一个 **下限** floor = Σ(其它应用的 memory.high) ≈ mem_frac × (1 − 1/n) × Σ m_fg。
+B = η × Σ m_fg 低于 floor 时任何预算策略都留不下一个应用, 和 `static` 完全一样 (每步 `budget_violation`)。
+`mem_frac = 0.5` 时 η_min ≈ 0.5: **比较策略请用 η ≥ 0.6** (矩阵默认 0.6 / 0.8); 想看更低的 η 就同时把 `mem_frac` 调小
+(`MEM_FRAC=0.3 ETAS="0.4 0.6" scripts/ubuntu/run_matrix.sh`)。runner 在 `budget` 记录里给出 `shrunk_floor_kb` / `eta_min`, 不可达时 WARN;
+`cf.linux.analyze` 的 `eta_min` / `eta_feasible` / `n_resident_avg` 列和 report.md 的提示会把这种格标出来。
+`policy: none` 是真正的基线: 任何应用都不受限 (全部 `fg`)。
 
 ## 6. 运行
 
@@ -324,9 +392,23 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy l
 python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario design --policy static --cpu-cores 0.5 --mem-frac 0.3
 
 # 6.3 矩阵: 场景 x 策略 x η x 种子 (+ 限流档位变体), 同一目录, 同一预算分母 (第一格的 m_fg 复用到所有格)
-scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60
+scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60       # 默认: 4 场景 x (none static lru landlord hybrid) x η 0.6/0.8, ~30 格 ~8 h
+NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40   # 过夜档: + 1c:0.3 / 0.5c:0.5 / cpuset / swap128 / memhard 对照, ~50 格 ~10 h
+FULL=1  scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60   # 全量: 5 场景 (含 day) x 6 策略 x η 0.55/0.7/0.85 x 2 seed x 全部变体, ~350 格, 数天 (可中断续跑)
 PROFILES="1c:0.5 1c:0.3 0.5c:0.5" POLICIES="none static" scripts/ubuntu/run_matrix.sh     # 只比限流强度
+CPU_MODES="quota cpuset" RESIDENT="1 0" SWAP_CAPS="512 128" MEM_HARD=1 scripts/ubuntu/run_matrix.sh   # 单独点名变体
+MEM_FRAC=0.3 ETAS="0.4 0.6" scripts/ubuntu/run_matrix.sh                                 # 第二遍: 更小的 memory.high (文件名加 _mf0.3)
+PLACEHOLDERS=1 NIGHT=1 scripts/ubuntu/run_matrix.sh                                      # 没装上的应用用占位程序顶替, 先把矩阵跑通
+DRY=1 FULL=1 scripts/ubuntu/run_matrix.sh                                                # 只列出会跑哪些格 / 命令
 QUICK=1 scripts/ubuntu/run_matrix.sh                                                     # office, none+static, T=15
+# 结束时自动: summary.csv / summary_agg.csv / per_app.csv / pareto.csv / plots/*.png / report.md (都在 OUT 目录)
+
+# 6.3b 一条命令从开机到 report.md (每步幂等, 可中断重跑): 建 cgroup 树 + zram → check_env → probe/catalog 快照 → 冒烟 → 矩阵 → 分析
+scripts/ubuntu/run_all.sh                           # 默认矩阵 -> results/ubuntu_all/{env,probe,catalog}.txt + matrix/
+PRESET=night scripts/ubuntu/run_all.sh              # 过夜档 (推荐在 tmux 里跑: tmux new -s cf)
+PRESET=full PLACEHOLDERS=1 scripts/ubuntu/run_all.sh
+PRESET=quick scripts/ubuntu/run_all.sh              # 只做冒烟
+SKIP_SMOKE=1 OUT=results/run2 T=40 scripts/ubuntu/run_all.sh
 
 # 6.4 断点续跑 (Ctrl+C / X 连接断 / 虚拟机挂起后): 轨迹、策略状态、各应用档位全部恢复并重新写回 cgroup
 python3 run_linux.py configs/ubuntu_cn_desktop.json --resume results/landlord_office_eta0.5_s1.jsonl
@@ -368,7 +450,19 @@ Ctrl+C / SIGTERM 时解除全部限制。启动时也会先清一遍残留限制
 ```bash
 python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl                       # 表格
 python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --csv s.csv --agg agg.csv --pareto p.csv --plot pareto.png
+python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --per-app              # 每个应用一行 (打印; 给文件名则写 CSV)
+python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --plots-dir plots --md report.md   # 图 + Markdown 报告
 ```
+
+`--plots-dir` 生成: 每格一张 `<name>.png` (后台 PSS vs 预算 / 每步切换时延按来源 fg·bg·shrunk·cold 着色 / 后台核数 + 节流 % /
+swap in·out + 下载 MB + 通知), `sample_every_s > 0` 时再加 `<name>_timeline.png` (停留期间的每应用 cgroup 内存堆叠、后台核数、PSI、SwapFree),
+以及跨格的 `latency_cdf.png` (每策略: 从 bg 回来 vs 从 shrunk 回来的时延 CDF) 和 `bg_tradeoff.png` (相对 `none` 基线的后台内存节省 % vs P95 时延)。
+`--md` 把不变量 (state_lost / oom / n_cold 合计)、每格表、复本聚合 (mean ± sd)、day 轨迹分段、每应用表、不可达 η 提示和图链接写成一份 report.md。
+`--per-app` 的列: `n_req n_cold lat_bg_p50_ms lat_shrunk_p50_ms ping_shrunk_p50_ms m_fg_mb pss_bg_avg_mb pss_shrunk_avg_mb
+mem_bg_avg_mb mem_shrunk_avg_mb t_fg_s t_bg_s t_shrunk_s cores_bg_avg throttled_pct write_mb notifs cpu_s majflt state_lost`
+(`pss_*` = 进程映射的 PSS+SwapPss; `mem_*` = cgroup `memory.current`, 含应用写出的页缓存, 下载类应用的 `mem_bg` 会明显大于 PSS,
+被 `memory.high` 压到 shrunk 时这些缓存页先被丢掉) — 用来回答 "微信在 shrunk 里待了多久、
+切回来平均多慢、这期间推了几条通知"、"百度网盘在后台 1 核下写了多少 MB" 这类按应用的问题。
 
 | 列 | 含义 | 希望 |
 |---|---|---|
@@ -385,6 +479,8 @@ python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --csv s.csv --agg agg.
 | `swap_write_mb` / `swap_read_mb` / `refaults` | zram 换出 / 换入 | 换入 = WARM 切换的代价 |
 | `psi_cpu_some_ms` | 全系统 CPU 压力 | 前台卡顿的旁证 |
 | `cpu` / `mem_frac` / `cpu_throttle_resident` / `substitutions` | 本格的限流档位与替代关系 (桌面版缺失时用了谁的手机版) | 用来分组 |
+| `eta_min` / `eta_feasible` / `n_resident_avg` | 该格 η 的可达下限 (shrunk floor / Σ m_fg) / 本格 η 是否高于它 / 平均留在预算内的后台应用数 | `eta_feasible = False` 的格等价于 static, 不要拿来比较策略 |
+| `n_mobile` / `n_placeholders` | 本格里有几个应用跑的是手机版 / 占位程序 | 占位格只用于把流程跑通, 不进论文 |
 
 ## 8. 验证 "不丢状态和上下文"
 
@@ -461,6 +557,31 @@ binder, 装 `linux-modules-extra-$(uname -r)` 或 HWE 内核后重启。
 
 **虚拟机内存不够 (`VM RAM is 4096 MB`)** — 要么加到 8 GB, 要么减少 `apps` (去掉两个浏览器之一与一个视频应用)。
 
+**装桌面时 `firefox_1:1snap1-0ubuntu2_arm64.deb ... dpkg returned an error code (1)`** — Ubuntu 的 firefox deb 只是个过渡包,
+post-inst 里跑 `snap install firefox`, snap 商店连不上 (代理 / 国内网络) 就整个 `ubuntu-desktop-minimal` 失败。先装 Mozilla APT 仓库的
+真 deb 并 pin (§0 第 4 步), 再 `sudo apt -f install && sudo apt install ubuntu-desktop-minimal`; 已经卡住的话
+`sudo dpkg --remove --force-remove-reinstreq firefox` 后重做。
+
+**`NO_PUBKEY C0BA5CE6DC6315A3` / `packages.mozilla.org ... is not signed`** — 密钥文件没下全 (常见于代理把下载截断): 重新
+`wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc`,
+`gpg -n -q --import --import-options import-show` 看到指纹 `35BA A0B3 3E9E B396 F59C A838 C0BA 5CE6 DC63 15A3` 才算对。
+
+**安装完成点 reboot 后黑屏、光标闪动** — ISO 还挂着 (UTM: CD/DVD → Clear 后再开机), 或者 Server 版默认把输出留在串口:
+在 UTM 的 Serial 窗口能看到登录提示就说明系统好着, 装完 `ubuntu-desktop-minimal` 并 `systemctl set-default graphical.target` 即可。
+
+**`git checkout cursor/...: pathspec did not match` / `couldn't find remote ref`** — 先 `git remote -v`: 如果 origin 不是
+`HymnOfLight/context_freeze.git` 就是 clone 错了仓库, 重新 clone; 是对的话 `git fetch origin cursor/ubuntu-throttle-on-unfocus-c246`
+(分支名带 `cursor/` 前缀)。
+
+**`check_env.sh`: `FAIL /sys/fs/cgroup/cf missing`** — 每次开机都要 `sudo scripts/ubuntu/setup_cgroups.sh` (§3); `run_all.sh` 会自己做。
+`warn only disk swap` 用 `sudo scripts/ubuntu/setup_zram.sh 4096` 解决 (`run_all.sh` 默认也会做)。
+
+**预算策略 (lru / landlord / hybrid) 的结果和 static 一模一样, `budget_violations = T`** — η 低于 shrunk floor (§5 "关于 η 与预算的语义"):
+看 `eta_min` 列, 用 η ≥ eta_min + 0.05 重跑, 或 `MEM_FRAC=0.3`。
+
+**下载类应用的 `download_mbps` 很低且各格都一样** — 代理在整形流量 (§2.5), 或者下载源本身限速; 实验前 `unset http_proxy https_proxy all_proxy`,
+并在 `none` 基线里确认未限流时的速率明显更高。
+
 **macOS 侧** — 跑矩阵时关闭 Spotlight 索引新建的结果目录 (如果是共享目录), 关闭 Time Machine; UTM 不要开 "Balloon" 内存气球。
 
 ## 11. 测试
@@ -472,3 +593,28 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 有 Xvfb + xfwm4/openbox + xdotool 时自动加跑一次真实窗口 发现 -> 激活 -> _NET_WM_PING 往返
                                                    # /sys/fs/cgroup/cf 已委托给当前用户时自动加跑一次真实 cgroup 的档位读写
 ```
+
+## 12. 脚本与文件清单
+
+| 文件 | 何时用 | 作用 |
+|---|---|---|
+| `scripts/ubuntu/install_deps.sh [--hwe] [--subs]` | 一次 | apt 依赖 (xdotool, x11-utils, python3-xlib, dbus-x11, libnotify-bin, numpy, matplotlib …); `--hwe` 6.x 内核 (memory.reclaim); `--subs` 开源替代品 |
+| `scripts/ubuntu/check_env.sh` | 随时 | 一页体检: 会话类型 / 工具 / cgroup v2 委托 / 本 shell 是否在 /cf / memory.reclaim / zram / snap 浏览器; 退出码 0 = 可以跑 |
+| `scripts/ubuntu/setup_cgroups.sh [--pid P] [--no-enter]` | 每次开机 (sudo) | 建 `/sys/fs/cgroup/cf`, 开 cpu/cpuset/memory/io 控制器, chown 给当前用户, 把 shell 移进 `cf/host` |
+| `scripts/ubuntu/cf_enter.sh` | 每个新终端 (`source`) | 等价于上一条, 显式传当前 shell 的 pid (tmux / VS Code 终端用这个) |
+| `scripts/ubuntu/cf_adopt.sh` | runner 内部 (sudo) | 把别的 uid 的进程 (Waydroid 里的 Android 应用) 移进 `/cf/<app>`; sudoers 规则由 `setup_waydroid.sh --install` 写 |
+| `scripts/ubuntu/setup_zram.sh [MB] [算法] / --off` | 每次开机 (sudo) | zstd zram swap (默认 4 GB), 让 `memory.high` 有地方放匿名页 |
+| `scripts/ubuntu/install_cn_apps.sh [--list] [--check] [DIR]` | 装应用 | 列出 13 个应用的下载页 / 架构 / 包名 / 手机版 fallback; 从目录批量安装 deb (跳过 x86_64-only) |
+| `scripts/ubuntu/setup_waydroid.sh [--install] [--status] [--stop]` | 有应用没有桌面版时 | Waydroid 仓库 + binder 模块 + init (一次); 每次登录起嵌套 weston X11 窗口 + 会话 + adb connect |
+| `scripts/ubuntu/install_mobile_apps.sh [--list] [--missing] [--from-phone SN pkg…] [--search 名]` | 同上 | 桌面版缺失的那些应用的手机版 APK: 下载并 `adb install`; 小艺从华为手机导出 |
+| `scripts/ubuntu/cf_launch.sh app…` | 首次登录 | 把应用启动进各自的 cgroup 并保持运行 (扫码 / 登录 / 关新手引导一次, 之后实验复用) |
+| `python3 run_linux.py CONFIG --probe / --catalog / --discover / --mobile-status / --scenario list / --launch / --release` | 诊断 | 环境与每应用可用性 / 目录表 / 桌面上实际的 WM_CLASS 与 cgroup 叶 / Android 状态 / 本配置会用哪些应用 / 启动 / 清限制 |
+| `python3 run_linux.py CONFIG --policy … --eta … --T … --scenario … [--resume FILE]` | 单格实验 | 一次实验 → `results/<name>.jsonl` (+ `.log`, `.ckpt`); Ctrl+C 安全, `--resume` 续跑 |
+| `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
+| `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= PLACEHOLDERS= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → probe / catalog / mobile 快照 → 冒烟 (检查 state_lost / oom / COLD = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
+| `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / Pareto 点 / 图 / Markdown 报告 |
+| `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |
+| `python3 -m cf.linux.placeholder_app --app ID --title T [--cpu f --mem MB --io-mbps n --notify-every s --workers k]` | 冒烟 / 占位 | 内置 X11 占位程序: 可控的 CPU / 内存 / 写盘 / 通知负载, 状态写到 `/tmp/cf_placeholder_<id>.json` |
+| `configs/ubuntu_cn_desktop.json` | 主配置 | 13 个应用、`substitute_kinds` / `mobile`、限流档位、轨迹、`dwell_s` 范围、`sample_every_s`、`placeholder_fill` |
+| `configs/ubuntu_placeholders.json` | 冒烟 | 4 个占位程序的最小配置 (任何 X11 会话可跑, 含 Xvfb) |
+| `results/<matrix>/{summary,summary_agg,per_app,pareto}.csv`, `plots/*.png`, `report.md`, `matrix.env`, `*.console.log` | 产物 | 表 / 图 / 报告 / 本次矩阵的参数与机器信息 / 每格控制台输出 |
