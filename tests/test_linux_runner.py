@@ -7,7 +7,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from fake_linux_desktop import OVERRIDES, FakeLinuxDesktop  # noqa: E402
+from fake_linux_desktop import OVERRIDES, FakeLinuxDesktop, FakeWorkDriver  # noqa: E402
 
 from cf.analyze import aggregate, load  # noqa: E402
 from cf.linux.analyze import EXTRA_AGG_COLS, summarize  # noqa: E402
@@ -290,3 +290,102 @@ def test_per_app_rows_report_and_plots(tmp_path):
     md = (tmp_path / "r.md").read_text()
     assert "## Per run" in md and "## Per app" in md and "latency_cdf.png" in md and "state_lost_events" in md
     assert (tmp_path / "per_app.csv").read_text().splitlines()[0].startswith("run,app,kind")
+
+
+def _work_dev(seed=3, **cfg):
+    dev = FakeLinuxDesktop(APPS, seed=seed)
+    dev.work_driver = FakeWorkDriver(dev, cfg)
+    return dev
+
+
+def test_work_switch_records_scripted_work_and_state_checks(tmp_path):
+    cfg = cfg_for(tmp_path, "lru", eta=0.5, work=True, work_s=0.01, dwell_s=0.05)
+    dev = _work_dev()
+    path = ThrottleExperiment(cfg, dev, log=lambda *a: None).run()
+    recs = records(path)
+    meta = recs[0]
+    assert meta["work"] and meta["work"]["fake_office"] == {"kind": "edit", "oracle": "clipboard"}
+    assert meta["work"]["fake_push"]["kind"] == "draft" and meta["work"]["fake_dl"]["kind"] == "browse"
+    steps = steps_of(path)
+    assert all(s["work"]["status"] == "ok" for s in steps)
+    # warmup already did a round of work and stored every app's oracle, so each step that
+    # does not restart the app is a state check against the previous visit
+    warm = [r for r in recs if r["type"] == "warmup"]
+    assert len(warm) == len(APPS) and all(w["work"]["status"] == "ok" for w in warm)
+    checks = 0
+    for s in steps:
+        ok = s["launch"].get("work_state_ok")
+        if s["launch"]["launch_state"] != "COLD":
+            assert ok is True and s["launch"]["work_check"]["before"]["oracle"] == "clipboard"
+            checks += 1
+        else:
+            assert ok is None
+    assert checks > 0 and all(s["state_lost"] == {} for s in steps)
+    # one oracle read after every dwell (remember) plus one before each check
+    oracles = [c for c in dev.work_driver.calls if c[1] == "oracle"]
+    assert len(oracles) == len(APPS) + T + checks
+    row = summarize(load(path))
+    assert row["work_checks"] == checks and row["work_fail"] == 0 and row["work_steps"] == T
+    assert "work_checks" in EXTRA_AGG_COLS
+
+
+def test_work_state_loss_is_detected_and_counted(tmp_path):
+    cfg = cfg_for(tmp_path, "static", work=True, work_s=0.01, dwell_s=0.05)
+    dev = _work_dev(seed=5)
+    exp = ThrottleExperiment(cfg, dev, log=lambda *a: None)
+    orig_step = exp.step
+    victim = {}
+
+    def step(t, req):
+        if t == 5:
+            # a background app "forgets" its draft: the next time it is requested the oracle differs
+            victim["app"] = next(a for a in APPS if a != req and a in dev.work_driver.docs)
+            dev.work_driver.lose(victim["app"])
+        return orig_step(t, req)
+    exp.step = step
+    path = exp.run()
+    steps = steps_of(path)
+    bad = [s for s in steps if s["launch"].get("work_state_ok") is False]
+    assert len(bad) == 1 and bad[0]["req"] == victim["app"] and bad[0]["t"] > 5
+    assert bad[0]["state_lost"][victim["app"]]["work_state"]["oracle"] == "clipboard"
+    assert bad[0]["state_lost"][victim["app"]]["work_state"]["after"] == ""
+    assert all(s["launch"].get("work_state_ok") in (True, None) for s in steps if s is not bad[0])
+    row = summarize(load(path))
+    assert row["work_fail"] == 1 and row["state_lost_events"] == 1 and row["oom_kills"] == 0
+    from cf.linux.analyze import per_app_rows
+    pr = {r["app"]: r for r in per_app_rows(load(path))}
+    assert pr[victim["app"]]["work_fail"] == 1 and sum(r["work_fail"] for r in pr.values()) == 1
+    assert sum(r["work_checks"] for r in pr.values()) == row["work_checks"]
+
+
+def test_work_disabled_by_default_and_off_switch(tmp_path):
+    dev = _work_dev()
+    path = ThrottleExperiment(cfg_for(tmp_path, "static"), dev, log=lambda *a: None).run()
+    assert records(path)[0]["work"] is None and dev.work_driver.calls == []
+    assert all(s["work"] is None and "work_state_ok" not in s["launch"] for s in steps_of(path))
+    assert summarize(load(path))["work_checks"] == 0
+
+
+def test_work_state_survives_checkpoint_resume(tmp_path):
+    cfg = cfg_for(tmp_path, "static", work=True, work_s=0.01, dwell_s=0.05)
+    dev = _work_dev(seed=8)
+    dev.fail_at_launch = len(APPS) + 7
+    exp = ThrottleExperiment(cfg, dev, log=lambda *a: None)
+    with pytest.raises(OSError):
+        exp.run()
+    remembered = dict(exp.work_state)
+    assert remembered                                # the checkpoint carries the oracles
+    dev2 = _work_dev(seed=9)
+    dev2.work_driver.docs = dict(dev.work_driver.docs)      # the apps (and their drafts) are still alive
+    for a in APPS:
+        dev2.state[a]["pid"] = dev.state[a]["pid"]
+        dev2.state[a]["window"] = dev.state[a]["window"]
+    exp2 = ThrottleExperiment({"apps": APPS, "app_overrides": OVERRIDES, "out_dir": str(tmp_path),
+                               "name": cfg["name"]}, dev2, log=lambda *a: None, resume=True)
+    path = exp2.run()
+    assert exp2.worker is dev2.work_driver and exp2.work_state.keys() >= remembered.keys()
+    steps = steps_of(path)
+    after = [s for s in steps if s["t"] >= 6]
+    # resumed steps compare against the oracle saved before the crash -> checks happen and pass
+    assert any(s["launch"].get("work_state_ok") is True for s in after)
+    assert all(s["launch"].get("work_state_ok") is not False for s in after)

@@ -266,3 +266,45 @@ class FakeLinuxDesktop:
 
     def close(self):
         pass
+
+
+class FakeWorkDriver:
+    """Stand-in for cf.linux.work.WorkDriver: each app has a "document" that scripted work appends
+    to; the oracle is the document itself.  `lose(app)` empties it (as a relaunch / reset would),
+    so the next return of that app is reported as work_state_ok=False."""
+
+    def __init__(self, dev, cfg=None):
+        self.dev = dev
+        self.cfg = cfg or {}
+        self.docs: dict[str, str] = {}
+        self.calls: list[tuple[str, str, int]] = []
+        self.lost_pending: set[str] = set()
+
+    def spec(self, a):
+        from cf.linux.work import default_spec
+        s = default_spec(a)
+        s.update((self.cfg.get("work_overrides") or {}).get(a.id) or {})
+        return s
+
+    def work(self, app_id, wid, seconds, t):
+        from cf.linux.work import work_text
+        self.calls.append((app_id, "work", t))
+        self.docs[app_id] = self.docs.get(app_id, "") + work_text(app_id, t)
+        return {"kind": self.spec(self.dev.cat[app_id])["kind"], "status": "ok", "elapsed_ms": 1, "oracle": "clipboard"}
+
+    def oracle(self, app_id, wid):
+        self.calls.append((app_id, "oracle", -1))
+        if app_id in self.lost_pending:
+            self.lost_pending.discard(app_id)
+            self.docs[app_id] = ""
+        return {"oracle": "clipboard", "value": self.docs.get(app_id, ""), "ts": time.time()}
+
+    def compare(self, before, after, app_id=None):
+        from cf.linux.work import compare
+        return compare(before, after)
+
+    def lose(self, app_id):
+        self.lost_pending.add(app_id)
+
+    def describe(self, apps, suffix=""):
+        return "\n".join(f"{p} fake{suffix}" for p in apps)
