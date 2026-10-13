@@ -27,12 +27,13 @@ from ..analyze import (AGG_MAIN_COLS, aggregate, load, pct, plot_pareto, print_t
 EXTRA_AGG_COLS = ["activate_p50_ms", "ping_p50_ms", "ping_p95_ms", "ping_p99_ms", "ping_resident_p50_ms",
                   "ping_shrunk_p50_ms", "bg_cores_avg", "bg_throttled_pct", "download_mb", "download_mbps",
                   "notif_total", "notif_per_h", "compute_cpu_s", "state_lost_events", "oom_kills",
-                  "psi_cpu_some_ms", "n_ping_timeout", "n_resident_avg"]
+                  "psi_cpu_some_ms", "n_ping_timeout", "n_resident_avg", "work_checks", "work_fail"]
 
 MAIN_COLS = ["policy", "scenario", "eta", "seed", "cpu", "mem_frac", "T", "budget_mb", "bg_pss_avg_mb",
              "bg_pss_peak_mb", "swap_write_mb", "lat_p50_ms", "lat_p95_ms", "ping_p95_ms", "n_cold",
              "bg_cores_avg", "bg_throttled_pct", "download_mbps", "notif_per_h", "compute_cpu_s",
-             "state_lost_events", "oom_kills", "budget_violations", "n_resident_avg", "eta_min"]
+             "state_lost_events", "oom_kills", "work_checks", "work_fail", "budget_violations", "n_resident_avg",
+             "eta_min"]
 
 AGG_COLS_LINUX = AGG_MAIN_COLS + ["ping_p95_ms", "bg_cores_avg", "download_mbps", "notif_per_h",
                                   "compute_cpu_s", "state_lost_events"]
@@ -104,6 +105,9 @@ def summarize(run: dict) -> dict:
         "n_placeholders": len(meta.get("placeholders") or []),
         "guest_ram_mb": (meta.get("caps", {}).get("mem_total_kb") or 0) // 1024 or None,
         "eta_min": run["budget"].get("eta_min"),
+        "work_checks": sum(1 for s in steps if s["launch"].get("work_state_ok") is not None),
+        "work_fail": sum(1 for s in steps if s["launch"].get("work_state_ok") is False),
+        "work_steps": sum(1 for s in steps if (s.get("work") or {}).get("status") == "ok"),
         "n_resident_avg": round(sum(len([a for a in s.get("resident", []) if a != s["req"]]) for s in steps)
                                 / len(steps), 2) if steps else None,
     })
@@ -116,7 +120,8 @@ def summarize(run: dict) -> dict:
 PER_APP_COLS = ["run", "app", "kind", "category", "n_req", "n_cold", "lat_bg_p50_ms", "lat_shrunk_p50_ms",
                 "ping_shrunk_p50_ms", "m_fg_mb", "pss_bg_avg_mb", "pss_shrunk_avg_mb", "mem_bg_avg_mb",
                 "mem_shrunk_avg_mb", "t_fg_s", "t_bg_s",
-                "t_shrunk_s", "cores_bg_avg", "throttled_pct", "write_mb", "notifs", "cpu_s", "majflt", "state_lost"]
+                "t_shrunk_s", "cores_bg_avg", "throttled_pct", "write_mb", "notifs", "cpu_s", "majflt", "state_lost",
+                "work_checks", "work_fail"]
 
 
 def per_app_rows(run: dict) -> list[dict]:
@@ -173,6 +178,8 @@ def per_app_rows(run: dict) -> list[dict]:
             "throttled_pct": round(100 * thr_num / thr_den, 1) if thr_den else None,
             "write_mb": round(write_mb, 1), "notifs": int(notifs), "cpu_s": round(cpu_s, 1), "majflt": int(majflt),
             "state_lost": lost,
+            "work_checks": sum(1 for s in req if s["launch"].get("work_state_ok") is not None),
+            "work_fail": sum(1 for s in req if s["launch"].get("work_state_ok") is False),
         })
     return out
 

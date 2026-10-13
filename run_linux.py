@@ -15,8 +15,10 @@
 
 Throttle profile overrides: --cpu-mode quota|cpuset|both|none --cpu-cores 1 --cpuset last --mem-frac 0.5
 --swap-max-mb 1024 --mem-hard --no-resident-cpu.  Data knobs: --dwell 8 | --dwell 5 15 (random per step),
---sample-every 2 (time series inside each dwell), --placeholders (apps not installed yet run as placeholders).  Results: <out-dir>/<name>.jsonl (+ .log); summarise with
-`python3 -m cf.linux.analyze results/*.jsonl`.
+--sample-every 2 (time series inside each dwell), --placeholders (apps not installed yet run as placeholders),
+--work (scripted typing / scrolling / swiping on the foreground app and a content oracle that is re-checked when the
+app comes back from the background -> work_state_ok; --work-plan shows what each app gets).
+Results: <out-dir>/<name>.jsonl (+ .log); summarise with `python3 -m cf.linux.analyze results/*.jsonl`.
 """
 from __future__ import annotations
 
@@ -72,6 +74,11 @@ def main(argv=None) -> int:
     ap.add_argument("--placeholders", action="store_true",
                     help="apps without an installed build run as the bundled placeholder under their own id (placeholder_fill)")
     ap.add_argument("--dwell", type=float, nargs="+", metavar="S", help="dwell per step: one value, or lo hi for a uniform range")
+    ap.add_argument("--work", action="store_true",
+                    help="scripted work on the foreground app (type / scroll / swipe) + content oracle before it is "
+                         "switched away, re-checked when it comes back -> work_state_ok (cf.linux.work)")
+    ap.add_argument("--work-s", type=float, metavar="S", help="seconds of scripted work per foreground dwell (default 3)")
+    ap.add_argument("--work-plan", action="store_true", help="print what --work would do per app and exit")
     ap.add_argument("--sample-every", type=float, metavar="S", help="lightweight samples every S seconds during the dwell (time series)")
     ap.add_argument("--name"); ap.add_argument("--out-dir")
     ap.add_argument("--resume", nargs="?", const=True, default=False, metavar="JSONL")
@@ -105,6 +112,10 @@ def main(argv=None) -> int:
         base["dwell_s"] = args.dwell[0] if len(args.dwell) == 1 else args.dwell[:2]
     if args.sample_every is not None:
         base["sample_every_s"] = args.sample_every
+    if args.work or args.work_plan:
+        base["work"] = True
+    if args.work_s is not None:
+        base["work_s"] = args.work_s
     cat = A.with_overrides(base.get("app_overrides"))
     kinds = base.get("substitute_kinds", list(A.DEFAULT_SUBSTITUTE_KINDS))
 
@@ -142,6 +153,23 @@ def main(argv=None) -> int:
                     print(f"{a.id:22s} {a.package:28s} installed={str(mb.installed(a.package)):5s} "
                           f"host_pids={pids[:6]}")
             print(f"foreground: {mb.foreground_pkg()}")
+        return 0
+    if args.work_plan:
+        from cf.linux.work import make_work_driver
+        dev = LinuxDesktop(cat=cat, notifications=False, mobile=make_mobile_runtime(base))
+        used, subs, missing = resolve_with(dev.mobile)
+        w = make_work_driver(dev, base)
+        print(f"scripted work {base.get('work_s', 3.0)} s per foreground dwell; oracle read before the app is "
+              f"switched away and re-checked when it returns (work_state_ok):")
+        print(w.describe(used))
+        if missing:
+            print(w.describe([m for m in missing if m in cat], suffix="  (not installed)"))
+        print("kinds: edit/draft = xdotool type (+Return for edit) | browse/view = wheel scroll | "
+              "swipe = adb input swipe | none")
+        print("oracles: clipboard = ctrl+a ctrl+c md5 | title = _NET_WM_NAME | screen = window pixel hash "
+              "(tolerance) | statefile = placeholder counter/pid | ui = Android activity + uiautomator texts")
+        print('override per app in the config: "work_overrides": {"wechat": {"kind": "none", "oracle": "screen"}}')
+        dev.close()
         return 0
     if args.discover:
         from cf.linux import x11

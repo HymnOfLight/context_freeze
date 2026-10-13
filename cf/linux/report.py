@@ -32,12 +32,16 @@ def write_markdown(path: str, rows: list[dict], agg: list[dict], per_app: list[d
     n_lost = sum(r.get("state_lost_events") or 0 for r in rows)
     n_oom = sum(r.get("oom_kills") or 0 for r in rows)
     n_cold = sum(r.get("n_cold") or 0 for r in rows)
+    n_wchk = sum(r.get("work_checks") or 0 for r in rows)
+    n_wfail = sum(r.get("work_fail") or 0 for r in rows)
     unfinished = [r for r in rows if not r.get("finished", True)]
     out = ["# Ubuntu throttling results\n", f"_generated {time.strftime('%Y-%m-%d %H:%M')}; {len(rows)} run(s)_\n",
            "## Invariants (must be 0)\n",
            f"- processes / windows lost or OOM-killed while throttled (`state_lost_events`): **{n_lost}**\n"
            f"- OOM kills (`oom_kills`): **{n_oom}**\n"
            f"- COLD switches = an app had to be restarted (`n_cold`): **{n_cold}**\n"
+           + (f"- scripted-work state checks after a background phase (`work_checks`): {n_wchk}, "
+              f"content lost (`work_fail`): **{n_wfail}**\n" if n_wchk else "")
            + (f"- unfinished runs: {', '.join(str(r.get('file')) for r in unfinished)}\n" if unfinished else ""),
            "\n## Per run\n", md_table(rows, MAIN_COLS)]
     infeasible = [r for r in rows if r.get("eta_feasible") is False]
