@@ -56,6 +56,7 @@ class LinuxApp:
     substitute: Optional[str] = None   # catalogue id used when this one is not installed
     note: str = ""
     kind: str = "desktop"              # desktop | mobile (Android build in Waydroid) | oss | placeholder
+    work: Optional[dict] = None        # scripted work / state oracle (cf.linux.work.default_spec when None)
 
     @property
     def is_mobile(self) -> bool:
@@ -254,7 +255,7 @@ def with_overrides(overrides: Optional[dict]) -> dict[str, LinuxApp]:
         else:
             d = {"id": id_, "name": ov.get("name", id_), "category": ov.get("category", "compute"),
                  "cmd": ov.get("cmd", id_), "match": ov.get("match", id_), "wm_class": ov.get("wm_class", id_)}
-            for k in ("name_rx", "package", "exe", "install", "note", "substitute", "kind"):
+            for k in ("name_rx", "package", "exe", "install", "note", "substitute", "kind", "work"):
                 if k in ov:
                     d[k] = ov[k]
             if "notify_names" in ov:
