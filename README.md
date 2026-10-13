@@ -14,7 +14,7 @@
 ├── docs/04_cn_apps_scenarios.md    # 中国大陆应用集合 (微信/QQ/微博/网易云音乐/...) 的安装、首次启动与使用场景设计
 ├── docs/05_ubuntu_throttle_manual.md  # Ubuntu 22.04 虚拟机版 (不冻结, 切走后限 1 核 / memory.high / swap) 的运行与配置手册
 ├── scripts/                        # setup_avd / start_emulator / resize_data / prepare_device / install_cn_apps / first_run_cn_apps / run_matrix
-├── scripts/ubuntu/                 # Ubuntu 版: setup_cgroups (cgroup v2 委托) / cf_enter / setup_zram / install_deps / install_cn_apps / cf_launch / check_env / run_matrix
+├── scripts/ubuntu/                 # Ubuntu 版: setup_cgroups (cgroup v2 委托) / cf_enter / setup_zram / install_deps / install_cn_apps / setup_waydroid / install_mobile_apps / cf_launch / check_env / run_matrix / run_all
 ├── configs/                        # 实验配置 (JSON): emulator_base (Google 应用) / cn_apps (国产应用 + 场景) / ubuntu_cn_desktop, ubuntu_placeholders (Ubuntu 版)
 ├── cf/                             # Python 包
 │   ├── adb.py, device.py, parsers.py   # adb 封装; cgroup freezer / memcg 回收 / zram / tmpfs 气球; /proc 解析
@@ -26,34 +26,49 @@
 │   ├── analyze.py                      # 指标汇总、CSV、Pareto 图
 │   ├── sim/                            # Linux 合成验证: 两层 (DRAM/ZRAM) 模型 + 离线 Bellman OPT
 │   └── linux/                          # Ubuntu 后端: cgroup v2 档位 fg/bg/shrunk, /proc 采样, X11 切换 + _NET_WM_PING, dbus 通知计数,
-│                                       #   国产桌面应用目录 (下载/通知推送/计算处理 + 替代品), 占位程序, ThrottleExperiment, focusd, analyze
+│                                       #   国产应用目录 (下载/通知推送/计算处理; 桌面版 -> 同一应用的手机版), Waydroid 手机版运行时, 占位程序, ThrottleExperiment,
+│                                       #   work (脚本化操作 + 内容 oracle: xdotool / adb), focusd, analyze
 ├── run_experiment.py               # 真机 (Android 模拟器) 实验入口
-├── run_linux.py                    # Ubuntu 虚拟机实验入口 (--probe / --discover / --catalog / --launch / --release)
+├── run_linux.py                    # Ubuntu 虚拟机实验入口 (--probe / --discover / --catalog / --mobile-status / --work-plan / --launch / --release)
 └── tests/                          # 解析器、策略、Bellman(与穷举一致)、runner 端到端 (假设备 / 假桌面)、cgroup 档位、X11 (Xvfb)、focusd
 ```
 
 ## Ubuntu 22.04 版: 切走不冻结, 只限资源
 
-同一台 MacBook 上开一个 **Ubuntu 22.04 arm64 虚拟机** (UTM / Parallels, 4 核 8 GB, Xorg 会话), 应用换成桌面版:
+同一台 MacBook 上开一个 **Ubuntu 22.04 arm64 虚拟机** (UTM / Parallels, 4 核 8 GB, Xorg 会话), 应用换成 **各自的 Ubuntu 桌面版**:
 下载 (百度网盘 / Firefox、Chromium 等浏览器 / 腾讯视频 / 哔哩哔哩), 通知推送 (微信 / QQ / 钉钉), 计算处理 (WPS Office /
-剪映→kdenlive / 中望CAD→librecad / 悟空图像→gimp / 小艺→内置占位程序; 没有 Linux 版的按箭头替代)。窗口失去前台后
+剪映 / 中望CAD / 悟空图像 / 小艺)。确实没有桌面版的 (剪映、小艺) 或 deb 拿不到的, 退而用 **同一个应用的手机版** (APK) 跑在同一个
+Ubuntu 桌面上的 Waydroid 里 (宿主内核上的 LXC 容器, 进程可见, 进同样的 cgroup 受同样的限制); 开源替代品 / 占位程序只有在配置里
+`substitute_kinds` 显式允许时才会用上。窗口失去前台后
 **不冻结**: 它的 cgroup 被限到 **1 个逻辑核心** (`cpu.max`), 预算外的应用再加 `memory.high = 0.5 × 前台 PSS` 与可选
 swap 上限; 不设 `memory.max`, 不会 OOM kill, 进程 / 窗口 / 状态全部保留, 后台下载与推送继续 (只是慢)。
 
 ```bash
 # 在虚拟机里
-sudo scripts/ubuntu/install_deps.sh --subs --hwe && sudo reboot          # 工具 + 开源替代品 + HWE 内核 (memory.reclaim)
+sudo scripts/ubuntu/install_deps.sh --hwe && sudo reboot                 # 工具 + HWE 内核 (memory.reclaim)
+scripts/ubuntu/install_cn_apps.sh --list && sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads   # 各应用的 Ubuntu 桌面版 deb
+sudo scripts/ubuntu/setup_waydroid.sh --install && scripts/ubuntu/setup_waydroid.sh              # 仅当有应用没有桌面版: Android 运行时
+scripts/ubuntu/install_mobile_apps.sh --missing                          # 桌面版缺失的应用 -> 自动下载安装它们的手机版 APK
 sudo scripts/ubuntu/setup_cgroups.sh && sudo scripts/ubuntu/setup_zram.sh 4096     # 每次开机 (每个终端): cgroup 委托 + zram
 scripts/ubuntu/check_env.sh && python3 run_linux.py configs/ubuntu_cn_desktop.json --probe
 python3 run_linux.py configs/ubuntu_placeholders.json --policy static --T 12       # 不装应用的冒烟测试 (4 个占位程序)
 scripts/ubuntu/cf_launch.sh wechat qq dingtalk wps && python3 run_linux.py configs/ubuntu_cn_desktop.json --discover
 python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 60
-scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60          # 场景 x 策略 x η (+ PROFILES="1c:0.5 0.5c:0.3" 限流档位)
-python3 -m cf.linux.analyze results/ubuntu_matrix_*/*.jsonl              # + ping / bg_cores / download_mbps / notif_per_h / state_lost 列
+NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40  # 场景 x 策略 x η x 变体 (CPU 档位 / cpuset / swap 上限 / memory.max 对照); FULL=1 全量; PLACEHOLDERS=1 没装的用占位顶替
+WORK=1 NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40   # 每格加 --work: 脚本代替人工点击 (打草稿 / 滚页 / 上滑), 切回时核对内容 -> work_state_ok / work_fail
+python3 -m cf.linux.analyze results/ubuntu_matrix_*/*.jsonl --per-app --plots-dir plots --md report.md   # 每格表 / 每应用表 / 时间序列与 CDF 图 / Markdown 报告
+PRESET=night scripts/ubuntu/run_all.sh                                   # 或者一条命令: cgroup+zram → 体检 → 快照 → 冒烟 → 矩阵 → report.md (可中断重跑)
 python3 -m cf.linux.focusd --config configs/ubuntu_cn_desktop.json       # 日常使用: 焦点一变就按同样规则限流
 ```
 
-详见 `docs/05_ubuntu_throttle_manual.md` (虚拟机搭建、cgroup 委托原理、各应用的安装来源与架构、配置项、指标、"不丢状态" 的验证方法、常见问题)。
+每一步的停留时间可以是区间 (`dwell_s: [5, 12]`, 按 seed 抽样, 各策略同步), 停留期间每 `sample_every_s` 秒做一次轻量采样
+(PSI / swap / 每应用 PSS、CPU、节流时间 → 时间序列图)。注意 η 的可达下限: shrunk 应用仍占 `memory.high = mem_frac × m_fg`,
+`mem_frac 0.5` 时 η < ~0.5 的预算策略等价于 static (runner WARN, analyze 的 `eta_min` / `eta_feasible` 列)。
+`--work` 把 "不丢上下文" 从进程级提升到内容级: 每步在前台应用上做几秒脚本化操作 (聊天打一段未发送草稿、WPS 打一行字、浏览器 / 视频站滚页、
+CAD 滚轮缩放、手机版上滑), 切走前记一个内容 oracle (剪贴板 md5 / 窗口标题 / 窗口像素哈希 / 占位计数器 / Android Activity + 界面文字),
+切回时重读比较 → `launch.work_state_ok`, 不一致计入 `state_lost` 与 `work_fail` 列 (`--work-plan` 列出每个应用的脚本; `work_overrides` 按 id 改)。
+
+详见 `docs/05_ubuntu_throttle_manual.md` (虚拟机搭建、cgroup 委托原理、各应用的桌面版安装来源与架构、手机版 (Waydroid) 的安装与语义差别、配置项、指标、"不丢状态" 的验证方法、常见问题)。
 
 ## 快速开始 (macOS, Apple Silicon)
 
@@ -181,11 +196,15 @@ python3 -m pytest -q tests
   memcg v1 每应用回收 (Clock: PSS 42 MB → 35 kB, SwapPss → 22 MB, zram/pswpout 同步增长)、解冻后按需换回 (majflt/pswpin)、
   tmpfs 气球、完整 `run_experiment.py` 循环与 `cf.analyze` 汇总。该主机无可用 KVM, 模拟器以软件模拟运行, 因而绝对时延无意义;
   Apple Silicon 上的 arm64 镜像用户态布局相同 (同一 Android 15 内核配置), 脚本无需改动。
-* Ubuntu 版 (`tests/test_linux_*.py`, 41 项): 档位旋钮值与伪 cgroupfs 读写、xprop 解析、假桌面上的完整 `ThrottleExperiment`
-  (static / 预算策略的分层、无进程被杀、WARM、`state_lost` 注入、断点续跑重放档位)、focusd 决策、应用目录 / 场景 / 替代关系、
-  dbus Notify 解析; 有 Xvfb + 窗口管理器时自动加跑真实窗口的 发现 → 激活 → `_NET_WM_PING` 往返, `/sys/fs/cgroup/cf` 已委托时
-  自动加跑真实 cgroup 的档位读写。在 Ubuntu 24.04 (cgroup v2, Xvfb + xfwm4, 真实 `/sys/fs/cgroup/cf`) 上用 4 个占位程序跑通
-  `run_linux.py` 完整循环: 后台合计 ≈ 1 核、节流时间占比 26%、从 `shrunk` 切回的 ping 0.4–1.8 s、state_lost = 0、OOM = 0。
+* Ubuntu 版 (`tests/test_linux_*.py`, 67 项): 档位旋钮值与伪 cgroupfs 读写、xprop 解析、假桌面上的完整 `ThrottleExperiment`
+  (static / 预算策略的分层、`none` 基线不限任何应用、无进程被杀、WARM、`state_lost` 注入、断点续跑重放档位、区间 dwell 与停留期采样、
+  `placeholder_fill`、每应用表 / 图 / Markdown 报告、`--work` 的 `work_state_ok` / `work_fail` / 内容丢失注入 / 检查点里的 oracle)、
+  `cf.linux.work` (每类应用的默认脚本与 oracle、均值哈希与比较规则、伪 Android 上的上滑 + ui oracle)、focusd 决策、
+  应用目录 / 场景 / 桌面→手机版替代链、手机版 (伪 Android 运行时上的启动-收养-通知、preflight, waydroid/dumpsys 解析)、
+  dbus Notify 解析; 有 Xvfb + 窗口管理器时自动加跑真实窗口的 发现 → 激活 → `_NET_WM_PING` 往返 和占位窗口上的 title / statefile / screen oracle
+  (再有 mousepad + xclip 时 xdotool 打字 → 剪贴板 oracle 往返), `/sys/fs/cgroup/cf` 已委托时自动加跑真实 cgroup 的档位读写。
+  在 Ubuntu 24.04 (cgroup v2, Xvfb + xfwm4, 真实 `/sys/fs/cgroup/cf`) 上用 4 个占位程序跑通 `run_linux.py` 完整循环
+  (含 `--work`): 后台合计 ≈ 1 核、节流时间占比 26–43%、从 `shrunk` 切回的 ping 0.4–1.8 s、state_lost = 0、OOM = 0、work_fail = 0。
 
 ## 与文档模型的对应
 

@@ -4,6 +4,7 @@
     python3 run_linux.py configs/ubuntu_cn_desktop.json --probe        # environment + per-app availability
     python3 run_linux.py configs/ubuntu_cn_desktop.json --discover     # windows on screen: pid / WM_CLASS / cmd
     python3 run_linux.py configs/ubuntu_cn_desktop.json --catalog      # the app catalogue and what is installed
+    python3 run_linux.py configs/ubuntu_cn_desktop.json --mobile-status  # Waydroid session / adb / installed APKs
     python3 run_linux.py configs/ubuntu_cn_desktop.json --launch wechat qq   # start apps into their cgroups (log in once)
     python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario list
     python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 40
@@ -13,8 +14,11 @@
     python3 run_linux.py configs/ubuntu_cn_desktop.json --release      # lift every limit under /sys/fs/cgroup/cf
 
 Throttle profile overrides: --cpu-mode quota|cpuset|both|none --cpu-cores 1 --cpuset last --mem-frac 0.5
---swap-max-mb 1024 --mem-hard --no-resident-cpu.  Results: <out-dir>/<name>.jsonl (+ .log); summarise with
-`python3 -m cf.linux.analyze results/*.jsonl`.
+--swap-max-mb 1024 --mem-hard --no-resident-cpu.  Data knobs: --dwell 8 | --dwell 5 15 (random per step),
+--sample-every 2 (time series inside each dwell), --placeholders (apps not installed yet run as placeholders),
+--work (scripted typing / scrolling / swiping on the foreground app and a content oracle that is re-checked when the
+app comes back from the background -> work_state_ok; --work-plan shows what each app gets).
+Results: <out-dir>/<name>.jsonl (+ .log); summarise with `python3 -m cf.linux.analyze results/*.jsonl`.
 """
 from __future__ import annotations
 
@@ -30,7 +34,7 @@ from cf.runner import Experiment, PreflightError, ResumeError, load_config
 from cf.linux import apps as A
 from cf.linux.cgroup import CgroupTree
 from cf.linux.device import LinuxDesktop
-from cf.linux.runner import run_from_config
+from cf.linux.runner import make_mobile_runtime, run_from_config
 
 
 def load_m_fg(path: str) -> tuple[dict, dict]:
@@ -67,11 +71,21 @@ def main(argv=None) -> int:
     ap.add_argument("--mem-hard", action="store_true", help="also set memory.max (OOM-kill risk; off by default)")
     ap.add_argument("--no-resident-cpu", action="store_true", help="apps inside the budget keep full CPU (only shrunk ones limited)")
     ap.add_argument("--no-strict", action="store_true", help="warn instead of abort on preflight problems")
+    ap.add_argument("--placeholders", action="store_true",
+                    help="apps without an installed build run as the bundled placeholder under their own id (placeholder_fill)")
+    ap.add_argument("--dwell", type=float, nargs="+", metavar="S", help="dwell per step: one value, or lo hi for a uniform range")
+    ap.add_argument("--work", action="store_true",
+                    help="scripted work on the foreground app (type / scroll / swipe) + content oracle before it is "
+                         "switched away, re-checked when it comes back -> work_state_ok (cf.linux.work)")
+    ap.add_argument("--work-s", type=float, metavar="S", help="seconds of scripted work per foreground dwell (default 3)")
+    ap.add_argument("--work-plan", action="store_true", help="print what --work would do per app and exit")
+    ap.add_argument("--sample-every", type=float, metavar="S", help="lightweight samples every S seconds during the dwell (time series)")
     ap.add_argument("--name"); ap.add_argument("--out-dir")
     ap.add_argument("--resume", nargs="?", const=True, default=False, metavar="JSONL")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--probe", action="store_true"); ap.add_argument("--discover", action="store_true")
     ap.add_argument("--catalog", action="store_true")
+    ap.add_argument("--mobile-status", action="store_true", help="Waydroid / adb state and which mobile builds are installed")
     ap.add_argument("--launch", nargs="+", metavar="APP", help="start these apps into their cgroups and exit")
     ap.add_argument("--release", action="store_true", help="clear all limits under /sys/fs/cgroup/cf and exit")
     ap.add_argument("--verbose", "-v", action="store_true")
@@ -92,18 +106,70 @@ def main(argv=None) -> int:
     base["throttle"] = thr
     if args.no_resident_cpu:
         base["cpu_throttle_resident"] = False
+    if args.placeholders:
+        base["placeholder_fill"] = True
+    if args.dwell:
+        base["dwell_s"] = args.dwell[0] if len(args.dwell) == 1 else args.dwell[:2]
+    if args.sample_every is not None:
+        base["sample_every_s"] = args.sample_every
+    if args.work or args.work_plan:
+        base["work"] = True
+    if args.work_s is not None:
+        base["work_s"] = args.work_s
     cat = A.with_overrides(base.get("app_overrides"))
+    kinds = base.get("substitute_kinds", list(A.DEFAULT_SUBSTITUTE_KINDS))
+
+    def mobile_runtime():
+        mb = make_mobile_runtime(base)
+        mb.probe()
+        return mb
+
+    def resolve_with(mb):
+        return A.resolve(base.get("apps", []), cat, installed=lambda a: A.is_installed(a, mobile=mb),
+                         substitute_kinds=kinds)
 
     if args.scenario == "list" or (args.scenarios and "list" in args.scenarios):
-        used, subs, missing = A.resolve(base.get("apps", []), cat)
+        used, subs, missing = resolve_with(mobile_runtime())
         for w, g in subs:
-            print(f"substitute: {w} -> {g}")
+            print(f"substitute: {w} -> {g} ({cat[g].kind})")
         for m in missing:
-            print(f"missing: {m}")
+            print(f"missing: {m}  (chain {' -> '.join(A.substitute_chain(m, cat))}; substitute_kinds={kinds})")
         print(A.describe(used, cat))
         return 0
     if args.catalog:
-        print(A.catalog_table(cat))
+        mb = mobile_runtime()
+        print(mb.describe())
+        print(A.catalog_table(cat, mobile=mb))
+        print(f"\nsubstitute_kinds = {kinds}  (desktop build first; '-> x' = next fallback in the chain)")
+        return 0
+    if args.mobile_status:
+        mb = mobile_runtime()
+        print(json.dumps(mb.caps, indent=1, ensure_ascii=False))
+        print(mb.describe())
+        if mb.available:
+            for a in cat.values():
+                if a.is_mobile:
+                    pids = mb.host_pids(a.package)
+                    print(f"{a.id:22s} {a.package:28s} installed={str(mb.installed(a.package)):5s} "
+                          f"host_pids={pids[:6]}")
+            print(f"foreground: {mb.foreground_pkg()}")
+        return 0
+    if args.work_plan:
+        from cf.linux.work import make_work_driver
+        dev = LinuxDesktop(cat=cat, notifications=False, mobile=make_mobile_runtime(base))
+        used, subs, missing = resolve_with(dev.mobile)
+        w = make_work_driver(dev, base)
+        print(f"scripted work {base.get('work_s', 3.0)} s per foreground dwell; oracle read before the app is "
+              f"switched away and re-checked when it returns (work_state_ok):")
+        print(w.describe(used))
+        if missing:
+            print(w.describe([m for m in missing if m in cat], suffix="  (not installed)"))
+        print("kinds: edit/draft = xdotool type (+Return for edit) | browse/view = wheel scroll | "
+              "swipe = adb input swipe | none")
+        print("oracles: clipboard = ctrl+a ctrl+c md5 | title = _NET_WM_NAME | screen = window pixel hash "
+              "(tolerance) | statefile = placeholder counter/pid | ui = Android activity + uiautomator texts")
+        print('override per app in the config: "work_overrides": {"wechat": {"kind": "none", "oracle": "screen"}}')
+        dev.close()
         return 0
     if args.discover:
         from cf.linux import x11
@@ -115,19 +181,23 @@ def main(argv=None) -> int:
         print(f"cleared limits on {n} cgroup(s) under {CgroupTree().base}")
         return 0
     if args.probe:
-        dev = LinuxDesktop(cat=cat, notifications=False)
+        dev = LinuxDesktop(cat=cat, notifications=False, mobile=make_mobile_runtime(base))
         caps = dev.probe()
         apps_info = caps.pop("apps")
         print(json.dumps(caps, indent=1, ensure_ascii=False))
-        used, subs, missing = A.resolve(base.get("apps", []), cat)
+        used, subs, missing = resolve_with(dev.mobile)
         print(f"\nrunnable: {used}\nsubstituted: {subs}\nmissing: {missing}")
         for id_ in base.get("apps", []):
             i = apps_info.get(id_, {})
-            print(f"{id_:15s} installed={str(i.get('installed')):5s} cmd={i.get('cmd')!r}")
+            line = f"{id_:15s} installed={str(i.get('installed')):5s} cmd={i.get('cmd')!r}"
+            for alt in A.substitute_chain(id_, cat)[1:]:
+                j = apps_info.get(alt, {})
+                line += f"\n{'':15s} -> {alt} ({j.get('kind')}) installed={j.get('installed')}"
+            print(line)
         dev.close()
         return 0
     if args.launch:
-        dev = LinuxDesktop(cat=cat, notifications=False)
+        dev = LinuxDesktop(cat=cat, notifications=False, mobile=make_mobile_runtime(base))
         dev.probe()
         if not dev.tree.inside():
             print("!! this shell is not inside /cf (run `sudo scripts/ubuntu/setup_cgroups.sh` first); "

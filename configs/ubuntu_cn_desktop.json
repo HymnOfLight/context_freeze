@@ -1,5 +1,5 @@
 {
-  "_comment": "Ubuntu 22.04 (在 MacBook 的 UTM/Parallels 虚拟机里) 桌面应用集合: 下载 (百度网盘 / 浏览器 / 腾讯视频 / 哔哩哔哩), 通知推送 (微信 / QQ / 钉钉), 计算处理 (WPS / 剪映 / 中望CAD / 悟空图像 / 小艺). 窗口失去前台后不冻结, 而是把它的 cgroup 限到 1 个逻辑核心、memory.high = mem_frac x 前台 PSS、可选 swap 上限; 进程、窗口与状态全部保留. 未安装的应用按 catalogue 里的 substitute 替代 (剪映->kdenlive, 小艺->内置占位程序), 都没有就跳过并 WARN. 用 `python3 run_linux.py configs/ubuntu_cn_desktop.json --probe / --catalog / --discover` 核对.",
+  "_comment": "Ubuntu 22.04 (在 MacBook 的 UTM/Parallels 虚拟机里) 桌面应用集合: 下载 (百度网盘 / 浏览器 / 腾讯视频 / 哔哩哔哩), 通知推送 (微信 / QQ / 钉钉), 计算处理 (WPS / 剪映 / 中望CAD / 悟空图像 / 小艺). 窗口失去前台后不冻结, 而是把它的 cgroup 限到 1 个逻辑核心、memory.high = mem_frac x 前台 PSS、可选 swap 上限; 进程、窗口与状态全部保留. 每个应用优先用它的 Ubuntu 桌面版; 没有桌面版 (剪映 / 小艺) 或没装上的, 退而用同一个应用的手机版 APK 跑在 Waydroid 里 (substitute_kinds), 两者都没有就跳过并 WARN. 用 `python3 run_linux.py configs/ubuntu_cn_desktop.json --probe / --catalog / --discover` 核对.",
   "apps": [
     "wechat", "qq", "dingtalk",
     "baidunetdisk", "firefox", "chrome", "tencent_video", "bilibili",
@@ -10,10 +10,14 @@
     "tencent_video": {"cmd": "tencent-video"},
     "xiaoyi_sim": {"cmd": "python3 -m cf.linux.placeholder_app --app xiaoyi_sim --title '小艺(占位)' --cpu 0.6 --mem 400"}
   },
+  "_comment_substitutes": "substitute_kinds: 桌面版缺失时允许退到的 kind, 顺序即 catalogue 里 substitute 链的顺序: mobile = 同一应用的手机版 (Waydroid, scripts/ubuntu/setup_waydroid.sh + install_mobile_apps.sh --missing); 要再退到开源替代品 (kdenlive/librecad/gimp) 或内置占位程序才加 \"oss\" / \"placeholder\". mobile: Android 运行时参数, 默认取 `waydroid status` 的 IP:5555; 有手机版应用时请把 sudo_adopt 设为 true (Android 进程属于别的 uid, 移进 /cf/<app> 需要 root).",
+  "substitute_kinds": ["mobile"],
+  "mobile": {"backend": "waydroid"},
   "never_throttle": [],
   "policy": "static",
   "policy_kw": {},
-  "eta": 0.3,
+  "eta": 0.7,
+  "_comment_eta": "预算 B = eta x sum(m_fg). shrunk 应用仍占 memory.high = mem_frac x m_fg (不低于 mem_min_mb), 所以后台总占用有下限 eta_min ~ mem_frac x (1 - 1/n); mem_frac=0.5 时 eta < ~0.5 的预算不可达, lru/landlord/hybrid 会退化成 static (runner 会 WARN, analyze 给出 eta_min / eta_feasible). 比较策略请用 eta >= 0.6, 或把 mem_frac 调小 (run_matrix.sh MEM_FRAC=0.3).",
   "throttle": {
     "cpu_mode": "quota",
     "cpu_cores": 1.0,
@@ -37,7 +41,14 @@
     "seed": 1,
     "_comment": "scenario: office 办公 | design 设计/计算 | download 下载 | chat 消息; kind=day 按 chat 15% -> office 40% -> download 15% -> design 30% 依次经历 (自带分布漂移). 也可内联 {\"apps\":{id:权重},\"hub\":id,\"flows\":[[id,id,...]],\"p_hub\":0.3,\"p_flow\":0.25,\"stickiness\":0.2}."
   },
-  "dwell_s": 8.0,
+  "dwell_s": [5.0, 12.0],
+  "_comment_dwell": "每步在前台停留的秒数: 一个数 = 固定; [lo, hi] = 每步按 seed 均匀抽样 (同一 seed 下各策略逐步一致, 可直接对比). sample_every_s > 0 时在停留期间每隔这么多秒轻量采样一次 (PSI / swap / 每应用 PSS / cpu / 节流时间 -> step.timeline, 画时间序列图); 0 关闭. placeholder_fill=true: 未安装的应用用内置占位程序顶替 (同 id, 场景不变), 便于在真实应用装齐前跑完整矩阵 (--placeholders).",
+  "sample_every_s": 2.0,
+  "placeholder_fill": false,
+  "_comment_work": "work=true (或 --work): 每步前台停留开始时在前台应用上做 work_s 秒脚本化操作 (cf/linux/work.py: 聊天 = 输入一段未发送草稿, WPS = 输入一行文字, 浏览器/视频 = 滚轮翻页, CAD/图像 = 滚轮缩放, 手机版 = 上滑/输入), 切走前读一次状态 oracle (clipboard = ctrl+a ctrl+c 的 md5, title = 窗口标题, screen = 窗口像素哈希, statefile = 占位程序计数器, ui = Android 活动 + 界面文字哈希), 应用再回到前台时重读并比较 -> launch.work_state_ok, 不一致计入 state_lost 与 work_fail. 默认按应用 id / 类别选 (--work-plan 查看); work_overrides 按 id 覆盖 {kind, oracle, text, scroll, swipes, tolerance}, kind=none 关闭某个应用的输入. 注意: clipboard oracle 会覆盖系统剪贴板; 微信/QQ 需要先点开一个会话让输入框有焦点.",
+  "work": false,
+  "work_s": 3.0,
+  "work_overrides": {},
   "settle_s": 2.0,
   "warmup_dwell_s": 10.0,
   "minimize_background": false,

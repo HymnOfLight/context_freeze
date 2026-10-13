@@ -6,6 +6,10 @@
     sample(apps)          per-app PSS / swap / cpu / io / cgroup stats + system counters
     state_check(...)      did any process, window or state disappear (OOM kill, crash)?
 
+Apps of kind "mobile" (the app's own Android build in Waydroid, cf.linux.mobile) go through the
+same interface: their processes are host processes (adopted into cf/<app> like strays), their
+window is the shared Android display, and launch() = activate that window + `am start -W`.
+
 Nothing here freezes or kills processes.
 """
 from __future__ import annotations
@@ -23,6 +27,7 @@ from . import apps as A
 from . import procs as PR
 from . import x11
 from .cgroup import CgroupTree, ThrottleProfile, HOST_LEAF, apply_tier
+from .mobile import MobileRuntime
 from .notify import NotifyCounter
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -76,11 +81,12 @@ class LinuxDesktop:
     def __init__(self, cat: Optional[dict[str, A.LinuxApp]] = None, tree: Optional[CgroupTree] = None,
                  profile: Optional[ThrottleProfile] = None, log=None, notifications: bool = True,
                  sudo_adopt: bool = False, log_dir: str = "results/app_logs", launch_timeout: float = 90.0,
-                 ping_timeout: float = 15.0):
+                 ping_timeout: float = 15.0, mobile: Optional[MobileRuntime] = None):
         self.cat = cat or A.CATALOG
         self.tree = tree or CgroupTree()
         self.profile = profile or ThrottleProfile()
         self.log = as_logger(log)
+        self.mobile = mobile
         self.sudo_adopt = sudo_adopt
         self.log_dir = log_dir
         self.launch_timeout = launch_timeout
@@ -115,8 +121,9 @@ class LinuxDesktop:
         if self.notify and not self.notify.running:
             c["notify_monitor"] = self.notify.start()
             c["notify_error"] = self.notify.error
-        c["apps"] = {id_: {"installed": A.is_installed(a), "cmd": a.cmd, "category": a.category,
-                           "linux": a.linux, "substitute": a.substitute}
+        c["mobile"] = self.mobile.probe() if self.mobile is not None else {"available": False, "backend": None}
+        c["apps"] = {id_: {"installed": self.is_installed(a), "cmd": a.cmd, "category": a.category,
+                           "linux": a.linux, "substitute": a.substitute, "kind": a.kind, "package": a.package}
                      for id_, a in self.cat.items()}
         self.caps = c
         return c
@@ -124,8 +131,14 @@ class LinuxDesktop:
     def caps_dict(self) -> dict:
         return dict(self.caps)
 
+    def is_installed(self, a: A.LinuxApp) -> bool:
+        return A.is_installed(a, mobile=self.mobile)
+
     def available(self, id_: str) -> bool:
-        return id_ in self.cat and A.is_installed(self.cat[id_])
+        return id_ in self.cat and self.is_installed(self.cat[id_])
+
+    def is_mobile(self, id_: str) -> bool:
+        return id_ in self.cat and self.cat[id_].is_mobile
 
     # ----------------------------------------------------------- processes
     def pids(self, id_: str) -> list[int]:
@@ -133,10 +146,14 @@ class LinuxDesktop:
 
     def stray_pids(self, id_: str, known: Optional[list[int]] = None) -> list[int]:
         """Processes that look like the app (regex) but are not in its cgroup (snap scope, D-Bus
-        activation, started by hand before setup)."""
+        activation, started by hand before setup).  Mobile apps: the Android app's host processes
+        (zygote forks them into the container's cgroup; every one of them starts as a stray)."""
         a = self.cat[id_]
         inside = set(known if known is not None else self.pids(id_))
-        hits = PR.find_pids(a.match)
+        if a.is_mobile:
+            hits = self.mobile.host_pids(a.package) if self.mobile is not None else []
+        else:
+            hits = PR.find_pids(a.match)
         return [p for p in hits if p not in inside and p != os.getpid()]
 
     def adopt(self, id_: str) -> dict:
@@ -160,6 +177,13 @@ class LinuxDesktop:
     # -------------------------------------------------------------- windows
     def window(self, id_: str, infos: Optional[list[dict]] = None, pids: Optional[list[int]] = None) -> Optional[dict]:
         a = self.cat[id_]
+        if a.is_mobile:
+            # the shared Android display (nested Weston); its _NET_WM_PID is weston's, not the app's
+            crx = a.wm_class
+            if crx == A.MOBILE_WM_CLASS and self.mobile is not None and self.mobile.wm_class:
+                crx = self.mobile.wm_class
+            hits = x11.windows_for([], crx, a.name_rx or None, infos)
+            return hits[0] if hits else None
         pids = self.pids(id_) if pids is None else pids
         hits = x11.windows_for(pids, a.wm_class, a.name_rx or None, infos)
         return hits[0] if hits else None
@@ -196,10 +220,71 @@ class LinuxDesktop:
         self.spawned[id_] = p
         return p
 
+    def _launch_mobile(self, id_: str, timeout: float) -> dict:
+        """Mobile app: activate the Android display's X11 window, then `am start -W` the app inside
+        Android.  total_time_ms = activate_ms + Android's TotalTime; LaunchState comes from Android
+        (HOT / WARM / COLD as the Android back-end of this repo reports it)."""
+        a = self.cat[id_]
+        mb = self.mobile
+        t0 = time.monotonic()
+        res: dict = {"status": "ok", "launch_state": None, "total_time_ms": None, "activate_ms": None,
+                     "ping_ms": None, "launch_ms": None, "wid": None, "pid": None, "component": a.package,
+                     "mobile": True}
+        if mb is None or not (mb.available or mb.ensure_session()):
+            res.update(status="no-android-runtime", launch_state="TIMEOUT",
+                       total_time_ms=int((time.monotonic() - t0) * 1000))
+            return res
+        running = bool(self.pids(id_) or mb.host_pids(a.package))
+        win = self.window(id_)
+        deadline = time.monotonic() + min(timeout, 30)
+        while win is None and time.monotonic() < deadline:   # the display window appears with the session
+            time.sleep(0.5)
+            win = self.window(id_)
+        if win is None:
+            res.update(status="no-window", launch_state="TIMEOUT", total_time_ms=int((time.monotonic() - t0) * 1000))
+            return res
+        res["wid"] = win["wid"]
+        was_front = x11.active_window() == win["wid"] and mb.foreground_pkg() == a.package
+        act = x11.activate(win["wid"], timeout=min(timeout, 20))
+        res["activate_ms"] = act.get("activate_ms")
+        if not act.get("ok"):
+            res["status"] = act.get("error", "activate-failed")
+        am = mb.launch(a.package, timeout=timeout)
+        res["am"] = {k: am.get(k) for k in ("status", "launch_state", "this_time_ms", "total_time_ms",
+                                            "wait_time_ms", "component", "am_elapsed_ms")}
+        state = am.get("launch_state")
+        if am.get("status") not in (None, "ok") and res["status"] == "ok":
+            res["status"] = f"am-{am.get('status')}"
+        if state is None:
+            state = "HOT" if running else "COLD"
+        if was_front or state == "FRONT":
+            res["launch_state"] = "FRONT"
+        else:
+            res["launch_state"] = state
+            res["launch_ms"] = am.get("total_time_ms")
+            res["total_time_ms"] = int((res["activate_ms"] or 0) + (am.get("total_time_ms") or 0))
+        if state == "TIMEOUT":
+            res["status"] = res["status"] if res["status"] != "ok" else "am-timeout"
+        time.sleep(0.5)      # let the new process tree settle before adopting it
+        r = self.adopt(id_)
+        res["adopted"] = r["moved"]
+        if r["failed"] and id_ not in self._warned_unmanaged:
+            self._warned_unmanaged.add(id_)
+            self.log.warn(f"{id_}: Android processes {sorted(r['failed'])} could not be moved into {self.tree.path(id_)} "
+                          f"({list(r['failed'].values())[0]}); limits will NOT apply. Enable sudo_adopt "
+                          f"(scripts/ubuntu/setup_cgroups.sh installs the sudoers rule for cf_adopt.sh)")
+        pids = self.pids(id_)
+        res["pid"] = pids[0] if pids else None
+        res["host_elapsed_ms"] = int((time.monotonic() - t0) * 1000)
+        self.tiers[id_] = "fg"
+        return res
+
     def launch(self, id_: str, timeout: Optional[float] = None) -> dict:
         """Bring the app to the foreground (starting it when needed) and measure the switch."""
         timeout = timeout or self.launch_timeout
         a = self.cat[id_]
+        if a.is_mobile:
+            return self._launch_mobile(id_, timeout)
         t0 = time.monotonic()
         pids = self.pids(id_)
         win = self.window(id_, pids=pids)
@@ -273,13 +358,25 @@ class LinuxDesktop:
         apps = {}
         for id_ in ids:
             pids = self.pids(id_)
+            stray = self.stray_pids(id_, pids) if self.cat[id_].match else []
+            if stray and self.cat[id_].is_mobile:
+                # Android keeps forking new processes (services, :push) into the container's cgroup
+                r = self.adopt(id_)
+                if r["moved"]:
+                    pids = self.pids(id_)
+                    stray = [p for p in stray if p not in pids]
+                # measure them even when they cannot be moved (the limit does not reach them, the
+                # stray list in the record says so)
+                pids = pids + [p for p in stray if p not in pids]
             plist = [pi for pi in (PR.proc_info(p) for p in pids) if pi is not None]
             win = self.window(id_, infos, pids) if infos else None
             apps[id_] = AppSampleL(app=id_, procs=plist, cgroup=self.tree.stats(id_) if self.tree.exists(id_) else {},
                                    window=win["wid"] if win else None, tier=self.tiers.get(id_, "fg"),
-                                   stray_pids=self.stray_pids(id_, pids) if self.cat[id_].match else [])
-        return {"ts": time.time(), "system": PR.system_sample(), "apps": apps,
-                "notifications": self.notify.snapshot() if self.notify else {}}
+                                   stray_pids=stray)
+        notifs = self.notify.snapshot() if self.notify else {}
+        if self.mobile is not None and self.mobile.available and any(self.is_mobile(i) for i in ids):
+            notifs = {**notifs, **self.mobile.notification_snapshot()}
+        return {"ts": time.time(), "system": PR.system_sample(), "apps": apps, "notifications": notifs}
 
     @staticmethod
     def state_check(before: dict, after: dict) -> dict:
@@ -301,6 +398,9 @@ class LinuxDesktop:
 
     def notifications_for(self, id_: str, before: dict, after: dict) -> int:
         a = self.cat[id_]
+        if a.is_mobile:
+            key = f"mobile:{a.package}"
+            return max(0, (after or {}).get(key, 0) - (before or {}).get(key, 0))
         if not self.notify:
             return 0
         d = NotifyCounter.delta(before, after)

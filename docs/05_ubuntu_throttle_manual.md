@@ -24,12 +24,119 @@
 
 ---
 
+## 0. 从零到第一次实验: 操作顺序速查
+
+§1–§6 是每一步的原理与细节; 这里只给顺序, 照着做一遍, 卡住再翻对应章节。
+
+**第 1 步 在 macOS 上建虚拟机 (UTM)**
+
+1. 装 UTM (https://mac.getutm.app 或 `brew install --cask utm`)。**Ubuntu 22.04 没有官方的 arm64 Desktop ISO**
+   (cdimage 上只有 amd64 桌面版和 arm64 Server 版), 两条路选一:
+   * **方案 A (本手册默认)**: `ubuntu-22.04.5-live-server-arm64.iso`
+     (https://cdimage.ubuntu.com/releases/22.04/release/ubuntu-22.04.5-live-server-arm64.iso,
+     sha256 `eafec62c…7505`, 用 `shasum -a 256` 核对), 装完再 `sudo apt install ubuntu-desktop-minimal`。
+   * **方案 B**: `ubuntu-24.04.x-desktop-arm64.iso` (https://cdimage.ubuntu.com/noble/daily-live/current/ 或
+     releases/24.04/release/) 直接是桌面版; cgroup v2 / Xorg / 本仓库脚本全部一样, 只是 24.04 的默认内核已是 6.8, 不用 `--hwe`。
+2. UTM → *Create a New VM* → **Virtualize** (不要 Emulate) → Linux → 选 ISO → CPU **4 核**, 内存 **8192 MB**, 磁盘 **64 GB**;
+   建好后在 VM 设置里关掉 *Display → Retina Mode*, 不开 Balloon。
+3. 装系统 (方案 A 是文本安装器): 不勾任何 snap, 勾 **Install OpenSSH server**; 记住密码 (后面全程要 sudo)。
+   安装器显示完成后 **先在 UTM 里把 ISO 弹出 (CD/DVD → Clear) 再 reboot**, 否则重启又进安装器或黑屏光标闪动。
+4. 方案 A 装桌面 (**先** 装 Mozilla 仓库的 Firefox deb, 否则 `ubuntu-desktop-minimal` 依赖的 firefox 过渡包会去装 snap, 在
+   snap 商店连不上时 dpkg 直接报错, 见 §10):
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc >/dev/null
+gpg -n -q --import --import-options import-show /etc/apt/keyrings/packages.mozilla.org.asc | grep -q 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 && echo key-ok
+echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" | sudo tee /etc/apt/sources.list.d/mozilla.list
+printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/mozilla
+sudo apt update && sudo apt install -y firefox
+sudo apt install -y ubuntu-desktop-minimal      # ~1.5 GB; 之后 sudo systemctl set-default graphical.target && sudo reboot
+```
+
+5. 第一次进桌面就做三件事: **登录界面右下角齿轮 → "Ubuntu on Xorg"** 再登录; 设置 → 电源: 不熄屏、不自动锁屏
+   (`gsettings set org.gnome.desktop.session idle-delay 0`); 设置 → 显示: 固定分辨率, 之后不再改。
+   想全程只用 ssh 操作 (推荐: 复制粘贴方便, 不受 UTM 窗口影响) 见 §2.4; 需要走 macOS 上的代理 (如 Clash 7897 端口) 见 §2.5。
+6. 客体工具与仓库 (不要在 UTM 共享目录上直接运行, clone 到本地盘):
+
+```bash
+sudo apt update && sudo apt install -y spice-vdagent git
+echo $XDG_SESSION_TYPE                                 # 必须是 x11
+cd ~ && git clone https://github.com/HymnOfLight/context_freeze.git && cd context_freeze
+git checkout cursor/ubuntu-throttle-on-unfocus-c246    # 注意分支名带 cursor/ 前缀; `git remote -v` 应指向 context_freeze
+```
+
+**第 2 步 依赖 + HWE 内核 (一次)**
+
+```bash
+sudo scripts/ubuntu/install_deps.sh --hwe     # xdotool x11-utils python3-xlib dbus-x11 libnotify-bin numpy ... + 6.x 内核 (memory.reclaim)
+sudo reboot                                   # 重新登录仍选 Ubuntu on Xorg
+scripts/ubuntu/check_env.sh                   # 一页体检: 会话类型 / 工具 / cgroup v2 / zram / snap 浏览器
+```
+
+**第 3 步 每次开机 (每个终端)**
+
+```bash
+cd ~/context_freeze
+sudo scripts/ubuntu/setup_cgroups.sh          # /sys/fs/cgroup/cf + 控制器 + chown + 把当前 shell 移进 /cf/host
+sudo scripts/ubuntu/setup_zram.sh 4096        # 4 GB zstd zram
+cat /proc/self/cgroup                         # 应为 0::/cf/host
+python3 run_linux.py configs/ubuntu_cn_desktop.json --probe     # cgroup writable=True runner_inside=True
+```
+
+其它终端 (含 tmux 每个 pane) 用 `source scripts/ubuntu/cf_enter.sh` 进入 /cf/host, 否则它启动的应用进不了 `/cf/<app>`。
+
+**第 4 步 不装应用先冒烟**
+
+```bash
+python3 run_linux.py configs/ubuntu_placeholders.json --policy static --T 12 --out-dir results/smoke
+```
+
+结尾应是 `COLD 0`、`state lost events 0`、后台合计 ≈ 1 核; 通过说明虚拟机 / cgroup / X11 都对了。
+
+**第 5 步 装应用: 桌面版优先**
+
+```bash
+scripts/ubuntu/install_cn_apps.sh --list      # 每个应用的下载页 / 架构 / 包名 / 手机版 fallback
+# 在虚拟机的浏览器里把各家 arm64 deb 下到 ~/Downloads (微信 / QQ / 钉钉 / WPS / 百度网盘 / 腾讯视频 / 哔哩哔哩 / 中望CAD / 悟空图像)
+sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads     # 自动跳过 x86_64-only 的包 (Chrome / Edge 在 arm64 装不上)
+# Firefox 用 Mozilla APT 仓库的 deb, Chromium 用 ppa:xtradeb/apps 的 deb; 不要用默认 snap (进程逃出 cgroup)
+python3 run_linux.py configs/ubuntu_cn_desktop.json --catalog   # 哪些已装, 哪些会退到手机版
+```
+
+没有桌面版的 (剪映、小艺) → 同一应用的手机版, 跑在 Waydroid 里 (§4.2):
+
+```bash
+sudo scripts/ubuntu/setup_waydroid.sh --install    # 一次: 仓库 + binder 模块 + waydroid init (~1 GB) + sudoers 规则
+scripts/ubuntu/setup_waydroid.sh                   # 每次登录: 嵌套 weston 窗口 + 会话 + adb connect
+scripts/ubuntu/install_mobile_apps.sh --missing    # 桌面版缺失的那些, 自动下载手机版 APK 装进去
+python3 run_linux.py configs/ubuntu_cn_desktop.json --mobile-status
+```
+
+然后把 `configs/ubuntu_cn_desktop.json` 的 `"sudo_adopt": false` 改成 `true` (Android 进程属于别的 uid, 移进 cgroup 要 root)。
+小艺从华为手机拉: `scripts/ubuntu/install_mobile_apps.sh --from-phone <序列号> com.huawei.vassistant com.huawei.hwid`。
+
+**第 6 步 首次登录、核对窗口、跑实验**
+
+```bash
+source scripts/ubuntu/cf_enter.sh
+scripts/ubuntu/cf_launch.sh wechat qq dingtalk wps baidunetdisk    # 逐个扫码 / 登录 / 关新手引导; 它们保持运行, 后面直接复用
+python3 run_linux.py configs/ubuntu_cn_desktop.json --discover     # WM_CLASS / 命令名与目录不同的, 写进 app_overrides
+python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 60
+PRESET=night scripts/ubuntu/run_all.sh                             # 一条命令: 体检 → 快照 → 冒烟 → 过夜矩阵 → report.md (tmux 里跑)
+```
+
+应用还没装齐也能先把数据跑出来: `PLACEHOLDERS=1 PRESET=night scripts/ubuntu/run_all.sh` (没装的用占位程序顶替, id 不变; 装齐后同一命令重跑)。
+卡住时先看 §10: Wayland 会话、shell 不在 /cf、snap 进程逃出 cgroup、无 swap、Waydroid 的 binder / adb 都有条目。
+
+---
+
 ## 1. 在 MacBook 上建 Ubuntu 22.04 虚拟机
 
 | 项 | 建议 | 说明 |
 |---|---|---|
 | 虚拟机软件 | **UTM** (免费, Apple Virtualization 后端) / Parallels Desktop / VMware Fusion | 三者都用 Hypervisor.framework 原生跑 arm64 客体; 不要开 "模拟 x86_64" 模式 (慢 10 倍以上, 时延数据无意义) |
-| 镜像 | Ubuntu 22.04.x **Desktop arm64** (`ubuntu-22.04.x-desktop-arm64.iso`, 来自 cdimage.ubuntu.com) | Server 版 + `ubuntu-desktop` 也可; 24.04 同样能跑 (cgroup/X11 相同), 本手册以 22.04 为准 |
+| 镜像 | `ubuntu-22.04.5-live-server-arm64.iso` + `apt install ubuntu-desktop-minimal` (§0 第 1、4 步) | 22.04 **没有** 官方 arm64 桌面 ISO; 或直接用 `ubuntu-24.04.x-desktop-arm64.iso` (cgroup/X11 相同, 内核已是 6.8) |
 | CPU | **4 核** | 要能看出 "后台只给 1 核" 的效果, 客体至少 4 核; M4 的大核够用 |
 | 内存 | **8 GB** (16 GB 主机) | 13 个桌面应用 (微信/QQ/钉钉都是 Electron 或 Qt, 各 300–900 MB) 常驻约 6–8 GB; 6 GB 以下内核自己的回收会盖过我们的控制 (preflight 对 < 6144 MB 给 WARN)。跑矩阵时关掉 macOS 上的 IDE / 浏览器 |
 | 磁盘 | ≥ 60 GB | 系统 10 GB + 应用 (微信 1 GB、WPS 1.5 GB、浏览器各 0.5 GB …) + 下载任务的缓存文件 |
@@ -39,7 +146,9 @@
 | 休眠 / 锁屏 | 设置 → 电源: 不休眠, 不自动锁屏; `gsettings set org.gnome.desktop.session idle-delay 0` | 锁屏后 X 服务器的焦点切换全部失败 |
 
 UTM 的最小步骤: *Create a New VM → Virtualize → Linux → 选 ISO →* CPU 4, 内存 8192 MB, 磁盘 64 GB → 装完后在
-UTM 设置里勾 *Display → Retina Mode* 关掉 (DPI 缩放不要变)。装系统时选 "最小安装", 不要勾 "安装第三方软件"。
+UTM 设置里勾 *Display → Retina Mode* 关掉 (DPI 缩放不要变)。Server 安装器里勾 OpenSSH server, 不勾 snap;
+安装完成后先弹出 ISO 再重启 (重启黑屏 + 光标闪动 = 还挂着 ISO 或显示输出停在串口, 强制关机 → Clear CD/DVD → 再开)。
+实际内存少于 8 GB (如 UTM 只给到 5.9 GB) 也能跑, preflight 对 < `min_ram_mb` (默认 6144) 只给 WARN, 但同时常驻的应用数要减少。
 
 把本仓库放进虚拟机 (`git clone`, 或 UTM 共享目录 → `cp -r` 到 `~/context_freeze`; **不要直接在共享目录上运行**,
 9p/virtiofs 上 `results/` 的频繁小写入很慢)。
@@ -49,13 +158,54 @@ UTM 设置里勾 *Display → Retina Mode* 关掉 (DPI 缩放不要变)。装系
 ```bash
 cd ~/context_freeze
 sudo scripts/ubuntu/install_deps.sh            # xdotool x11-utils python3-xlib dbus-x11 libnotify-bin numpy matplotlib ...
-sudo scripts/ubuntu/install_deps.sh --subs     # 再装开源替代品 kdenlive / librecad / gimp (剪映 / 中望CAD / 悟空图像 没装时顶上)
 sudo scripts/ubuntu/install_deps.sh --hwe      # 22.04 原始内核 5.15 没有 memory.reclaim; 装 HWE 内核 (6.x) 后重启
+sudo scripts/ubuntu/setup_waydroid.sh --install  # 只在有应用没有 Ubuntu 桌面版时需要 (剪映 / 小艺): Android 运行时, 见 §4.2
+sudo scripts/ubuntu/install_deps.sh --subs     # (可选, 默认不会用到) 开源替代品 kdenlive / librecad / gimp, 仅当配置里 substitute_kinds 含 "oss"
 scripts/ubuntu/check_env.sh                    # 一页式体检: 会话类型 / 工具 / cgroup v2 / zram / snap 浏览器
 ```
 
 `memory.reclaim` 不是必需的: 没有它时 `shrunk` 应用的内存只在它下次分配时被内核按 `memory.high` 慢慢压下去 (惰性);
 有它时 `set_tier` 立刻把多出的部分回收掉, 后续切回时的页入成本才稳定可测。preflight 只给 WARN。
+
+### 2.4 只用 ssh 操作虚拟机
+
+全部实验都可以在 ssh 里完成, 虚拟机窗口只负责显示桌面 (不用装剪贴板共享)。要点是 ssh 会话要借到桌面会话的三个环境变量:
+
+```bash
+# 一次: 让桌面自动登录到 Xorg (这样重启后不用碰 UTM 窗口)
+sudo sed -i 's/^#\?WaylandEnable=.*/WaylandEnable=false/' /etc/gdm3/custom.conf
+sudo sed -i "s/^#\?\s*AutomaticLoginEnable.*/AutomaticLoginEnable=true/; s/^#\?\s*AutomaticLogin\s*=.*/AutomaticLogin=$USER/" /etc/gdm3/custom.conf
+grep -E 'Wayland|Automatic' /etc/gdm3/custom.conf
+# 之后每个 ssh 会话 (写进 ~/.bashrc 更省事):
+pid=$(pgrep -u $USER -x gnome-shell | head -1)
+for v in DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE; do export "$v=$(tr '\0' '\n' </proc/$pid/environ | sed -n "s/^$v=//p")"; done
+echo $DISPLAY $XDG_SESSION_TYPE          # :1 x11 (或 :0)
+xdotool getactivewindow getwindowname    # 能打印出桌面上当前窗口名 = 成功
+```
+
+`scripts/ubuntu/run_all.sh` 在没有 `DISPLAY` 时会自动做这一步。从 Mac 连: `ssh user@<VM IP>` (UTM 共享网络下 IP 在
+`ip -4 a` 里, 形如 192.168.64.x); 用 tmux 跑长实验 (`tmux new -s cf`), ssh 断了实验不受影响。
+
+### 2.5 走 macOS 上的代理 (Clash 等, 端口 7897)
+
+虚拟机 → 宿主的地址是网关 (`ip route | awk '/default/{print $3}'`, UTM 共享网络通常 192.168.64.1)。Clash 要勾 **Allow LAN**。
+
+```bash
+GW=$(ip route | awk '/default/{print $3}')
+# apt 单独配置 (sudo 默认不带环境变量)
+printf 'Acquire::http::Proxy "http://%s:7897";\nAcquire::https::Proxy "http://%s:7897";\n' $GW $GW | sudo tee /etc/apt/apt.conf.d/95proxy
+# 当前 shell / 全局 (重新登录生效)
+echo "http_proxy=http://$GW:7897
+https_proxy=http://$GW:7897
+all_proxy=socks5://$GW:7897
+no_proxy=localhost,127.0.0.1,192.168.0.0/16,.cn,.aliyun.com,.baidu.com,.qq.com,.weixin.qq.com,.bilibili.com,.hdslb.com,.dingtalk.com" | sudo tee -a /etc/environment
+echo 'Defaults env_keep += "http_proxy https_proxy all_proxy no_proxy"' | sudo tee /etc/sudoers.d/proxy
+curl -sI https://github.com | head -1          # HTTP/2 200
+```
+
+**跑下载类实验前把代理关掉** (`unset http_proxy https_proxy all_proxy` 或注释 /etc/environment 里的行再重新登录):
+代理会把下载应用的流量整形成 Clash 的速率, `download_mbps` 量的就不再是 "后台被限到 1 核后还能下多快"。
+`run_all.sh` 发现代理变量时会提示。`snap` 不读这些变量 (这也是 §0 第 4 步先装 Mozilla deb 的原因之一)。
 
 ## 3. 每次开机: cgroup 委托 + zram
 
@@ -78,33 +228,98 @@ sudo scripts/ubuntu/setup_zram.sh 4096    # 4 GB zstd zram, 优先级高于 /swa
 
 ## 4. 安装应用
 
+规则 (与需求一致): **每个应用优先用它的 Ubuntu 桌面版**; 确实没有桌面版 (剪映、小艺), 或这个架构拿不到 deb 时,
+**用同一个应用的手机版** (Android APK), 跑在同一台 Ubuntu 桌面上的 Waydroid 里 (§4.2), 受同样的 cgroup 限流。
+开源 "长得像" 的程序 (kdenlive / librecad / gimp) 和内置占位程序 **默认不会被用上**, 只有配置里 `substitute_kinds`
+显式写了 `"oss"` / `"placeholder"` 才允许。
+
 ```bash
-scripts/ubuntu/install_cn_apps.sh --list      # 每个应用: 下载页 / 架构 / deb 包名 / 备注
-sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads    # apt install ./*.deb (自动跳过架构不符的包)
-scripts/ubuntu/install_cn_apps.sh --check     # = run_linux.py --catalog: 哪些算 "已安装", 哪些会被替代
+scripts/ubuntu/install_cn_apps.sh --list       # 每个桌面版: 下载页 / 架构 / deb 包名 / 备注 / 它的手机版 fallback
+sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads     # apt install ./*.deb (自动跳过架构不符的包)
+python3 run_linux.py configs/ubuntu_cn_desktop.json --catalog   # 整个目录: kind / 是否已装 / 没装时会退到哪一条
+scripts/ubuntu/install_mobile_apps.sh --list   # 按配置里的 apps 逐个列: 桌面版状态 / 手机版状态 / 实际会跑哪一个
 ```
 
-| id | 应用 | 类别 | Linux 版 | arm64 | 备注 |
+### 4.1 桌面版 (第一优先)
+
+| id | 应用 | 类别 | Ubuntu 桌面版 | arm64 | 没有时 → 手机版 (Waydroid) |
 |---|---|---|---|---|---|
-| `baidunetdisk` | 百度网盘 | 下载 | deb (pan.baidu.com/download#linux) | 统信/麒麟商店有 arm64 包 | 登录后挂一个大文件下载 = 后台下载负载 |
-| `firefox` | Firefox | 下载 | **Mozilla APT 仓库的 deb** | 是 | **不要用 22.04 默认 snap** (见 §10) |
-| `chrome` / `edge` | Chrome / Edge | 下载 | deb | **仅 x86_64** | arm64 虚拟机里装不上, 会被跳过; 用 `chromium` (ppa:xtradeb/apps 的 deb) 代替 |
-| `tencent_video` | 腾讯视频 | 下载 | deb (v.qq.com/download.html) | 是 | 开一个 "缓存" 任务; 命令名以 `--discover` 为准, 写进 `app_overrides` |
-| `bilibili` | 哔哩哔哩 | 下载 | deb (github.com/msojocs/bilibili-linux) | 是 | 开一个缓存任务 |
-| `wechat` | 微信 | 推送 | 官方 deb (linux.weixin.qq.com) | 是 | 每次启动要手机扫码; 用 `cf_launch.sh wechat` 启动并登录, 之后 runner 只切窗口不重启 |
-| `qq` | QQ | 推送 | 官方 deb (im.qq.com/linuxqq) | 是 | Electron |
-| `dingtalk` | 钉钉 | 推送 | deb | 是 | |
-| `wps` | WPS Office | 计算 | deb (linux.wps.cn) | 是 | 打开几十页带图文档, 让它拼写检查 / 重排 |
-| `jianying` | 剪映 | 计算 | **无** | – | 默认替代 **kdenlive**; 也可 Wine 跑 Windows 版并在 `app_overrides` 给出 cmd/match/wm_class |
-| `zwcad` | 中望CAD | 计算 | deb/run (zwsoft.cn) | 国产平台版 | 没装时替代 **librecad** |
-| `photosir` | 悟空图像 | 计算 | deb (photosir.com) | 是 | 没装时替代 **gimp** |
-| `xiaoyi` | 小艺 | 计算 | **无** (鸿蒙 PC 自带) | – | 默认替代内置占位程序 **`xiaoyi_sim`** (周期 CPU 计算 + 固定内存 + 进度计数) |
+| `baidunetdisk` | 百度网盘 | 下载 | deb (pan.baidu.com/download#linux) | 统信/麒麟商店有 arm64 包 | `com.baidu.netdisk` |
+| `firefox` | Firefox | 下载 | **Mozilla APT 仓库的 deb** | 是 | – (浏览器总有桌面版; **不要用 22.04 默认 snap**, 见 §10) |
+| `chrome` / `edge` | Chrome / Edge | 下载 | deb | **仅 x86_64** | – (arm64 虚拟机用 `chromium`: ppa:xtradeb/apps 的 deb) |
+| `tencent_video` | 腾讯视频 | 下载 | deb (v.qq.com/download.html) | 是 | `com.tencent.qqlive` |
+| `bilibili` | 哔哩哔哩 | 下载 | deb (github.com/msojocs/bilibili-linux; 统信商店有官方版) | 是 | `tv.danmaku.bili` |
+| `wechat` | 微信 | 推送 | 官方 deb (linux.weixin.qq.com) | 是 | `com.tencent.mm` |
+| `qq` | QQ | 推送 | 官方 deb (im.qq.com/linuxqq) | 是 | `com.tencent.mobileqq` |
+| `dingtalk` | 钉钉 | 推送 | deb (page.dingtalk.com) | 是 | `com.alibaba.android.rimet` |
+| `wps` | WPS Office | 计算 | deb (linux.wps.cn) | 是 | `cn.wps.moffice_eng` |
+| `jianying` | 剪映 | 计算 | **无** (剪映专业版只有 Windows / macOS) | – | **`com.lemon.lv` (剪映手机版)**; 导出视频 = 后台计算负载 |
+| `zwcad` | 中望CAD | 计算 | deb / run (zwsoft.cn, 国产平台版) | 是 | 目录里没预置手机版包名 (中望 CAD 派客云图), `install_mobile_apps.sh --search 中望` 查到后按 §4.3 加 `zwcad_mobile` |
+| `photosir` | 悟空图像 | 计算 | deb (photosir.com) | 是 | 同上, `--search 悟空图像` |
+| `xiaoyi` | 小艺 | 计算 | **无** (鸿蒙 PC 自带) | – | **`com.huawei.vassistant`**: 华为系统应用, 应用市场无独立 APK, 需从华为手机 `--from-phone` 拉取并同时装 HMS Core (`com.huawei.hwid`); Waydroid 里通常只能跑起界面, 语音 / 云端能力未必可用。还是装不上时, 只有把 `"placeholder"` 加进 `substitute_kinds` 才会退到 `xiaoyi_sim` |
 
-替代关系写在 `cf/linux/apps.py` 的 `substitute` 字段, 运行时逐条打印 `WARN 剪映 (jianying) is not installed - using
-Kdenlive (kdenlive) instead`, 并记录在结果文件 `meta.substitutions` 与汇总列 `substitutions` 里。场景轨迹里的 id 也随之
-替换 (`remap_scenario_apps`), 所以 `design` 场景照常以 CAD 为枢纽。
+每个桌面版都记在 `cf/linux/apps.py` (`kind="desktop"`), 它的手机版是 `<id>_mobile` (`kind="mobile"`), 由 `substitute` 串成链
+`jianying -> jianying_mobile (-> kdenlive)`。`resolve()` 只沿着 `substitute_kinds` 允许的 kind 往下走 (默认 `["mobile"]`)。
+运行时逐条打印 `WARN 剪映 (jianying): no Ubuntu desktop build installed - using 剪映(手机版) (jianying_mobile, mobile) instead`,
+记录在结果文件 `meta.substitutions` / `meta.kinds` 与汇总列 `substitutions` 里; 场景轨迹里的 id 也随之替换
+(`remap_scenario_apps`), 所以 `design` 场景照常以 CAD 为枢纽。两边都没有的应用 WARN 后剔除 (`dropped`)。
 
-### 4.1 首次启动、登录、核对窗口
+### 4.2 手机版 (第二优先): Waydroid
+
+为什么是 Waydroid 而不是 Android 模拟器: Waydroid 是跑在 **宿主内核** 上的 LXC 容器 (LineageOS 用户空间), 里面每个 Android
+应用进程在宿主 `/proc` 里都看得见 (cmdline 就是包名 `com.lemon.lv` / `com.lemon.lv:push`), 所以能被移进 `/sys/fs/cgroup/cf/<app>`,
+吃到与桌面应用 **完全相同** 的 `cpu.max` / `memory.high` / swap 限制; arm64 APK 在 arm64 虚拟机里原生运行, 没有二次虚拟化。
+嵌套虚拟化的模拟器则把进程全藏在客体里, 没法按应用限流。
+
+```bash
+sudo scripts/ubuntu/setup_waydroid.sh --install   # 一次: repo.waydro.id + waydroid + linux-modules-extra (binder), waydroid init (下载 ~1 GB 镜像),
+                                                  #       单窗口模式, 写 /etc/sudoers.d/cf-adopt (让 runner 能把 Android 进程移进 /cf/<app>)
+scripts/ubuntu/setup_waydroid.sh                  # 每次登录: 起一个嵌套 weston (它是 Xorg 里的普通 X11 窗口) -> waydroid session -> adb connect
+scripts/ubuntu/install_mobile_apps.sh --missing   # 配置里桌面版缺失的那些应用, 自动下载手机版 APK (应用宝 / 酷安, 自动选 ABI) 并安装
+scripts/ubuntu/install_mobile_apps.sh com.lemon.lv                                   # 或指定包名
+scripts/ubuntu/install_mobile_apps.sh --from-phone <华为手机 adb 序列号> com.huawei.vassistant com.huawei.hwid   # 小艺
+python3 run_linux.py configs/ubuntu_cn_desktop.json --mobile-status                  # 会话 / adb / ABI / 每个手机版是否已装 / 宿主 pid
+```
+
+然后像桌面应用一样首次启动一遍 (`run_linux.py ... --launch jianying_mobile`), 在 Android 窗口里接受协议、登录。
+
+手机版在实验里的差别 (都已在 `cf/linux/mobile.py` / `device.py` 里处理, 这里只说明语义):
+
+| | 桌面版 | 手机版 (Waydroid) |
+|---|---|---|
+| 窗口 | 应用自己的 X11 窗口 | **所有 Android 应用共用一个 X11 窗口** (嵌套 weston, WM_CLASS `weston`)。切到手机版应用 = 激活这个窗口 + 在 Android 里 `am start -W` 它 |
+| 切换时延 `total_time_ms` | activate + `_NET_WM_PING` | activate + Android 报告的 **TotalTime** (与本仓库 Android 版同一个数); `launch_state` 用 Android 自己的 HOT / WARM / COLD; 没有 ping |
+| 进程 | runner 启动时就放进 `/cf/<app>` | zygote 把它们 fork 进容器自己的 cgroup, 每次启动后和每次采样时 **重新收养** 进 `/cf/<app>`; 这需要 root → 配置 `"sudo_adopt": true` (`setup_waydroid.sh --install` 已写 sudoers 免密)。收养不了的进程照样被测量, 但列在 `stray_pids` 里, 限制碰不到它们 |
+| 通知 | D-Bus `Notify` | Android 的 `dumpsys notification` 里该包名出现的不同通知 key 数 (结果里的键 `mobile:<包名>`) |
+| 后台负载 | 下载任务 / 推送 / 渲染 | 相同: 百度网盘手机版开一个下载; 剪映手机版导出一段视频; 微信手机版扫码登录后正常收推送 (走微信长连接, 不依赖 GMS) |
+| 状态丢失 | 进程 / 窗口消失 | 相同判据; 额外注意 Android 自己的 LMK 也可能杀后台进程 — 那同样记为 `state_lost`, 是手机版的真实代价。可以在 Waydroid 里 `setprop ro.lmk.kill_timeout_ms 0` 等参数或给虚拟机更多内存 |
+| 配置 | – | `"mobile": {"backend": "waydroid", "adb_serial": "192.168.240.112:5555", "wm_class": "^weston"}` (都有默认值; IP 以 `waydroid status` 为准) |
+
+x86_64 虚拟机 (非 Apple 芯片) 上的 arm64-only APK 需要 Waydroid 的 libhoudini / libndk 转译镜像 (`waydroid init -f -s VANILLA` 后按
+官方文档安装 `waydroid_script`); 本手册的目标机器是 arm64, 不涉及。
+
+### 4.3 在 `app_overrides` 里补一个手机版
+
+目录里没有预置包名的应用 (中望CAD、悟空图像) 或厂商改了包名时:
+
+```json
+"app_overrides": {
+  "zwcad_mobile": {"name": "中望CAD(手机版)", "category": "compute", "kind": "mobile",
+                   "package": "<install_mobile_apps.sh --search 查到的包名>",
+                   "match": "^<包名>(:|$)", "wm_class": "^weston", "cmd": ""},
+  "zwcad": {"substitute": "zwcad_mobile"}
+}
+```
+
+### 4.4 允许开源替代 / 占位 (可选)
+
+```json
+"substitute_kinds": ["mobile", "oss", "placeholder"]
+```
+
+顺序即链上的顺序: 桌面版 → 手机版 → 开源替代 (kdenlive / librecad / gimp, `install_deps.sh --subs`) → 占位程序。不写时只到手机版为止。
+
+### 4.5 首次启动、登录、核对窗口
 
 ```bash
 source scripts/ubuntu/cf_enter.sh
@@ -125,8 +340,10 @@ catalogue id (`APP`) / 命令行。常见修正:
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `apps` | 13 个 id | 实验集合; 没装的按 `substitute` 替代, 都没有则 WARN 并剔除 (少于 2 个时报错) |
-| `app_overrides` | `{}` | 对 catalogue 条目的字段覆盖, 或新增应用 (键 = 新 id, 至少 `cmd` `match` `wm_class` `category`, 可加 `name` `notify_names` `arch`) |
+| `apps` | 13 个 id | 实验集合 (桌面版 id); 没装的沿 `substitute` 链找 `substitute_kinds` 允许的替代, 都没有则 WARN 并剔除 (少于 2 个时报错) |
+| `substitute_kinds` | `["mobile"]` | 桌面版缺失时允许退到哪些 kind: `mobile` (同一应用的手机版, Waydroid) / `oss` (kdenlive 等) / `placeholder` (占位程序) |
+| `mobile` | `{}` | Android 运行时: `backend` (`waydroid` / `adb`), `adb_serial` (默认 `waydroid status` 的 IP:5555), `wm_class` (Android 窗口的 WM_CLASS 正则), `wayland_display` |
+| `app_overrides` | `{}` | 对 catalogue 条目的字段覆盖, 或新增应用 (键 = 新 id, 至少 `cmd` `match` `wm_class` `category`, 可加 `name` `notify_names` `arch` `kind` `package` `substitute`) |
 | `never_throttle` | `[]` | 永远 `fg` 的应用 (音乐播放器、录屏) |
 | `policy` / `eta` / `policy_kw` | `static` / 0.3 | 策略与预算系数, 同 Android 版; `static` `none` 忽略 η |
 | `throttle.cpu_mode` | `quota` | `quota`: 每个后台应用各自 `cpu.max` = `cpu_cores` 个核的带宽; `cpuset`: 所有后台应用挤在 `cpuset_cpus` 这 (几) 个核上 (`last` = 编号最大的核); `both`; `none` |
@@ -140,19 +357,28 @@ catalogue id (`APP`) / 命令行。常见修正:
 | `throttle.proactive_reclaim` | true | 降档时立即写 `memory.reclaim` (内核 ≥ 5.19) |
 | `cpu_throttle_resident` | true | 预算内的后台应用也限 CPU (`bg`); false 则预算内的完全不受限, 策略只决定内存 |
 | `trace` | scenario office T=60 | `kind`: `scenario` (`office` `design` `download` `chat`) / `day` (四场景依次经历) / `zipf` / `markov`; 也可内联 `{"apps":{id:权重},"hub":id,"flows":[[...]]}` |
-| `dwell_s` / `settle_s` / `warmup_dwell_s` | 8 / 2 / 10 | 每步停留 / 切换后等待 / warmup 每应用停留 (秒) |
+| `dwell_s` / `settle_s` / `warmup_dwell_s` | [5, 12] / 2 / 10 | 每步停留 / 切换后等待 / warmup 每应用停留 (秒)。`dwell_s` 给一个数 = 固定; 给 `[lo, hi]` = 每步按 seed 均匀抽样 (同一 seed 下各策略的每一步停留相同, 可直接对比); 每条 `step` 记录带 `dwell_s` |
+| `sample_every_s` | 2.0 | > 0 时停留期间每隔这么多秒做一次轻量采样 (PSI cpu/mem/io、zram、MemAvailable、swap in/out、每应用 PSS / swap / cpu / 写盘 / 节流时间 / tier) → `step.timeline`, 画时间序列 (`--plots-dir` 的 `*_timeline.png`); 0 关闭 |
+| `placeholder_fill` | false | true (或 `--placeholders`): 没装上的应用用内置占位程序顶替, **id 不变**, 场景 / 轨迹不变 (`meta.placeholders` 列出); 在真实应用装齐之前就能跑完整矩阵, 之后同一命令重跑即用真实应用 |
+| `work` / `work_s` | false / 3.0 | true (或 `--work`): 每步前台停留的开头在前台应用上做 `work_s` 秒 **脚本化操作** (打草稿 / 滚动 / 上滑), 切走前记一个内容 oracle, 回来时重读比较 → `launch.work_state_ok`, 不一致计入 `state_lost` 与 `work_fail` (§6.6) |
+| `work_overrides` | `{}` | 按应用 id 覆盖脚本: `{"wechat": {"kind": "none", "oracle": "screen"}}`; 字段 `kind` (`edit` `draft` `browse` `view` `swipe` `none`) / `oracle` (`clipboard` `title` `screen` `statefile` `ui` `none`) / `text` / `scroll` / `swipes` / `tolerance` (screen 的汉明距离容差, 默认 12/256 位) |
 | `minimize_background` | false | 切走的窗口是否最小化 (真实用户不会, 默认不做) |
 | `notifications` | true | 用 `dbus-monitor` 统计推送类应用的 `Notify` 调用 |
-| `adopt_strays` / `sudo_adopt` | true / false | 把 cgroup 外的同名进程移进来; 用户权限移不动时是否 `sudo scripts/ubuntu/cf_adopt.sh` (需 sudoers 免密, 见脚本头) |
+| `adopt_strays` / `sudo_adopt` | true / false | 把 cgroup 外的同名进程移进来; 用户权限移不动时是否 `sudo scripts/ubuntu/cf_adopt.sh` (需 sudoers 免密, 见脚本头)。**有手机版应用时必须 `sudo_adopt: true`** (Android 进程属于其它 uid) |
 | `launch_timeout_s` / `ping_timeout_s` | 90 / 15 | 等窗口出现 / 等 `_NET_WM_PING` 回应 |
 | `min_ram_mb` | 6144 | 低于此 WARN |
 
 命令行可以覆盖最常改的项: `--policy --eta --T --scenario --seed --cpu-mode --cpu-cores --cpuset --mem-frac
---swap-max-mb --mem-hard --no-resident-cpu --name --out-dir`。
+--swap-max-mb --mem-hard --no-resident-cpu --dwell S [S] --sample-every S --placeholders --work --work-s S --name --out-dir`;
+`--work-plan` 打印每个应用会用的脚本 / oracle 后退出。
 
-**关于 η 与预算的语义** (与 Android 版的差别): 一个 `shrunk` 应用在预算模型里占 `memory.high` 那么多 (ρ_i = memory.high / m),
-所以 B = η × Σ m_fg 必须大于 Σ(后台应用的 memory.high) 才会有应用留在 `bg`。13 个应用、`mem_min_mb=192` 时这个底约 2.4 GB,
-η < 0.3 基本等价于 `static`。想比较策略之间的差别用 η ∈ {0.4, 0.5, 0.6} 或把 `mem_min_mb` 降到 96。
+**关于 η 与预算的语义 (重要, 与 Android 版的差别)**: 一个 `shrunk` 应用在预算模型里仍占 `memory.high` = max(mem_frac × m_fg, mem_min_mb)
+(ρ_i = memory.high / m), 所以后台总占用有一个 **下限** floor = Σ(其它应用的 memory.high) ≈ mem_frac × (1 − 1/n) × Σ m_fg。
+B = η × Σ m_fg 低于 floor 时任何预算策略都留不下一个应用, 和 `static` 完全一样 (每步 `budget_violation`)。
+`mem_frac = 0.5` 时 η_min ≈ 0.5: **比较策略请用 η ≥ 0.6** (矩阵默认 0.6 / 0.8); 想看更低的 η 就同时把 `mem_frac` 调小
+(`MEM_FRAC=0.3 ETAS="0.4 0.6" scripts/ubuntu/run_matrix.sh`)。runner 在 `budget` 记录里给出 `shrunk_floor_kb` / `eta_min`, 不可达时 WARN;
+`cf.linux.analyze` 的 `eta_min` / `eta_feasible` / `n_resident_avg` 列和 report.md 的提示会把这种格标出来。
+`policy: none` 是真正的基线: 任何应用都不受限 (全部 `fg`)。
 
 ## 6. 运行
 
@@ -169,9 +395,25 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy l
 python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario design --policy static --cpu-cores 0.5 --mem-frac 0.3
 
 # 6.3 矩阵: 场景 x 策略 x η x 种子 (+ 限流档位变体), 同一目录, 同一预算分母 (第一格的 m_fg 复用到所有格)
-scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60
+scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60       # 默认: 4 场景 x (none static lru landlord hybrid) x η 0.6/0.8, ~30 格 ~8 h
+NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40   # 过夜档: + 1c:0.3 / 0.5c:0.5 / cpuset / swap128 / memhard 对照, ~50 格 ~10 h
+FULL=1  scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60   # 全量: 5 场景 (含 day) x 6 策略 x η 0.55/0.7/0.85 x 2 seed x 全部变体, ~350 格, 数天 (可中断续跑)
 PROFILES="1c:0.5 1c:0.3 0.5c:0.5" POLICIES="none static" scripts/ubuntu/run_matrix.sh     # 只比限流强度
+CPU_MODES="quota cpuset" RESIDENT="1 0" SWAP_CAPS="512 128" MEM_HARD=1 scripts/ubuntu/run_matrix.sh   # 单独点名变体
+MEM_FRAC=0.3 ETAS="0.4 0.6" scripts/ubuntu/run_matrix.sh                                 # 第二遍: 更小的 memory.high (文件名加 _mf0.3)
+PLACEHOLDERS=1 NIGHT=1 scripts/ubuntu/run_matrix.sh                                      # 没装上的应用用占位程序顶替, 先把矩阵跑通
+WORK=1 WORK_S=3 NIGHT=1 scripts/ubuntu/run_matrix.sh                                     # 每格加 --work: 脚本化操作 + 回来时的内容核对 (work_state_ok)
+DRY=1 FULL=1 scripts/ubuntu/run_matrix.sh                                                # 只列出会跑哪些格 / 命令
 QUICK=1 scripts/ubuntu/run_matrix.sh                                                     # office, none+static, T=15
+# 结束时自动: summary.csv / summary_agg.csv / per_app.csv / pareto.csv / plots/*.png / report.md (都在 OUT 目录)
+
+# 6.3b 一条命令从开机到 report.md (每步幂等, 可中断重跑): 建 cgroup 树 + zram → check_env → probe/catalog 快照 → 冒烟 → 矩阵 → 分析
+scripts/ubuntu/run_all.sh                           # 默认矩阵 -> results/ubuntu_all/{env,probe,catalog}.txt + matrix/
+PRESET=night scripts/ubuntu/run_all.sh              # 过夜档 (推荐在 tmux 里跑: tmux new -s cf)
+PRESET=full PLACEHOLDERS=1 scripts/ubuntu/run_all.sh
+WORK=1 PRESET=night scripts/ubuntu/run_all.sh       # 同上 + 脚本化操作; 冒烟阶段把 work_fail = 0 也当作不变量, OUT/work_plan.txt 记下每个应用的脚本
+PRESET=quick scripts/ubuntu/run_all.sh              # 只做冒烟
+SKIP_SMOKE=1 OUT=results/run2 T=40 scripts/ubuntu/run_all.sh
 
 # 6.4 断点续跑 (Ctrl+C / X 连接断 / 虚拟机挂起后): 轨迹、策略状态、各应用档位全部恢复并重新写回 cgroup
 python3 run_linux.py configs/ubuntu_cn_desktop.json --resume results/landlord_office_eta0.5_s1.jsonl
@@ -187,7 +429,46 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --release
 → 停留 `dwell_s` 再采样 → 比较两次采样: 后台各应用拿到的 CPU、被节流的时间、写盘字节、通知条数、PSS / swap、
 `memory.events`, 以及 **是否有进程 / 窗口消失或 OOM kill** → 写一条 `step` 记录 + 检查点。
 
-### 6.1 日常使用: `focusd`
+### 6.6 用脚本代替人工点击: `--work` 与 `work_state_ok`
+
+`state_check` 只看进程 / 窗口 / OOM; 用户关心的是 **内容**: 没发出去的草稿、滚到一半的页面、CAD 里的视图。`--work` 把 §8 第 3 条
+的手工检查自动化 (`cf/linux/work.py`):
+
+1. 每步把应用切到前台、`settle_s` 之后, 先在它身上做 `work_s` 秒脚本化操作 (占用停留时间的开头, 不超过 dwell 的 60%; warmup 时也做一轮);
+2. 停留结束、切走 **之前** 读一次 oracle (一个能代表当前可见状态的小摘要) 存起来;
+3. 这个应用下次回到前台 (从 `bg` 或 `shrunk` 回来, `settle_s` 之后) 立刻再读一次, 与存的比较 → `launch.work_state_ok` = True / False / None
+   (None = 没有可比对象: 首次、COLD 重启、oracle 读不到); False 同时写 `state_lost[app].work_state = {oracle, before, after}`。
+
+| 应用 | 默认脚本 (`kind`) | 默认 oracle | 说明 |
+|---|---|---|---|
+| 微信 / QQ / 钉钉 | `draft`: 往焦点输入框键入 `cf-work <id> t<step> 草稿未保存 ` | `clipboard`: ctrl+a ctrl+c 后剪贴板文本的长度 + md5 | 需要先手动点开一个会话让输入框有焦点 (登录时顺手做) |
+| WPS | `edit`: 键入同样一行 + 回车 | `clipboard` | 文档不保存; 回来时 ctrl+a 全选再 End 取消选区 |
+| 浏览器 / 腾讯视频 / 哔哩哔哩 | `browse`: 滚轮下翻 `scroll` 格再回退 1/4 | `title`: `_NET_WM_NAME` (页面标题) | 像素会随视频变化, 所以只认标题; 页面被重载会换标题 / 回到顶部 |
+| 百度网盘 / 小艺 | `none` | `title` | 下载本身在后台进行 (`write_mb` 已经度量) |
+| 中望CAD / 悟空图像 / kdenlive / librecad / gimp | `view`: 滚轮缩放 `scroll` 格 | `screen`: 窗口像素 16×16 均值哈希 (python-xlib `get_image`, 只取客户区), 汉明距离 ≤ `tolerance` 算相同 | 对光标闪烁、时钟数字不敏感, 对视图重置 / 重新打开敏感 |
+| 占位程序 | `none` | `statefile`: `/tmp/cf_placeholder_<id>.json` 的 `pid` 不变且 `counter` 不回退 | 冒烟配置用 |
+| 手机版 (Waydroid) | 下载 / 视频类 `swipe` (上滑 `swipes` 次, 短视频翻页); 推送类 `draft` (`input text`); 计算类 `view` (滑动) | `ui`: 最前 Activity + uiautomator dump 里全部文字 (数字抹掉) 的 md5; 也可选 `screen` (`screencap`) | 冷启动回到 Splash / 首页 → Activity 不同 → False |
+
+脚本只通过 XTEST (`xdotool type / key / click`) 发给 **当前活动窗口**, 发之前核对 `_NET_ACTIVE_WINDOW` 就是该应用 (否则记 `not-active`,
+不输入); 手机版核对 `foreground_pkg`。失败不会中断实验 (`step.work.status` 记录 `ok / skipped / not-active / error: …`)。
+
+```bash
+python3 run_linux.py configs/ubuntu_cn_desktop.json --work-plan            # 每个应用会做什么 / 用什么 oracle (含未安装的)
+python3 run_linux.py configs/ubuntu_placeholders.json --policy lru --eta 0.6 --T 12 --work --work-s 1   # 占位程序上试一遍
+python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 60 --work      # 真实应用
+```
+
+数据: `step.work` (kind / status / 耗时), `step.launch.work_state_ok` + `work_check {before, after}`, `warmup.work`; 汇总列
+`work_checks` (回到前台时做过比较的次数) / `work_fail` (不一致的次数, **应为 0**), 每应用表同名两列; report.md 的不变量一行里有它们;
+`run_all.sh` 的冒烟检查把 `work_fail = 0` 和 `state_lost / oom / COLD = 0` 一起当作继续跑矩阵的前提。
+
+注意事项: (a) `clipboard` oracle 会覆盖系统剪贴板, 实验期间不要指望剪贴板里的东西; 不想碰剪贴板就 `work_overrides` 改成
+`"oracle": "screen"` 或 `"title"`。(b) `draft` 文本会越积越长 (每步追加一段), 60 步 ≈ 3 KB, 对输入框无压力; 想清空就在下一次登录时删掉。
+(c) 只支持 X11 (XTEST / `get_image`); Wayland 下 `--work` 会全部 `not-active` / `error`。(d) 手机版 `ui` oracle 依赖 `uiautomator dump`,
+Waydroid 上要 1–3 s; 列表页的推荐流本身会刷新 → 用 `tolerance` 更大的 `screen` 或 `kind: none`。(e) `work_s` 计入 dwell 的开头, 所以
+`dwell_s` 的下限至少要 ≥ 2 × `work_s`。(f) 微信 / QQ 在没有焦点输入框时 `draft` 的按键会被吞掉, 不影响实验, 只是 `clipboard` 读到的是空 → None。
+
+### 6.7 日常使用: `focusd`
 
 实验 runner 自己驱动窗口切换; 想在平时使用虚拟机时也享受 "切走就限流", 开一个守护进程:
 
@@ -205,19 +486,32 @@ Ctrl+C / SIGTERM 时解除全部限制。启动时也会先清一遍残留限制
 
 ## 7. 结果文件与指标
 
-`results/<name>.jsonl` 每行一条记录: `meta` (配置、主机能力、应用类别、替代关系、限流档位) → `warmup` × N → `budget`
+`results/<name>.jsonl` 每行一条记录: `meta` (配置、主机能力、应用类别、`kinds` (desktop / mobile …)、替代关系、限流档位) → `warmup` × N → `budget`
 → `trace` → `step` × T → (`interrupted` / `resume`)* → `end`。`step` 记录保留 Android 版的全部键 (`frozen`≡`throttled`,
 `compressed`≡`shrunk`, `was_compressed`≡`was_shrunk`, `M_bg_kb`, `budget_violation`, `after_launch` / `after_dwell` 采样 …),
-`cf.analyze` 原样可用; 新增 `tiers`, `bg` (每应用的 Δcpu / Δthrottled / Δwrite / 通知 / cg 内存), `state_lost`, `notifications`。
+`cf.analyze` 原样可用; 新增 `tiers`, `bg` (每应用的 Δcpu / Δthrottled / Δwrite / 通知 / cg 内存), `state_lost`, `notifications`,
+`dwell_s`, `timeline`, 以及 `--work` 时的 `work` 与 `launch.work_state_ok` / `launch.work_check`。
 
 ```bash
 python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl                       # 表格
 python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --csv s.csv --agg agg.csv --pareto p.csv --plot pareto.png
+python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --per-app              # 每个应用一行 (打印; 给文件名则写 CSV)
+python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --plots-dir plots --md report.md   # 图 + Markdown 报告
 ```
+
+`--plots-dir` 生成: 每格一张 `<name>.png` (后台 PSS vs 预算 / 每步切换时延按来源 fg·bg·shrunk·cold 着色 / 后台核数 + 节流 % /
+swap in·out + 下载 MB + 通知), `sample_every_s > 0` 时再加 `<name>_timeline.png` (停留期间的每应用 cgroup 内存堆叠、后台核数、PSI、SwapFree),
+以及跨格的 `latency_cdf.png` (每策略: 从 bg 回来 vs 从 shrunk 回来的时延 CDF) 和 `bg_tradeoff.png` (相对 `none` 基线的后台内存节省 % vs P95 时延)。
+`--md` 把不变量 (state_lost / oom / n_cold 合计)、每格表、复本聚合 (mean ± sd)、day 轨迹分段、每应用表、不可达 η 提示和图链接写成一份 report.md。
+`--per-app` 的列: `n_req n_cold lat_bg_p50_ms lat_shrunk_p50_ms ping_shrunk_p50_ms m_fg_mb pss_bg_avg_mb pss_shrunk_avg_mb
+mem_bg_avg_mb mem_shrunk_avg_mb t_fg_s t_bg_s t_shrunk_s cores_bg_avg throttled_pct write_mb notifs cpu_s majflt state_lost work_checks work_fail`
+(`pss_*` = 进程映射的 PSS+SwapPss; `mem_*` = cgroup `memory.current`, 含应用写出的页缓存, 下载类应用的 `mem_bg` 会明显大于 PSS,
+被 `memory.high` 压到 shrunk 时这些缓存页先被丢掉) — 用来回答 "微信在 shrunk 里待了多久、
+切回来平均多慢、这期间推了几条通知"、"百度网盘在后台 1 核下写了多少 MB" 这类按应用的问题。
 
 | 列 | 含义 | 希望 |
 |---|---|---|
-| `lat_p50/p95/p99_ms` | 切换总时延 = activate + ping (COLD 再加启动) | 低 |
+| `lat_p50/p95/p99_ms` | 切换总时延 = activate + ping (COLD 再加启动); 手机版应用 = activate + Android `am start -W` 的 TotalTime | 低 |
 | `activate_p50_ms` | 窗口管理器完成切换的时间 | 基本恒定 (30–70 ms) |
 | `ping_resident_p50_ms` / `ping_shrunk_p50/p95_ms` | 从 `bg` / 从 `shrunk` 回来后应用事件循环回应 `_NET_WM_PING` 的时间 | shrunk 的值就是 "被压缩的代价" |
 | `n_hot` / `n_warm` / `n_cold` / `n_front` / `n_timeout` | 切换类型计数 | **`n_cold` 应为 0** (没有重启) |
@@ -226,10 +520,13 @@ python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --csv s.csv --agg agg.
 | `download_mb` / `download_mbps` | 下载类应用在后台写盘的量与速率 | 限流后仍 > 0 (下载在继续, 只是慢) |
 | `notif_total` / `notif_per_h` | 推送类应用在后台发出的通知 | 限流后仍 > 0 |
 | `compute_cpu_s` | 计算类应用在后台得到的 CPU 秒 | |
-| `state_lost_events` / `oom_kills` | 进程 / 窗口消失、OOM kill | **必须为 0** |
+| `state_lost_events` / `oom_kills` | 进程 / 窗口消失、OOM kill、脚本化操作的内容丢失 | **必须为 0** |
+| `work_checks` / `work_fail` | `--work` 时: 应用回到前台时做过内容核对的次数 / 不一致 (`work_state_ok = False`) 的次数 (§6.6) | `work_fail` **必须为 0**; `work_checks` 接近 T − n_cold − 首次访问数 |
 | `swap_write_mb` / `swap_read_mb` / `refaults` | zram 换出 / 换入 | 换入 = WARM 切换的代价 |
 | `psi_cpu_some_ms` | 全系统 CPU 压力 | 前台卡顿的旁证 |
-| `cpu` / `mem_frac` / `cpu_throttle_resident` / `substitutions` | 本格的限流档位与替代关系 | 用来分组 |
+| `cpu` / `mem_frac` / `cpu_throttle_resident` / `substitutions` | 本格的限流档位与替代关系 (桌面版缺失时用了谁的手机版) | 用来分组 |
+| `eta_min` / `eta_feasible` / `n_resident_avg` | 该格 η 的可达下限 (shrunk floor / Σ m_fg) / 本格 η 是否高于它 / 平均留在预算内的后台应用数 | `eta_feasible = False` 的格等价于 static, 不要拿来比较策略 |
+| `n_mobile` / `n_placeholders` | 本格里有几个应用跑的是手机版 / 占位程序 | 占位格只用于把流程跑通, 不进论文 |
 
 ## 8. 验证 "不丢状态和上下文"
 
@@ -242,6 +539,8 @@ python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --csv s.csv --agg agg.
    跑完实验回去看: 光标、滚动位置、草稿都应原样 (冻结版本也能做到这点, 限流版本额外保证后台任务继续推进:
    下载进度条在动, 微信消息在实验中照常到达并弹通知)。
 4. 对照: `--mem-hard` 打开 `memory.max`, 看 `oom_kills` 变成非 0 时 `state_lost_events` 如何跟着出现 — 这就是我们默认不设硬上限的原因。
+5. **第 3 条的自动版**: `--work` (§6.6) 让 runner 自己打草稿 / 滚页面 / 上滑, 切走前记下内容摘要, 回来时核对 → `work_state_ok`;
+   跑完看 `work_fail = 0`, 以及 `work_checks` 覆盖了多少次从 `shrunk` 回来的切换 (`per_app.csv` 按应用看)。
 
 ## 9. 与 Android 版 / 文档模型的对应
 
@@ -250,7 +549,7 @@ python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --csv s.csv --agg agg.
 | m_i (工作集) | PSS + SwapPss (uid 下所有进程) | PSS + SwapPss (`/cf/<app>` 下所有进程, `smaps_rollup`) |
 | 压缩后占用 ρ·a_i | zram 压缩比 × anon | `memory.high` (内核把多出的页换到 zram, 剩下的留在内存); ρ_i = memory.high / m |
 | 冻结 / 换出 | `cgroup.freeze=1` + `memory.reclaim` | tier `bg` (`cpu.max`) / tier `shrunk` (+`memory.high`, `memory.reclaim`) |
-| 恢复 c_resume | `am start -W` 的 TotalTime 与 HOT 的差 | WARM 切换的 (activate + ping) 与 HOT 的差; 没有样本时按 (m − memory.high) / 1.2 GB/s 估算 |
+| 恢复 c_resume | `am start -W` 的 TotalTime 与 HOT 的差 | WARM 切换的 (activate + ping) 与 HOT 的差; 手机版应用用 activate + `am start -W` TotalTime; 没有样本时按 (m − memory.high) / 1.2 GB/s 估算 |
 | 预算 B | η × Σ m_fg (后台) | 同 |
 | 不能发生 | lmkd 杀 → COLD | 进程 / 窗口消失、OOM kill → `state_lost`; `n_cold` |
 
@@ -287,10 +586,59 @@ focus-new-windows` 为 `'smart'` (默认; `'strict'` 会拒绝 xdotool 的请求
 
 **内核 5.15 (`memory.reclaim: NO`)** — `sudo scripts/ubuntu/install_deps.sh --hwe` 后重启; 不装也能跑 (惰性回收)。
 
+**手机版: `no Android runtime is reachable`** — `scripts/ubuntu/setup_waydroid.sh` 没跑或 weston 没起来 (`--status`);
+`waydroid status` 的 Session 必须 RUNNING, `adb devices` 里要有 `<IP>:5555` (没有就 `waydroid prop set persist.sys.usb.config adb`
+后重启会话; 或者不装 adb, runner 会退到 `sudo -n waydroid shell`, 需要 sudoers 免密)。`modprobe binder_linux` 失败 = 内核没有
+binder, 装 `linux-modules-extra-$(uname -r)` 或 HWE 内核后重启。
+
+**手机版: `Android processes ... could not be moved`** — 没开 `sudo_adopt`, 或 `/etc/sudoers.d/cf-adopt` 里的仓库路径不对
+(`setup_waydroid.sh --install` 按当时的仓库位置写)。此时手机版应用会被测量但不受限 (`stray_pids` 非空)。
+
+**手机版: 切换时 `launch_state` 全是 FRONT / `total_time_ms` 为空** — `am start -W` 认为该 Activity 已在最前 (Waydroid 单窗口里
+确实如此时是正常的, 比如连续两步都是同一应用); 若所有手机版应用都这样, 检查 `persist.waydroid.multi_windows` 是否被设成了 true。
+
+**手机版: APK 装不上 (`INSTALL_FAILED_NO_MATCHING_ABIS`)** — 下载器已按 `ro.product.cpu.abilist` 选包; 出现这个说明是 x86_64
+虚拟机 + arm64-only 应用, 需要 libhoudini / libndk 转译镜像 (见 §4.2)。
+
 **结果里 `n_cold > 0`** — 看 `results/app_logs/<id>.log` (应用 stdout/stderr) 与对应 step 的 `state_lost`: 是应用自己崩了
 (腾讯视频 / 百度网盘的 Electron 渲染进程偶尔会), 还是 `mem_hard` 导致的 OOM; 后者把 `mem_hard` 关掉。
 
 **虚拟机内存不够 (`VM RAM is 4096 MB`)** — 要么加到 8 GB, 要么减少 `apps` (去掉两个浏览器之一与一个视频应用)。
+
+**装桌面时 `firefox_1:1snap1-0ubuntu2_arm64.deb ... dpkg returned an error code (1)`** — Ubuntu 的 firefox deb 只是个过渡包,
+post-inst 里跑 `snap install firefox`, snap 商店连不上 (代理 / 国内网络) 就整个 `ubuntu-desktop-minimal` 失败。先装 Mozilla APT 仓库的
+真 deb 并 pin (§0 第 4 步), 再 `sudo apt -f install && sudo apt install ubuntu-desktop-minimal`; 已经卡住的话
+`sudo dpkg --remove --force-remove-reinstreq firefox` 后重做。
+
+**`NO_PUBKEY C0BA5CE6DC6315A3` / `packages.mozilla.org ... is not signed`** — 密钥文件没下全 (常见于代理把下载截断): 重新
+`wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc`,
+`gpg -n -q --import --import-options import-show` 看到指纹 `35BA A0B3 3E9E B396 F59C A838 C0BA 5CE6 DC63 15A3` 才算对。
+
+**安装完成点 reboot 后黑屏、光标闪动** — ISO 还挂着 (UTM: CD/DVD → Clear 后再开机), 或者 Server 版默认把输出留在串口:
+在 UTM 的 Serial 窗口能看到登录提示就说明系统好着, 装完 `ubuntu-desktop-minimal` 并 `systemctl set-default graphical.target` 即可。
+
+**`git checkout cursor/...: pathspec did not match` / `couldn't find remote ref`** — 先 `git remote -v`: 如果 origin 不是
+`HymnOfLight/context_freeze.git` 就是 clone 错了仓库, 重新 clone; 是对的话 `git fetch origin cursor/ubuntu-throttle-on-unfocus-c246`
+(分支名带 `cursor/` 前缀)。
+
+**`check_env.sh`: `FAIL /sys/fs/cgroup/cf missing`** — 每次开机都要 `sudo scripts/ubuntu/setup_cgroups.sh` (§3); `run_all.sh` 会自己做。
+`warn only disk swap` 用 `sudo scripts/ubuntu/setup_zram.sh 4096` 解决 (`run_all.sh` 默认也会做)。
+
+**预算策略 (lru / landlord / hybrid) 的结果和 static 一模一样, `budget_violations = T`** — η 低于 shrunk floor (§5 "关于 η 与预算的语义"):
+看 `eta_min` 列, 用 η ≥ eta_min + 0.05 重跑, 或 `MEM_FRAC=0.3`。
+
+**下载类应用的 `download_mbps` 很低且各格都一样** — 代理在整形流量 (§2.5), 或者下载源本身限速; 实验前 `unset http_proxy https_proxy all_proxy`,
+并在 `none` 基线里确认未限流时的速率明显更高。
+
+**`--work`: 所有 step 的 `work.status` 都是 `not-active`** — `xdotool` 发键前核对的是 `_NET_ACTIVE_WINDOW`, 它不是该应用的窗口:
+焦点保护 (见 `activate` 失败一条) 或该应用弹了对话框; `--discover` 看当前活动窗口。Wayland 会话下也是这个现象 (只支持 X11)。
+
+**`--work`: `work_state_ok` 全是 None, `work_checks = 0`** — oracle 读不到: `clipboard` 需要 `xclip` (`check_env.sh` 有提示) 且该应用的输入框有焦点
+(微信 / QQ 要先点开一个会话); `screen` 需要 `python3-xlib` 且窗口没被最小化 (`minimize_background` 必须是 false); 手机版 `ui` 需要 `uiautomator`
+(Waydroid 自带) 和 adb。看 `step.launch.work_check.after.error`。
+
+**`--work`: 浏览器 / 哔哩哔哩的 `work_fail` 偶发** — 页面自己换了标题 (视频自动连播、标签页标题带未读数)。把那个应用的 oracle 改成 `screen`
+并放大 `tolerance`, 或 `kind: none` + `oracle: title` 只看窗口还在不在; 真正的上下文丢失通常伴随 `n_cold > 0` 或 `ping` 很长。
 
 **macOS 侧** — 跑矩阵时关闭 Spotlight 索引新建的结果目录 (如果是共享目录), 关闭 Time Machine; UTM 不要开 "Balloon" 内存气球。
 
@@ -298,7 +646,37 @@ focus-new-windows` 为 `'smart'` (默认; `'strict'` 会拒绝 xdotool 的请求
 
 ```bash
 python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋钮值 / 伪 cgroupfs / xprop 解析 / 伪桌面上的完整 runner (静态与预算策略、
-                                                   # 无进程被杀、WARM、state_lost 注入、resume 重放档位) / focusd 决策 / 应用目录与替代 / Notify 解析
-                                                   # 有 Xvfb + xfwm4/openbox + xdotool 时自动加跑一次真实窗口 发现 -> 激活 -> _NET_WM_PING 往返
+                                                   # 无进程被杀、WARM、state_lost 注入、resume 重放档位) / focusd 决策 / 应用目录与 桌面->手机版 替代链 /
+                                                   # Notify 解析 / 手机版: waydroid status、dumpsys 解析, 伪 Android 运行时上的 启动-收养-通知 与 preflight
+                                                   # --work: 每类应用的默认脚本 / oracle、均值哈希与比较规则、伪 Android 上的上滑 + ui oracle、
+                                                   # 伪桌面 runner 上的 work_state_ok / work_fail / state_lost 注入 / 检查点里的 oracle
+                                                   # 有 Xvfb + xfwm4/openbox + xdotool 时自动加跑一次真实窗口 发现 -> 激活 -> _NET_WM_PING 往返,
+                                                   # 以及占位窗口上的 title / statefile / screen oracle; 再有 mousepad + xclip 时跑一次 edit -> clipboard 往返
                                                    # /sys/fs/cgroup/cf 已委托给当前用户时自动加跑一次真实 cgroup 的档位读写
 ```
+
+## 12. 脚本与文件清单
+
+| 文件 | 何时用 | 作用 |
+|---|---|---|
+| `scripts/ubuntu/install_deps.sh [--hwe] [--subs]` | 一次 | apt 依赖 (xdotool, xclip, x11-utils, python3-xlib, dbus-x11, libnotify-bin, numpy, matplotlib …); `--hwe` 6.x 内核 (memory.reclaim); `--subs` 开源替代品 |
+| `scripts/ubuntu/check_env.sh` | 随时 | 一页体检: 会话类型 / 工具 (含 xclip) / cgroup v2 委托 / 本 shell 是否在 /cf / memory.reclaim / zram / snap 浏览器; 退出码 0 = 可以跑 |
+| `scripts/ubuntu/setup_cgroups.sh [--pid P] [--no-enter]` | 每次开机 (sudo) | 建 `/sys/fs/cgroup/cf`, 开 cpu/cpuset/memory/io 控制器, chown 给当前用户, 把 shell 移进 `cf/host` |
+| `scripts/ubuntu/cf_enter.sh` | 每个新终端 (`source`) | 等价于上一条, 显式传当前 shell 的 pid (tmux / VS Code 终端用这个) |
+| `scripts/ubuntu/cf_adopt.sh` | runner 内部 (sudo) | 把别的 uid 的进程 (Waydroid 里的 Android 应用) 移进 `/cf/<app>`; sudoers 规则由 `setup_waydroid.sh --install` 写 |
+| `scripts/ubuntu/setup_zram.sh [MB] [算法] / --off` | 每次开机 (sudo) | zstd zram swap (默认 4 GB), 让 `memory.high` 有地方放匿名页 |
+| `scripts/ubuntu/install_cn_apps.sh [--list] [--check] [DIR]` | 装应用 | 列出 13 个应用的下载页 / 架构 / 包名 / 手机版 fallback; 从目录批量安装 deb (跳过 x86_64-only) |
+| `scripts/ubuntu/setup_waydroid.sh [--install] [--status] [--stop]` | 有应用没有桌面版时 | Waydroid 仓库 + binder 模块 + init (一次); 每次登录起嵌套 weston X11 窗口 + 会话 + adb connect |
+| `scripts/ubuntu/install_mobile_apps.sh [--list] [--missing] [--from-phone SN pkg…] [--search 名]` | 同上 | 桌面版缺失的那些应用的手机版 APK: 下载并 `adb install`; 小艺从华为手机导出 |
+| `scripts/ubuntu/cf_launch.sh app…` | 首次登录 | 把应用启动进各自的 cgroup 并保持运行 (扫码 / 登录 / 关新手引导一次, 之后实验复用) |
+| `python3 run_linux.py CONFIG --probe / --catalog / --discover / --mobile-status / --scenario list / --work-plan / --launch / --release` | 诊断 | 环境与每应用可用性 / 目录表 / 桌面上实际的 WM_CLASS 与 cgroup 叶 / Android 状态 / 本配置会用哪些应用 / 每应用的脚本化操作与 oracle / 启动 / 清限制 |
+| `python3 run_linux.py CONFIG --policy … --eta … --T … --scenario … [--work] [--resume FILE]` | 单格实验 | 一次实验 → `results/<name>.jsonl` (+ `.log`, `.ckpt`); Ctrl+C 安全, `--resume` 续跑 |
+| `cf/linux/work.py` (`WorkDriver`: `X11WorkDriver` + `AdbWorkDriver`) | `--work` 内部 | 每类应用的默认脚本 (打草稿 / 滚动 / 缩放 / 上滑) 与内容 oracle (clipboard / title / screen / statefile / ui), 比较规则; `work_overrides` 按 id 覆盖 |
+| `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / WORK (+ WORK_S) / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
+| `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= PLACEHOLDERS= WORK= WORK_S= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → probe / catalog / mobile (/ work_plan) 快照 → 冒烟 (检查 state_lost / oom / COLD / work_fail = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
+| `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / Pareto 点 / 图 / Markdown 报告 |
+| `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |
+| `python3 -m cf.linux.placeholder_app --app ID --title T [--cpu f --mem MB --io-mbps n --notify-every s --workers k]` | 冒烟 / 占位 | 内置 X11 占位程序: 可控的 CPU / 内存 / 写盘 / 通知负载, 状态写到 `/tmp/cf_placeholder_<id>.json` |
+| `configs/ubuntu_cn_desktop.json` | 主配置 | 13 个应用、`substitute_kinds` / `mobile`、限流档位、轨迹、`dwell_s` 范围、`sample_every_s`、`placeholder_fill`、`work` / `work_s` / `work_overrides` |
+| `configs/ubuntu_placeholders.json` | 冒烟 | 4 个占位程序的最小配置 (任何 X11 会话可跑, 含 Xvfb) |
+| `results/<matrix>/{summary,summary_agg,per_app,pareto}.csv`, `plots/*.png`, `report.md`, `matrix.env`, `*.console.log` | 产物 | 表 / 图 / 报告 / 本次矩阵的参数与机器信息 / 每格控制台输出 |
