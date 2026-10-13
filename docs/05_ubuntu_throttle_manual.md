@@ -360,6 +360,8 @@ catalogue id (`APP`) / 命令行。常见修正:
 | `dwell_s` / `settle_s` / `warmup_dwell_s` | [5, 12] / 2 / 10 | 每步停留 / 切换后等待 / warmup 每应用停留 (秒)。`dwell_s` 给一个数 = 固定; 给 `[lo, hi]` = 每步按 seed 均匀抽样 (同一 seed 下各策略的每一步停留相同, 可直接对比); 每条 `step` 记录带 `dwell_s` |
 | `sample_every_s` | 2.0 | > 0 时停留期间每隔这么多秒做一次轻量采样 (PSI cpu/mem/io、zram、MemAvailable、swap in/out、每应用 PSS / swap / cpu / 写盘 / 节流时间 / tier) → `step.timeline`, 画时间序列 (`--plots-dir` 的 `*_timeline.png`); 0 关闭 |
 | `placeholder_fill` | false | true (或 `--placeholders`): 没装上的应用用内置占位程序顶替, **id 不变**, 场景 / 轨迹不变 (`meta.placeholders` 列出); 在真实应用装齐之前就能跑完整矩阵, 之后同一命令重跑即用真实应用 |
+| `work` / `work_s` | false / 3.0 | true (或 `--work`): 每步前台停留的开头在前台应用上做 `work_s` 秒 **脚本化操作** (打草稿 / 滚动 / 上滑), 切走前记一个内容 oracle, 回来时重读比较 → `launch.work_state_ok`, 不一致计入 `state_lost` 与 `work_fail` (§6.6) |
+| `work_overrides` | `{}` | 按应用 id 覆盖脚本: `{"wechat": {"kind": "none", "oracle": "screen"}}`; 字段 `kind` (`edit` `draft` `browse` `view` `swipe` `none`) / `oracle` (`clipboard` `title` `screen` `statefile` `ui` `none`) / `text` / `scroll` / `swipes` / `tolerance` (screen 的汉明距离容差, 默认 12/256 位) |
 | `minimize_background` | false | 切走的窗口是否最小化 (真实用户不会, 默认不做) |
 | `notifications` | true | 用 `dbus-monitor` 统计推送类应用的 `Notify` 调用 |
 | `adopt_strays` / `sudo_adopt` | true / false | 把 cgroup 外的同名进程移进来; 用户权限移不动时是否 `sudo scripts/ubuntu/cf_adopt.sh` (需 sudoers 免密, 见脚本头)。**有手机版应用时必须 `sudo_adopt: true`** (Android 进程属于其它 uid) |
@@ -367,7 +369,8 @@ catalogue id (`APP`) / 命令行。常见修正:
 | `min_ram_mb` | 6144 | 低于此 WARN |
 
 命令行可以覆盖最常改的项: `--policy --eta --T --scenario --seed --cpu-mode --cpu-cores --cpuset --mem-frac
---swap-max-mb --mem-hard --no-resident-cpu --dwell S [S] --sample-every S --placeholders --name --out-dir`。
+--swap-max-mb --mem-hard --no-resident-cpu --dwell S [S] --sample-every S --placeholders --work --work-s S --name --out-dir`;
+`--work-plan` 打印每个应用会用的脚本 / oracle 后退出。
 
 **关于 η 与预算的语义 (重要, 与 Android 版的差别)**: 一个 `shrunk` 应用在预算模型里仍占 `memory.high` = max(mem_frac × m_fg, mem_min_mb)
 (ρ_i = memory.high / m), 所以后台总占用有一个 **下限** floor = Σ(其它应用的 memory.high) ≈ mem_frac × (1 − 1/n) × Σ m_fg。
@@ -399,6 +402,7 @@ PROFILES="1c:0.5 1c:0.3 0.5c:0.5" POLICIES="none static" scripts/ubuntu/run_matr
 CPU_MODES="quota cpuset" RESIDENT="1 0" SWAP_CAPS="512 128" MEM_HARD=1 scripts/ubuntu/run_matrix.sh   # 单独点名变体
 MEM_FRAC=0.3 ETAS="0.4 0.6" scripts/ubuntu/run_matrix.sh                                 # 第二遍: 更小的 memory.high (文件名加 _mf0.3)
 PLACEHOLDERS=1 NIGHT=1 scripts/ubuntu/run_matrix.sh                                      # 没装上的应用用占位程序顶替, 先把矩阵跑通
+WORK=1 WORK_S=3 NIGHT=1 scripts/ubuntu/run_matrix.sh                                     # 每格加 --work: 脚本化操作 + 回来时的内容核对 (work_state_ok)
 DRY=1 FULL=1 scripts/ubuntu/run_matrix.sh                                                # 只列出会跑哪些格 / 命令
 QUICK=1 scripts/ubuntu/run_matrix.sh                                                     # office, none+static, T=15
 # 结束时自动: summary.csv / summary_agg.csv / per_app.csv / pareto.csv / plots/*.png / report.md (都在 OUT 目录)
@@ -407,6 +411,7 @@ QUICK=1 scripts/ubuntu/run_matrix.sh                                            
 scripts/ubuntu/run_all.sh                           # 默认矩阵 -> results/ubuntu_all/{env,probe,catalog}.txt + matrix/
 PRESET=night scripts/ubuntu/run_all.sh              # 过夜档 (推荐在 tmux 里跑: tmux new -s cf)
 PRESET=full PLACEHOLDERS=1 scripts/ubuntu/run_all.sh
+WORK=1 PRESET=night scripts/ubuntu/run_all.sh       # 同上 + 脚本化操作; 冒烟阶段把 work_fail = 0 也当作不变量, OUT/work_plan.txt 记下每个应用的脚本
 PRESET=quick scripts/ubuntu/run_all.sh              # 只做冒烟
 SKIP_SMOKE=1 OUT=results/run2 T=40 scripts/ubuntu/run_all.sh
 
@@ -424,7 +429,46 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --release
 → 停留 `dwell_s` 再采样 → 比较两次采样: 后台各应用拿到的 CPU、被节流的时间、写盘字节、通知条数、PSS / swap、
 `memory.events`, 以及 **是否有进程 / 窗口消失或 OOM kill** → 写一条 `step` 记录 + 检查点。
 
-### 6.1 日常使用: `focusd`
+### 6.6 用脚本代替人工点击: `--work` 与 `work_state_ok`
+
+`state_check` 只看进程 / 窗口 / OOM; 用户关心的是 **内容**: 没发出去的草稿、滚到一半的页面、CAD 里的视图。`--work` 把 §8 第 3 条
+的手工检查自动化 (`cf/linux/work.py`):
+
+1. 每步把应用切到前台、`settle_s` 之后, 先在它身上做 `work_s` 秒脚本化操作 (占用停留时间的开头, 不超过 dwell 的 60%; warmup 时也做一轮);
+2. 停留结束、切走 **之前** 读一次 oracle (一个能代表当前可见状态的小摘要) 存起来;
+3. 这个应用下次回到前台 (从 `bg` 或 `shrunk` 回来, `settle_s` 之后) 立刻再读一次, 与存的比较 → `launch.work_state_ok` = True / False / None
+   (None = 没有可比对象: 首次、COLD 重启、oracle 读不到); False 同时写 `state_lost[app].work_state = {oracle, before, after}`。
+
+| 应用 | 默认脚本 (`kind`) | 默认 oracle | 说明 |
+|---|---|---|---|
+| 微信 / QQ / 钉钉 | `draft`: 往焦点输入框键入 `cf-work <id> t<step> 草稿未保存 ` | `clipboard`: ctrl+a ctrl+c 后剪贴板文本的长度 + md5 | 需要先手动点开一个会话让输入框有焦点 (登录时顺手做) |
+| WPS | `edit`: 键入同样一行 + 回车 | `clipboard` | 文档不保存; 回来时 ctrl+a 全选再 End 取消选区 |
+| 浏览器 / 腾讯视频 / 哔哩哔哩 | `browse`: 滚轮下翻 `scroll` 格再回退 1/4 | `title`: `_NET_WM_NAME` (页面标题) | 像素会随视频变化, 所以只认标题; 页面被重载会换标题 / 回到顶部 |
+| 百度网盘 / 小艺 | `none` | `title` | 下载本身在后台进行 (`write_mb` 已经度量) |
+| 中望CAD / 悟空图像 / kdenlive / librecad / gimp | `view`: 滚轮缩放 `scroll` 格 | `screen`: 窗口像素 16×16 均值哈希 (python-xlib `get_image`, 只取客户区), 汉明距离 ≤ `tolerance` 算相同 | 对光标闪烁、时钟数字不敏感, 对视图重置 / 重新打开敏感 |
+| 占位程序 | `none` | `statefile`: `/tmp/cf_placeholder_<id>.json` 的 `pid` 不变且 `counter` 不回退 | 冒烟配置用 |
+| 手机版 (Waydroid) | 下载 / 视频类 `swipe` (上滑 `swipes` 次, 短视频翻页); 推送类 `draft` (`input text`); 计算类 `view` (滑动) | `ui`: 最前 Activity + uiautomator dump 里全部文字 (数字抹掉) 的 md5; 也可选 `screen` (`screencap`) | 冷启动回到 Splash / 首页 → Activity 不同 → False |
+
+脚本只通过 XTEST (`xdotool type / key / click`) 发给 **当前活动窗口**, 发之前核对 `_NET_ACTIVE_WINDOW` 就是该应用 (否则记 `not-active`,
+不输入); 手机版核对 `foreground_pkg`。失败不会中断实验 (`step.work.status` 记录 `ok / skipped / not-active / error: …`)。
+
+```bash
+python3 run_linux.py configs/ubuntu_cn_desktop.json --work-plan            # 每个应用会做什么 / 用什么 oracle (含未安装的)
+python3 run_linux.py configs/ubuntu_placeholders.json --policy lru --eta 0.6 --T 12 --work --work-s 1   # 占位程序上试一遍
+python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 60 --work      # 真实应用
+```
+
+数据: `step.work` (kind / status / 耗时), `step.launch.work_state_ok` + `work_check {before, after}`, `warmup.work`; 汇总列
+`work_checks` (回到前台时做过比较的次数) / `work_fail` (不一致的次数, **应为 0**), 每应用表同名两列; report.md 的不变量一行里有它们;
+`run_all.sh` 的冒烟检查把 `work_fail = 0` 和 `state_lost / oom / COLD = 0` 一起当作继续跑矩阵的前提。
+
+注意事项: (a) `clipboard` oracle 会覆盖系统剪贴板, 实验期间不要指望剪贴板里的东西; 不想碰剪贴板就 `work_overrides` 改成
+`"oracle": "screen"` 或 `"title"`。(b) `draft` 文本会越积越长 (每步追加一段), 60 步 ≈ 3 KB, 对输入框无压力; 想清空就在下一次登录时删掉。
+(c) 只支持 X11 (XTEST / `get_image`); Wayland 下 `--work` 会全部 `not-active` / `error`。(d) 手机版 `ui` oracle 依赖 `uiautomator dump`,
+Waydroid 上要 1–3 s; 列表页的推荐流本身会刷新 → 用 `tolerance` 更大的 `screen` 或 `kind: none`。(e) `work_s` 计入 dwell 的开头, 所以
+`dwell_s` 的下限至少要 ≥ 2 × `work_s`。(f) 微信 / QQ 在没有焦点输入框时 `draft` 的按键会被吞掉, 不影响实验, 只是 `clipboard` 读到的是空 → None。
+
+### 6.7 日常使用: `focusd`
 
 实验 runner 自己驱动窗口切换; 想在平时使用虚拟机时也享受 "切走就限流", 开一个守护进程:
 
@@ -445,7 +489,8 @@ Ctrl+C / SIGTERM 时解除全部限制。启动时也会先清一遍残留限制
 `results/<name>.jsonl` 每行一条记录: `meta` (配置、主机能力、应用类别、`kinds` (desktop / mobile …)、替代关系、限流档位) → `warmup` × N → `budget`
 → `trace` → `step` × T → (`interrupted` / `resume`)* → `end`。`step` 记录保留 Android 版的全部键 (`frozen`≡`throttled`,
 `compressed`≡`shrunk`, `was_compressed`≡`was_shrunk`, `M_bg_kb`, `budget_violation`, `after_launch` / `after_dwell` 采样 …),
-`cf.analyze` 原样可用; 新增 `tiers`, `bg` (每应用的 Δcpu / Δthrottled / Δwrite / 通知 / cg 内存), `state_lost`, `notifications`。
+`cf.analyze` 原样可用; 新增 `tiers`, `bg` (每应用的 Δcpu / Δthrottled / Δwrite / 通知 / cg 内存), `state_lost`, `notifications`,
+`dwell_s`, `timeline`, 以及 `--work` 时的 `work` 与 `launch.work_state_ok` / `launch.work_check`。
 
 ```bash
 python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl                       # 表格
@@ -459,7 +504,7 @@ swap in·out + 下载 MB + 通知), `sample_every_s > 0` 时再加 `<name>_timel
 以及跨格的 `latency_cdf.png` (每策略: 从 bg 回来 vs 从 shrunk 回来的时延 CDF) 和 `bg_tradeoff.png` (相对 `none` 基线的后台内存节省 % vs P95 时延)。
 `--md` 把不变量 (state_lost / oom / n_cold 合计)、每格表、复本聚合 (mean ± sd)、day 轨迹分段、每应用表、不可达 η 提示和图链接写成一份 report.md。
 `--per-app` 的列: `n_req n_cold lat_bg_p50_ms lat_shrunk_p50_ms ping_shrunk_p50_ms m_fg_mb pss_bg_avg_mb pss_shrunk_avg_mb
-mem_bg_avg_mb mem_shrunk_avg_mb t_fg_s t_bg_s t_shrunk_s cores_bg_avg throttled_pct write_mb notifs cpu_s majflt state_lost`
+mem_bg_avg_mb mem_shrunk_avg_mb t_fg_s t_bg_s t_shrunk_s cores_bg_avg throttled_pct write_mb notifs cpu_s majflt state_lost work_checks work_fail`
 (`pss_*` = 进程映射的 PSS+SwapPss; `mem_*` = cgroup `memory.current`, 含应用写出的页缓存, 下载类应用的 `mem_bg` 会明显大于 PSS,
 被 `memory.high` 压到 shrunk 时这些缓存页先被丢掉) — 用来回答 "微信在 shrunk 里待了多久、
 切回来平均多慢、这期间推了几条通知"、"百度网盘在后台 1 核下写了多少 MB" 这类按应用的问题。
@@ -475,7 +520,8 @@ mem_bg_avg_mb mem_shrunk_avg_mb t_fg_s t_bg_s t_shrunk_s cores_bg_avg throttled_
 | `download_mb` / `download_mbps` | 下载类应用在后台写盘的量与速率 | 限流后仍 > 0 (下载在继续, 只是慢) |
 | `notif_total` / `notif_per_h` | 推送类应用在后台发出的通知 | 限流后仍 > 0 |
 | `compute_cpu_s` | 计算类应用在后台得到的 CPU 秒 | |
-| `state_lost_events` / `oom_kills` | 进程 / 窗口消失、OOM kill | **必须为 0** |
+| `state_lost_events` / `oom_kills` | 进程 / 窗口消失、OOM kill、脚本化操作的内容丢失 | **必须为 0** |
+| `work_checks` / `work_fail` | `--work` 时: 应用回到前台时做过内容核对的次数 / 不一致 (`work_state_ok = False`) 的次数 (§6.6) | `work_fail` **必须为 0**; `work_checks` 接近 T − n_cold − 首次访问数 |
 | `swap_write_mb` / `swap_read_mb` / `refaults` | zram 换出 / 换入 | 换入 = WARM 切换的代价 |
 | `psi_cpu_some_ms` | 全系统 CPU 压力 | 前台卡顿的旁证 |
 | `cpu` / `mem_frac` / `cpu_throttle_resident` / `substitutions` | 本格的限流档位与替代关系 (桌面版缺失时用了谁的手机版) | 用来分组 |
@@ -493,6 +539,8 @@ mem_bg_avg_mb mem_shrunk_avg_mb t_fg_s t_bg_s t_shrunk_s cores_bg_avg throttled_
    跑完实验回去看: 光标、滚动位置、草稿都应原样 (冻结版本也能做到这点, 限流版本额外保证后台任务继续推进:
    下载进度条在动, 微信消息在实验中照常到达并弹通知)。
 4. 对照: `--mem-hard` 打开 `memory.max`, 看 `oom_kills` 变成非 0 时 `state_lost_events` 如何跟着出现 — 这就是我们默认不设硬上限的原因。
+5. **第 3 条的自动版**: `--work` (§6.6) 让 runner 自己打草稿 / 滚页面 / 上滑, 切走前记下内容摘要, 回来时核对 → `work_state_ok`;
+   跑完看 `work_fail = 0`, 以及 `work_checks` 覆盖了多少次从 `shrunk` 回来的切换 (`per_app.csv` 按应用看)。
 
 ## 9. 与 Android 版 / 文档模型的对应
 
@@ -582,6 +630,16 @@ post-inst 里跑 `snap install firefox`, snap 商店连不上 (代理 / 国内�
 **下载类应用的 `download_mbps` 很低且各格都一样** — 代理在整形流量 (§2.5), 或者下载源本身限速; 实验前 `unset http_proxy https_proxy all_proxy`,
 并在 `none` 基线里确认未限流时的速率明显更高。
 
+**`--work`: 所有 step 的 `work.status` 都是 `not-active`** — `xdotool` 发键前核对的是 `_NET_ACTIVE_WINDOW`, 它不是该应用的窗口:
+焦点保护 (见 `activate` 失败一条) 或该应用弹了对话框; `--discover` 看当前活动窗口。Wayland 会话下也是这个现象 (只支持 X11)。
+
+**`--work`: `work_state_ok` 全是 None, `work_checks = 0`** — oracle 读不到: `clipboard` 需要 `xclip` (`check_env.sh` 有提示) 且该应用的输入框有焦点
+(微信 / QQ 要先点开一个会话); `screen` 需要 `python3-xlib` 且窗口没被最小化 (`minimize_background` 必须是 false); 手机版 `ui` 需要 `uiautomator`
+(Waydroid 自带) 和 adb。看 `step.launch.work_check.after.error`。
+
+**`--work`: 浏览器 / 哔哩哔哩的 `work_fail` 偶发** — 页面自己换了标题 (视频自动连播、标签页标题带未读数)。把那个应用的 oracle 改成 `screen`
+并放大 `tolerance`, 或 `kind: none` + `oracle: title` 只看窗口还在不在; 真正的上下文丢失通常伴随 `n_cold > 0` 或 `ping` 很长。
+
 **macOS 侧** — 跑矩阵时关闭 Spotlight 索引新建的结果目录 (如果是共享目录), 关闭 Time Machine; UTM 不要开 "Balloon" 内存气球。
 
 ## 11. 测试
@@ -590,7 +648,10 @@ post-inst 里跑 `snap install firefox`, snap 商店连不上 (代理 / 国内�
 python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋钮值 / 伪 cgroupfs / xprop 解析 / 伪桌面上的完整 runner (静态与预算策略、
                                                    # 无进程被杀、WARM、state_lost 注入、resume 重放档位) / focusd 决策 / 应用目录与 桌面->手机版 替代链 /
                                                    # Notify 解析 / 手机版: waydroid status、dumpsys 解析, 伪 Android 运行时上的 启动-收养-通知 与 preflight
-                                                   # 有 Xvfb + xfwm4/openbox + xdotool 时自动加跑一次真实窗口 发现 -> 激活 -> _NET_WM_PING 往返
+                                                   # --work: 每类应用的默认脚本 / oracle、均值哈希与比较规则、伪 Android 上的上滑 + ui oracle、
+                                                   # 伪桌面 runner 上的 work_state_ok / work_fail / state_lost 注入 / 检查点里的 oracle
+                                                   # 有 Xvfb + xfwm4/openbox + xdotool 时自动加跑一次真实窗口 发现 -> 激活 -> _NET_WM_PING 往返,
+                                                   # 以及占位窗口上的 title / statefile / screen oracle; 再有 mousepad + xclip 时跑一次 edit -> clipboard 往返
                                                    # /sys/fs/cgroup/cf 已委托给当前用户时自动加跑一次真实 cgroup 的档位读写
 ```
 
@@ -598,8 +659,8 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 
 | 文件 | 何时用 | 作用 |
 |---|---|---|
-| `scripts/ubuntu/install_deps.sh [--hwe] [--subs]` | 一次 | apt 依赖 (xdotool, x11-utils, python3-xlib, dbus-x11, libnotify-bin, numpy, matplotlib …); `--hwe` 6.x 内核 (memory.reclaim); `--subs` 开源替代品 |
-| `scripts/ubuntu/check_env.sh` | 随时 | 一页体检: 会话类型 / 工具 / cgroup v2 委托 / 本 shell 是否在 /cf / memory.reclaim / zram / snap 浏览器; 退出码 0 = 可以跑 |
+| `scripts/ubuntu/install_deps.sh [--hwe] [--subs]` | 一次 | apt 依赖 (xdotool, xclip, x11-utils, python3-xlib, dbus-x11, libnotify-bin, numpy, matplotlib …); `--hwe` 6.x 内核 (memory.reclaim); `--subs` 开源替代品 |
+| `scripts/ubuntu/check_env.sh` | 随时 | 一页体检: 会话类型 / 工具 (含 xclip) / cgroup v2 委托 / 本 shell 是否在 /cf / memory.reclaim / zram / snap 浏览器; 退出码 0 = 可以跑 |
 | `scripts/ubuntu/setup_cgroups.sh [--pid P] [--no-enter]` | 每次开机 (sudo) | 建 `/sys/fs/cgroup/cf`, 开 cpu/cpuset/memory/io 控制器, chown 给当前用户, 把 shell 移进 `cf/host` |
 | `scripts/ubuntu/cf_enter.sh` | 每个新终端 (`source`) | 等价于上一条, 显式传当前 shell 的 pid (tmux / VS Code 终端用这个) |
 | `scripts/ubuntu/cf_adopt.sh` | runner 内部 (sudo) | 把别的 uid 的进程 (Waydroid 里的 Android 应用) 移进 `/cf/<app>`; sudoers 规则由 `setup_waydroid.sh --install` 写 |
@@ -608,13 +669,14 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `scripts/ubuntu/setup_waydroid.sh [--install] [--status] [--stop]` | 有应用没有桌面版时 | Waydroid 仓库 + binder 模块 + init (一次); 每次登录起嵌套 weston X11 窗口 + 会话 + adb connect |
 | `scripts/ubuntu/install_mobile_apps.sh [--list] [--missing] [--from-phone SN pkg…] [--search 名]` | 同上 | 桌面版缺失的那些应用的手机版 APK: 下载并 `adb install`; 小艺从华为手机导出 |
 | `scripts/ubuntu/cf_launch.sh app…` | 首次登录 | 把应用启动进各自的 cgroup 并保持运行 (扫码 / 登录 / 关新手引导一次, 之后实验复用) |
-| `python3 run_linux.py CONFIG --probe / --catalog / --discover / --mobile-status / --scenario list / --launch / --release` | 诊断 | 环境与每应用可用性 / 目录表 / 桌面上实际的 WM_CLASS 与 cgroup 叶 / Android 状态 / 本配置会用哪些应用 / 启动 / 清限制 |
-| `python3 run_linux.py CONFIG --policy … --eta … --T … --scenario … [--resume FILE]` | 单格实验 | 一次实验 → `results/<name>.jsonl` (+ `.log`, `.ckpt`); Ctrl+C 安全, `--resume` 续跑 |
-| `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
-| `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= PLACEHOLDERS= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → probe / catalog / mobile 快照 → 冒烟 (检查 state_lost / oom / COLD = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
+| `python3 run_linux.py CONFIG --probe / --catalog / --discover / --mobile-status / --scenario list / --work-plan / --launch / --release` | 诊断 | 环境与每应用可用性 / 目录表 / 桌面上实际的 WM_CLASS 与 cgroup 叶 / Android 状态 / 本配置会用哪些应用 / 每应用的脚本化操作与 oracle / 启动 / 清限制 |
+| `python3 run_linux.py CONFIG --policy … --eta … --T … --scenario … [--work] [--resume FILE]` | 单格实验 | 一次实验 → `results/<name>.jsonl` (+ `.log`, `.ckpt`); Ctrl+C 安全, `--resume` 续跑 |
+| `cf/linux/work.py` (`WorkDriver`: `X11WorkDriver` + `AdbWorkDriver`) | `--work` 内部 | 每类应用的默认脚本 (打草稿 / 滚动 / 缩放 / 上滑) 与内容 oracle (clipboard / title / screen / statefile / ui), 比较规则; `work_overrides` 按 id 覆盖 |
+| `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / WORK (+ WORK_S) / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
+| `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= PLACEHOLDERS= WORK= WORK_S= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → probe / catalog / mobile (/ work_plan) 快照 → 冒烟 (检查 state_lost / oom / COLD / work_fail = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
 | `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / Pareto 点 / 图 / Markdown 报告 |
 | `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |
 | `python3 -m cf.linux.placeholder_app --app ID --title T [--cpu f --mem MB --io-mbps n --notify-every s --workers k]` | 冒烟 / 占位 | 内置 X11 占位程序: 可控的 CPU / 内存 / 写盘 / 通知负载, 状态写到 `/tmp/cf_placeholder_<id>.json` |
-| `configs/ubuntu_cn_desktop.json` | 主配置 | 13 个应用、`substitute_kinds` / `mobile`、限流档位、轨迹、`dwell_s` 范围、`sample_every_s`、`placeholder_fill` |
+| `configs/ubuntu_cn_desktop.json` | 主配置 | 13 个应用、`substitute_kinds` / `mobile`、限流档位、轨迹、`dwell_s` 范围、`sample_every_s`、`placeholder_fill`、`work` / `work_s` / `work_overrides` |
 | `configs/ubuntu_placeholders.json` | 冒烟 | 4 个占位程序的最小配置 (任何 X11 会话可跑, 含 Xvfb) |
 | `results/<matrix>/{summary,summary_agg,per_app,pareto}.csv`, `plots/*.png`, `report.md`, `matrix.env`, `*.console.log` | 产物 | 表 / 图 / 报告 / 本次矩阵的参数与机器信息 / 每格控制台输出 |
