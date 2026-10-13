@@ -11,6 +11,7 @@ echo "== context_freeze / Ubuntu throttling back-end: environment check"
 [ -n "${DISPLAY:-}" ] && pass "DISPLAY=$DISPLAY" || fail "no DISPLAY (open a terminal inside the desktop session)"
 for t in xdotool xprop python3 dbus-monitor zramctl; do command -v $t >/dev/null && pass "$t" || fail "$t missing (scripts/ubuntu/install_deps.sh)"; done
 python3 -c "import Xlib" 2>/dev/null && pass "python3-xlib" || warn "python3-xlib missing: no _NET_WM_PING latency"
+command -v xclip >/dev/null && pass "xclip" || warn "xclip missing: --work has no clipboard oracle (apt install xclip)"
 grep -qs "cgroup2 /sys/fs/cgroup" /proc/mounts && pass "cgroup v2 unified" || fail "cgroup v2 not mounted at /sys/fs/cgroup"
 if [ -d /sys/fs/cgroup/cf ]; then
   [ -w /sys/fs/cgroup/cf/cgroup.procs ] && pass "/sys/fs/cgroup/cf writable [$(cat /sys/fs/cgroup/cf/cgroup.subtree_control)]" || fail "/sys/fs/cgroup/cf not writable by $(id -un): sudo scripts/ubuntu/setup_cgroups.sh"

@@ -9,6 +9,7 @@
 #   PRESET=full  scripts/ubuntu/run_all.sh                     # ~350 cells, several days; resumable, run it in tmux
 #   PRESET=quick scripts/ubuntu/run_all.sh                     # smoke test only (office, none + static, T=15)
 #   PLACEHOLDERS=1 PRESET=night scripts/ubuntu/run_all.sh      # apps not installed yet run as the bundled placeholder
+#   WORK=1 PRESET=night scripts/ubuntu/run_all.sh              # scripted work on the foreground app, content re-checked on return (work_state_ok)
 #   OUT=results/run3 T=60 CONFIG=configs/ubuntu_cn_desktop.json scripts/ubuntu/run_all.sh
 #   SKIP_SMOKE=1 scripts/ubuntu/run_all.sh                     # smoke already passed; go straight to the matrix
 #   ZRAM_MB=0 scripts/ubuntu/run_all.sh                        # do not touch swap (default: create 4 GB zram if none)
@@ -36,7 +37,7 @@ esac
 mkdir -p "$OUT"
 LOG="$OUT/run_all.log"
 exec > >(tee -a "$LOG") 2>&1
-echo "== run_all $(date -Is): preset=$PRESET T=$T config=$CONFIG out=$OUT placeholders=${PLACEHOLDERS:-0}"
+echo "== run_all $(date -Is): preset=$PRESET T=$T config=$CONFIG out=$OUT placeholders=${PLACEHOLDERS:-0} work=${WORK:-0}"
 
 step() { echo; echo "==== [$1] $2"; }
 done_marker() { [ -f "$OUT/.done_$1" ]; }
@@ -92,6 +93,10 @@ python3 run_linux.py "$CONFIG" --scenario list > "$OUT/apps_resolved.txt" || tru
 if command -v waydroid >/dev/null 2>&1; then
   python3 run_linux.py "$CONFIG" --mobile-status > "$OUT/mobile_status.txt" 2>&1 || true
 fi
+if [ "${WORK:-0}" = 1 ]; then
+  python3 run_linux.py "$CONFIG" --work-plan ${PLACEHOLDERS:+--placeholders} | tee "$OUT/work_plan.txt" || true
+  command -v xclip >/dev/null 2>&1 || echo "  note: xclip missing -> the clipboard oracle is unavailable (apt install xclip)"
+fi
 if grep -q '^missing:' "$OUT/apps_resolved.txt" && [ "${PLACEHOLDERS:-0}" != 1 ]; then
   echo "  note: $(grep -c '^missing:' "$OUT/apps_resolved.txt") app(s) are not installed and will be skipped;"
   echo "        install them (manual §4) or run with PLACEHOLDERS=1 to keep them in the scenarios as placeholders."
@@ -100,7 +105,8 @@ fi
 # 4. smoke test ------------------------------------------------------------------------------------
 if [ "${SKIP_SMOKE:-0}" != 1 ] && ! done_marker smoke; then
   step 4 "smoke test (office, none + static, T=15)"
-  QUICK=1 OUT="$OUT/smoke" PLACEHOLDERS="${PLACEHOLDERS:-0}" EXTRA="${EXTRA:-}" scripts/ubuntu/run_matrix.sh "$CONFIG"
+  QUICK=1 OUT="$OUT/smoke" PLACEHOLDERS="${PLACEHOLDERS:-0}" WORK="${WORK:-0}" WORK_S="${WORK_S:-}" EXTRA="${EXTRA:-}" \
+    scripts/ubuntu/run_matrix.sh "$CONFIG"
   python3 - "$OUT/smoke" <<'PYEOF'
 import glob, os, sys
 from cf.analyze import load
@@ -112,10 +118,11 @@ for f in files:
     s = summarize(load(f))
     if not s.get("finished", True): print(f"!! {os.path.basename(f)}: unfinished"); bad = 1; continue
     lost, cold, oom = s.get("state_lost_events", 0), s.get("n_cold", 0), s.get("oom_kills", 0)
-    print(f"  {os.path.basename(f):40s} state_lost={lost} oom={oom} n_cold={cold} "
+    wchk, wfail = s.get("work_checks", 0), s.get("work_fail", 0)
+    print(f"  {os.path.basename(f):40s} state_lost={lost} oom={oom} n_cold={cold} work={wchk}/{wfail} "
           f"lat_p50={s.get('lat_p50_ms')} ms  bg_pss={s.get('bg_pss_avg_mb')} MB")
-    if lost or cold or oom: bad = 1
-if bad: print("!! smoke test invariants violated (state_lost / oom / COLD must be 0) - see manual §7 before running the matrix")
+    if lost or cold or oom or wfail: bad = 1
+if bad: print("!! smoke test invariants violated (state_lost / oom / COLD / work_fail must be 0) - see manual §7 before running the matrix")
 sys.exit(bad)
 PYEOF
   mark_done smoke
@@ -128,7 +135,7 @@ case "$PRESET" in
   night) export NIGHT=1 ;;
   full)  export FULL=1 ;;
 esac
-export PLACEHOLDERS="${PLACEHOLDERS:-0}" EXTRA="${EXTRA:-}" MEM_FRAC="${MEM_FRAC:-}"
+export PLACEHOLDERS="${PLACEHOLDERS:-0}" WORK="${WORK:-0}" WORK_S="${WORK_S:-}" EXTRA="${EXTRA:-}" MEM_FRAC="${MEM_FRAC:-}"
 OUT="$OUT/matrix" scripts/ubuntu/run_matrix.sh "$CONFIG" "$T"
 
 # 6. done -----------------------------------------------------------------------------------------------

@@ -7,7 +7,7 @@ set -euo pipefail
 if [ "$(id -u)" != 0 ]; then echo "run with sudo" >&2; exit 1; fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q xdotool x11-utils x11-xserver-utils python3-xlib python3-pip python3-numpy \
+apt-get install -y -q xdotool xclip x11-utils x11-xserver-utils python3-xlib python3-pip python3-numpy \
   python3-matplotlib dbus-x11 libnotify-bin util-linux wmctrl procps git
 for a in "$@"; do
   case "$a" in

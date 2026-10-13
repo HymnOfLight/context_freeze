@@ -16,6 +16,7 @@
 #   FULL=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60     # everything above with full lists (~350 cells, several days; resumable)
 #   QUICK=1 scripts/ubuntu/run_matrix.sh                                      # smoke test: office, none + static, T=15
 #   PLACEHOLDERS=1 scripts/ubuntu/run_matrix.sh                               # apps not installed yet run as placeholders (same ids)
+#   WORK=1 WORK_S=3 scripts/ubuntu/run_matrix.sh                              # scripted work on the foreground app + work_state_ok oracle (--work)
 #   DRY=1 FULL=1 scripts/ubuntu/run_matrix.sh                                 # only list the cells / commands, run nothing
 #
 # `none` and `static` ignore eta and are run once per scenario / seed (eta=1.0 and 0.0 in the file name).
@@ -67,6 +68,8 @@ OUT="${OUT:-results/ubuntu_matrix_$(date +%Y%m%d-%H%M%S)}"
 M_FG_FROM="${M_FG_FROM:-}"
 EXTRA="${EXTRA:-}"                  # extra run_linux.py flags, e.g. "--sample-every 2 --dwell 5 12"
 [ "${PLACEHOLDERS:-0}" = 1 ] && EXTRA="$EXTRA --placeholders"
+WORK="${WORK:-0}"                   # 1: --work (typing / scrolling / swiping on the foreground app, content oracle re-checked on return)
+[ "$WORK" = 1 ] && EXTRA="$EXTRA --work${WORK_S:+ --work-s $WORK_S}"
 [ -n "$MEM_FRAC" ] && EXTRA="$EXTRA --mem-frac $MEM_FRAC"
 SUFFIX="${MEM_FRAC:+_mf$MEM_FRAC}"
 DRY="${DRY:-0}"
@@ -85,7 +88,7 @@ echo "== matrix dir: $OUT  (T=$T, scenarios: $SCENARIOS, policies: $POLICIES, et
 [ -n "$M_FG_FROM" ] && echo "== budget denominator (m_fg) from: $M_FG_FROM"
 [ "$DRY" = 1 ] || { echo "date=$(date -Is)"; echo "config=$CONFIG"; echo "T=$T"; echo "scenarios=$SCENARIOS"; echo "policies=$POLICIES";
   echo "etas=$ETAS"; echo "seeds=$SEEDS"; echo "profiles=$PROFILES"; echo "cpu_modes=$CPU_MODES"; echo "resident=$RESIDENT";
-  echo "swap_caps=$SWAP_CAPS"; echo "mem_hard=$MEM_HARD"; echo "mem_frac=$MEM_FRAC"; echo "extra=$EXTRA"; echo "kernel=$(uname -r)";
+  echo "swap_caps=$SWAP_CAPS"; echo "mem_hard=$MEM_HARD"; echo "mem_frac=$MEM_FRAC"; echo "work=$WORK"; echo "extra=$EXTRA"; echo "kernel=$(uname -r)";
   echo "ram_mb=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 ))"; } > "$OUT/matrix.env"
 
 python3 - "$CONFIG" "$T" "$OUT" "$POLICIES" "$ETAS" "$SEEDS" "$SCENARIOS" "$PROFILES" "$CPU_MODES" "$RESIDENT" "$SWAP_CAPS" "$MEM_HARD" <<'PYEOF' || true
