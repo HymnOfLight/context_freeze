@@ -124,17 +124,19 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --mobile-status
 然后把 `configs/ubuntu_cn_desktop.json` 的 `"sudo_adopt": false` 改成 `true` (Android 进程属于别的 uid, 移进 cgroup 要 root)。
 小艺从华为手机拉: `scripts/ubuntu/install_mobile_apps.sh --from-phone <序列号> com.huawei.vassistant com.huawei.hwid`。
 
-**第 6 步 首次登录、核对窗口、跑实验**
+**第 6 步 统一账号登录、核对窗口、跑实验**
 
 ```bash
+cp configs/accounts.example.json configs/accounts.json             # 填上实验专用手机号 (一个号注册全部应用; git 忽略此文件)
 source scripts/ubuntu/cf_enter.sh
-scripts/ubuntu/cf_launch.sh wechat qq dingtalk wps baidunetdisk    # 逐个扫码 / 登录 / 关新手引导; 它们保持运行, 后面直接复用
+scripts/ubuntu/cf_onboard.sh                                       # 逐个: 启动进 cgroup -> 提示登录方式并等主窗口出现 -> 提示准备动作 -> 演练一轮脚本操作
+scripts/ubuntu/cf_onboard.sh --check                               # 哪些已登录 / 就绪 (results/onboard/state.json); 没就绪的 cf_onboard.sh <id> 重做
 python3 run_linux.py configs/ubuntu_cn_desktop.json --discover     # WM_CLASS / 命令名与目录不同的, 写进 app_overrides
 python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 60
 PRESET=night scripts/ubuntu/run_all.sh                             # 一条命令: 体检 → 快照 → 冒烟 → 过夜矩阵 → report.md (tmux 里跑)
 ```
 
-应用还没装齐也能先把数据跑出来: `PLACEHOLDERS=1 PRESET=night scripts/ubuntu/run_all.sh` (没装的用占位程序顶替, id 不变; 装齐后同一命令重跑)。
+账号怎么注册、每个应用在 Linux 上怎么登录、登录后要停在什么界面, 见 §4.6。应用还没装齐也能先把数据跑出来: `PLACEHOLDERS=1 PRESET=night scripts/ubuntu/run_all.sh` (没装的用占位程序顶替, id 不变; 装齐后同一命令重跑)。
 卡住时先看 §10: Wayland 会话、shell 不在 /cf、snap 进程逃出 cgroup、无 swap、Waydroid 的 binder / adb 都有条目。
 
 ---
@@ -358,7 +360,45 @@ catalogue id (`APP`) / 命令行。常见修正:
 * 命令名 / WM_CLASS 与 catalogue 不同 (厂商改版) → 在 `app_overrides` 里改 `cmd` / `match` / `wm_class` / `name_rx`;
 * 进程在 cgroup 外 (`stray`) → runner 默认 `adopt_strays=true` 会把匹配 `match` 的进程移进来; snap / D-Bus 激活的进程移不动时
   见 §10 (`sudo_adopt`);
-* 微信等每次启动都要扫码的应用: 不要让 runner 启动它, 先 `cf_launch.sh` 登好。
+* 微信等每次启动都要扫码的应用: 不要让 runner 启动它, 先 `cf_launch.sh` / `cf_onboard.sh` 登好。
+
+### 4.6 统一账号: 注册、登录、模拟用户操作 (`scripts/ubuntu/cf_onboard.sh`)
+
+**一个实验专用手机号, 所有应用用它注册。** 厂商的 Linux 客户端一律不能注册, 注册在手机 App 里做一次 (微信 / QQ 必须在手机上注册并保持登录,
+因为它们的 Linux 版只能用这部手机扫码登录; 钉钉 / 百度网盘 / B 站 / WPS 用手机号 + 短信验证码即可; 中望 CAD 在官网注册并申请 Linux 试用授权)。
+把号码和各应用的账号写进 `configs/accounts.json` (从 `accounts.example.json` 复制, git 忽略), `cf_onboard.sh` 逐个应用提示该用哪个账号。
+
+| 应用 | Linux 版登录方式 | 登录后停在哪 (给 `--work` 脚本用) |
+|---|---|---|
+| 微信 | 手机微信扫码 + 手机上确认; 没有密码登录, **每次冷启动都要重扫** | 点开 "文件传输助手", 输入框点一下 (`draft` 往这里打字, 不发送) |
+| QQ | 手机 QQ 扫码 (或 QQ 号 + 密码) | 点开 "我的电脑" / 任一会话, 输入框点一下 |
+| 钉钉 | 手机号 + 验证码 / 手机钉钉扫码; 首次建一个组织 "cf-bench" | 点开一个会话, 输入框点一下, 关掉引导 |
+| WPS | 可不登录 (关掉弹窗) | 新建空白文字文档, 光标在正文 (`edit` 打字 + 回车, 不保存) |
+| 百度网盘 | 手机百度网盘扫码 / 手机号验证码 | 挂一个大文件下载任务 (后台下载负载), 停在传输列表 |
+| 哔哩哔哩 / 腾讯视频 | 可不登录; 扫码 / 验证码 | 首页推荐流 / 剧集页 (+ 一个缓存任务) (`browse` 滚动) |
+| Chrome / Edge / Firefox | 不需要账号 (不要登录浏览器同步) | 一个能向下滚动的长网页 |
+| 中望 CAD / 悟空图像 | 中望账号 + 试用授权 / 可不登录 | 打开一张图纸 / 图片, 鼠标停在画布 (`view` 滚轮缩放) |
+| 手机版 (Waydroid) | 手机号验证码; 微信 / QQ 手机版可扫码 | 首页 / 列表页; 聊天类点开会话并点输入框 |
+
+`cf_onboard.sh [id…]` (= `run_linux.py CONFIG --onboard`) 对每个应用做四件事, 结果写 `results/onboard/state.json`:
+
+1. **启动进 cgroup** (`dev.launch`, 已在跑的只切前台);
+2. **等登录**: 打印登录方式和账号, 轮询到 "主窗口" 出现为止——登录 / 扫码框都很小 (微信 ≈ 300×400, QQ ≈ 330×450, 钉钉 ≈ 420×600),
+   主窗口 ≥ 700×480 (`onboard_overrides` 里按 id 改 `main`); 手机版看前台包名。也可以回车确认 / `s` 跳过; `--onboard-timeout` 默认 600 s;
+3. **准备动作**: 打印上表第三列, 回车确认;
+4. **演练** (`rehearse`): 把窗口切到前台, 做一轮 `--work` 的脚本操作 (`work_s` 秒), 读两次 oracle, 两次一致且有值才算 `ready`。
+   这一步把 "输入框没焦点 / 剪贴板读不到 / 被弹窗挡住" 之类的问题在白天暴露出来, 而不是夜里矩阵跑完后看到一列 `work_state_ok = None`。
+
+```bash
+scripts/ubuntu/cf_onboard.sh                      # 配置里的全部应用 (已装的桌面版 / 手机版)
+scripts/ubuntu/cf_onboard.sh wechat qq            # 只重做这两个
+scripts/ubuntu/cf_onboard.sh --check              # 表: installed / running / main_window / onboarded / ready; 有未就绪的返回 1
+python3 run_linux.py CONFIG --onboard --yes       # 非交互 (ssh 脚本里): 不等回车, 只按窗口判断
+```
+
+runner 的 preflight 会对 "从未 onboard" / "上次未就绪" 的应用给 warning (不阻止); `run_all.sh` 在快照阶段把 `--check` 的表存成
+`OUT/onboard.txt`。重启虚拟机后应用都要重新登录 (微信每次冷启动都要扫码), 所以 **每次开机跑一遍 `cf_onboard.sh`**, 已登录的应用几秒就过。
+Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常。
 
 ## 5. 配置文件参考 (`configs/ubuntu_cn_desktop.json`)
 
@@ -386,6 +426,7 @@ catalogue id (`APP`) / 命令行。常见修正:
 | `placeholder_fill` | false | true (或 `--placeholders`): 没装上的应用用内置占位程序顶替, **id 不变**, 场景 / 轨迹不变 (`meta.placeholders` 列出); 在真实应用装齐之前就能跑完整矩阵, 之后同一命令重跑即用真实应用 |
 | `work` / `work_s` | false / 3.0 | true (或 `--work`): 每步前台停留的开头在前台应用上做 `work_s` 秒 **脚本化操作** (打草稿 / 滚动 / 上滑), 切走前记一个内容 oracle, 回来时重读比较 → `launch.work_state_ok`, 不一致计入 `state_lost` 与 `work_fail` (§6.6) |
 | `work_overrides` | `{}` | 按应用 id 覆盖脚本: `{"wechat": {"kind": "none", "oracle": "screen"}}`; 字段 `kind` (`edit` `draft` `browse` `view` `swipe` `none`) / `oracle` (`clipboard` `title` `screen` `statefile` `ui` `none`) / `text` / `scroll` / `swipes` / `tolerance` (screen 的汉明距离容差, 默认 12/256 位) |
+| `onboard_overrides` | `{}` | 按 id 覆盖 §4.6 的登录知识: `{"wechat": {"main": [600, 400], "needs": "…", "prep": "…", "method": "qr"}}` |
 | `minimize_background` | false | 切走的窗口是否最小化 (真实用户不会, 默认不做) |
 | `notifications` | true | 用 `dbus-monitor` 统计推送类应用的 `Notify` 调用 |
 | `adopt_strays` / `sudo_adopt` | true / false | 把 cgroup 外的同名进程移进来; 用户权限移不动时是否 `sudo scripts/ubuntu/cf_adopt.sh` (需 sudoers 免密, 见脚本头)。**有手机版应用时必须 `sudo_adopt: true`** (Android 进程属于其它 uid) |
@@ -705,7 +746,8 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `scripts/ubuntu/setup_waydroid.sh [--install] [--status] [--stop]` | 有应用没有桌面版时 | Waydroid 仓库 + binder 模块 + init (一次); 每次登录起嵌套 weston X11 窗口 + 会话 + adb connect |
 | `scripts/ubuntu/install_mobile_apps.sh [--list] [--missing] [--from-phone SN pkg…] [--search 名]` | 同上 | 桌面版缺失的那些应用的手机版 APK: 下载并 `adb install`; 小艺从华为手机导出 |
 | `scripts/ubuntu/cf_launch.sh app…` | 首次登录 | 把应用启动进各自的 cgroup 并保持运行 (扫码 / 登录 / 关新手引导一次, 之后实验复用) |
-| `python3 run_linux.py CONFIG --probe / --catalog / --discover / --mobile-status / --scenario list / --work-plan / --launch / --release` | 诊断 | 环境与每应用可用性 / 目录表 / 桌面上实际的 WM_CLASS 与 cgroup 叶 / Android 状态 / 本配置会用哪些应用 / 每应用的脚本化操作与 oracle / 启动 / 清限制 |
+| `scripts/ubuntu/cf_onboard.sh [app…] / --check` + `configs/accounts.json` | 每次开机 | 统一账号登录向导: 启动进 cgroup → 按 `accounts.json` 提示登录方式并等主窗口 → 提示准备动作 → 演练一轮 `--work` 脚本 + oracle; 记 `results/onboard/state.json`, `--check` 列表 (§4.6) |
+| `python3 run_linux.py CONFIG --probe / --catalog / --discover / --mobile-status / --scenario list / --work-plan / --launch / --onboard [--yes] / --onboard-check / --release` | 诊断 | 环境与每应用可用性 / 目录表 / 桌面上实际的 WM_CLASS 与 cgroup 叶 / Android 状态 / 本配置会用哪些应用 / 每应用的脚本化操作与 oracle / 启动 / 清限制 |
 | `python3 run_linux.py CONFIG --policy … --eta … --T … --scenario … [--work] [--resume FILE]` | 单格实验 | 一次实验 → `results/<name>.jsonl` (+ `.log`, `.ckpt`); Ctrl+C 安全, `--resume` 续跑 |
 | `cf/linux/work.py` (`WorkDriver`: `X11WorkDriver` + `AdbWorkDriver`) | `--work` 内部 | 每类应用的默认脚本 (打草稿 / 滚动 / 缩放 / 上滑) 与内容 oracle (clipboard / title / screen / statefile / ui), 比较规则; `work_overrides` 按 id 覆盖 |
 | `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / WORK (+ WORK_S) / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
