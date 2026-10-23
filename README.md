@@ -14,7 +14,7 @@
 ├── docs/04_cn_apps_scenarios.md    # 中国大陆应用集合 (微信/QQ/微博/网易云音乐/...) 的安装、首次启动与使用场景设计
 ├── docs/05_ubuntu_throttle_manual.md  # Ubuntu 22.04 虚拟机版 (不冻结, 切走后限 1 核 / memory.high / swap) 的运行与配置手册
 ├── scripts/                        # setup_avd / start_emulator / resize_data / prepare_device / install_cn_apps / first_run_cn_apps / run_matrix
-├── scripts/mac/download_cn_apps.sh  # 在 Mac 上批量下载各应用的 Ubuntu deb (解析厂商页面 / 接口 / 签名链接), scp 进虚拟机
+├── scripts/mac/download_cn_apps.sh  # 在 Mac 上批量下载各应用的 Ubuntu deb (解析厂商页面 / 接口 / 签名链接), 跳过已有 / 删架构不符的, --scp --install 一键装进虚拟机
 ├── scripts/ubuntu/                 # Ubuntu 版: setup_cgroups (cgroup v2 委托) / cf_enter / setup_zram / install_deps / install_cn_apps / setup_waydroid / install_mobile_apps / cf_launch / check_env / run_matrix / run_all
 ├── configs/                        # 实验配置 (JSON): emulator_base (Google 应用) / cn_apps (国产应用 + 场景) / ubuntu_cn_desktop, ubuntu_placeholders (Ubuntu 版)
 ├── cf/                             # Python 包
@@ -47,8 +47,8 @@ swap 上限; 不设 `memory.max`, 不会 OOM kill, 进程 / 窗口 / 状态全�
 ```bash
 # 在虚拟机里
 sudo scripts/ubuntu/install_deps.sh --hwe && sudo reboot                 # 工具 + HWE 内核 (memory.reclaim)
-scripts/mac/download_cn_apps.sh --open --scp ubuntu@<vm-ip>                 # 在 Mac 上批量下载各应用的 Ubuntu deb 并拷进虚拟机 (--arch amd64 给 x86 虚拟机)
-sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads/cf_debs                 # 虚拟机里安装 (自动跳过架构不符的包)
+scripts/mac/download_cn_apps.sh --open --scp ubuntu@<vm-ip> --install       # 在 Mac 上一键: 下载各应用的 Ubuntu deb -> 拷进虚拟机 -> 安装 (重跑跳过已有的, 自动删架构不符的; --arch amd64 给 x86 虚拟机)
+sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads/cf_debs                 # 或在虚拟机里手动安装 (自动跳过架构不符的包)
 sudo scripts/ubuntu/setup_waydroid.sh --install && scripts/ubuntu/setup_waydroid.sh              # 仅当有应用没有桌面版: Android 运行时
 scripts/ubuntu/install_mobile_apps.sh --missing                          # 桌面版缺失的应用 -> 自动下载安装它们的手机版 APK
 sudo scripts/ubuntu/setup_cgroups.sh && sudo scripts/ubuntu/setup_zram.sh 4096     # 每次开机 (每个终端): cgroup 委托 + zram
