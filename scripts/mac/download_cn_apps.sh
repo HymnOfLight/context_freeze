@@ -29,7 +29,8 @@
 #     chrome / edge  Google direct URL / packages.microsoft.com pool (amd64 only)
 #     zwcad, photosir   registration required -> browser
 #     firefox, chromium   not downloaded: install the deb versions with apt inside the VM (manual §4.1)
-# Needs only bash 3.2 + curl (+ shasum), i.e. a stock macOS.  Also runs on Linux.
+# Needs only bash 3.2 + curl (+ shasum), i.e. a stock macOS.  Also runs unchanged inside the Ubuntu
+# VM (arch follows the VM, --open uses xdg-open, skip --scp and install straight from the directory).
 set -uo pipefail
 
 ARCH=""
@@ -89,6 +90,11 @@ scrape() {                    # $1 page url: .deb links on the page, else inside
     if [ -n "$hit" ]; then printf '%s\n' "$hit"; return 0; fi
   done
   return 1
+}
+browse() {                    # macOS `open`, or xdg-open when run inside the VM
+  if command -v open >/dev/null 2>&1; then open "$1"
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1 &
+  else note "open this page in a browser: $1"; fi
 }
 redirect_of() { curl -s -o /dev/null -m 30 -A "$UA" -w '%{redirect_url}' "$1" 2>/dev/null; }
 md5str() { if command -v md5 >/dev/null 2>&1; then md5 -q -s "$1"; else printf '%s' "$1" | md5sum | cut -c1-32; fi; }
@@ -217,7 +223,7 @@ for a in $ALL_APPS; do
     esac
     note "manual: $(page_of "$a")   -> save the deb as $OUT/${a}_$ARCH.deb"
     manual="$manual $a"
-    [ "$OPEN" = 1 ] && command -v open >/dev/null 2>&1 && open "$(page_of "$a")"
+    [ "$OPEN" = 1 ] && browse "$(page_of "$a")"
     continue
   fi
   note "url: $url"
