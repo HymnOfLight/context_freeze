@@ -34,7 +34,7 @@ PY
     python3 -c "from cf.linux import apps as A; print(A.catalog_table())"
     exit 0 ;;
   "" | -h | --help)
-    sed -n '2,12p' "$0"; exit 0 ;;
+    sed -n '2,9p' "$0"; exit 0 ;;
 esac
 if [ "$(id -u)" != 0 ]; then echo "run with sudo for installation" >&2; exit 1; fi
 dir="$1"

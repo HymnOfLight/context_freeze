@@ -48,7 +48,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1 ;;
     --open) OPEN=1 ;;
     --scp) SCP="$2"; shift ;;
-    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "unknown option $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
