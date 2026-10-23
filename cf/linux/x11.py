@@ -137,6 +137,18 @@ def active_window() -> Optional[int]:
     return int(txt) if txt.isdigit() else None
 
 
+def parse_geometry(text: str) -> Optional[tuple[int, int]]:
+    """WIDTH / HEIGHT from `xdotool getwindowgeometry --shell`."""
+    w = re.search(r"^WIDTH=(\d+)", text or "", re.M)
+    h = re.search(r"^HEIGHT=(\d+)", text or "", re.M)
+    return (int(w.group(1)), int(h.group(1))) if w and h else None
+
+
+def geometry(wid: int) -> Optional[tuple[int, int]]:
+    """(width, height) of a window's client area; None when it is gone."""
+    return parse_geometry(xdotool("getwindowgeometry", "--shell", str(wid)))
+
+
 def windows_for(pids: Iterable[int], class_rx: Optional[str] = None, name_rx: Optional[str] = None,
                 infos: Optional[list[dict]] = None) -> list[dict]:
     """Windows that belong to the app: _NET_WM_PID in pids, or WM_CLASS / title matching the regexes.

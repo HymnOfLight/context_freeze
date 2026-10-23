@@ -6,3 +6,4 @@ results/*
 *.jsonl
 *.png
 apks/
+configs/accounts.json

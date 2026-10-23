@@ -48,6 +48,7 @@ DEFAULTS = {
     "work": False,
     "work_s": 3.0,                     # seconds of scripted work at the start of each foreground dwell
     "work_overrides": {},              # app id -> {"kind": ..., "oracle": ..., "text"/"scroll"/"swipes"/"tolerance"}
+    "onboard_overrides": {},           # app id -> {"main": [w, h], "method", "needs", "prep"} (cf.linux.onboard, --onboard)
     "throttle": ThrottleProfile().to_dict(),
     "cpu_throttle_resident": True,     # residents (in S_t) also get the CPU limit (tier bg)
     "never_throttle": [],              # always tier fg (music player, screen recorder ...)
@@ -214,6 +215,7 @@ class ThrottleExperiment(Experiment):
         self.categories = {a: A.category_of(a, dev.cat) for a in used}
         self.kinds = {a: dev.cat[a].kind for a in used}
         self._preflight_mobile(caps, used)
+        self._preflight_onboarding()
         # scenario traces are defined over catalogue ids; apply the substitutions inside them
         tr = A.resolve_trace_cfg(self.cfg["trace"])
         mapping = {w: g for w, g in subs}
@@ -286,6 +288,22 @@ class ThrottleExperiment(Experiment):
             (self.log.err if self.cfg["strict_preflight"] else self.log.warn)(msg)
         if blocking and self.cfg["strict_preflight"]:
             raise PreflightError(f"{len(blocking)} blocking preflight problem(s); fix them or use --no-strict")
+
+    def _preflight_onboarding(self) -> None:
+        """Warn when a real app was never taken through --onboard or was left not ready there: the
+        run proceeds (the app may well be logged in), but work_state_ok / draft typing will be
+        meaningless for it."""
+        from .onboard import not_ready
+        real = [a for a in self.apps if self.kinds.get(a) in ("desktop", "mobile", "oss")]
+        if not real:
+            return
+        never, bad = not_ready(real)
+        if never:
+            self.log.warn(f"{len(never)} app(s) never onboarded ({', '.join(never[:6])}{'...' if len(never) > 6 else ''}): "
+                          f"run scripts/ubuntu/cf_onboard.sh once per boot (login + rehearsal of the work script)")
+        if bad:
+            self.log.warn(f"not ready at the last onboarding: {', '.join(bad)} - their work_state_ok will likely be "
+                          f"None/False; re-run scripts/ubuntu/cf_onboard.sh {' '.join(bad)}")
 
     def _preflight_mobile(self, caps: dict, used: list[str]) -> None:
         """Checks that only matter when at least one app runs as its Android build in Waydroid."""

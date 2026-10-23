@@ -97,6 +97,12 @@ if [ "${WORK:-0}" = 1 ]; then
   python3 run_linux.py "$CONFIG" --work-plan ${PLACEHOLDERS:+--placeholders} | tee "$OUT/work_plan.txt" || true
   command -v xclip >/dev/null 2>&1 || echo "  note: xclip missing -> the clipboard oracle is unavailable (apt install xclip)"
 fi
+if [ "${PLACEHOLDERS:-0}" != 1 ]; then
+  # logged in + prepared for the work script?  (recorded by scripts/ubuntu/cf_onboard.sh; a warning, not a stop:
+  # an app can be logged in without having been onboarded)
+  python3 run_linux.py "$CONFIG" --onboard-check | tee "$OUT/onboard.txt" \
+    || echo "  note: some apps were not onboarded / not ready -> run scripts/ubuntu/cf_onboard.sh before a WORK=1 matrix"
+fi
 if grep -q '^missing:' "$OUT/apps_resolved.txt" && [ "${PLACEHOLDERS:-0}" != 1 ]; then
   echo "  note: $(grep -c '^missing:' "$OUT/apps_resolved.txt") app(s) are not installed and will be skipped;"
   echo "        install them (manual §4) or run with PLACEHOLDERS=1 to keep them in the scenarios as placeholders."
