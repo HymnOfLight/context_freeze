@@ -97,9 +97,13 @@ python3 run_linux.py configs/ubuntu_placeholders.json --policy static --T 12 --o
 **第 5 步 装应用: 桌面版优先**
 
 ```bash
+# 在 Mac 上 (宿主机) 一条命令把各家 deb 下到 ~/Downloads/cf_debs: 微信 / QQ / 钉钉 / WPS / 哔哩哔哩 (arm64; x86 虚拟机再加百度网盘 / Chrome / Edge),
+# 腾讯视频 / 中望CAD / 悟空图像 没有稳定直链, 脚本会打印页面地址 (--open 直接在浏览器打开), 手动存进同一目录即可
+PROXY=http://127.0.0.1:7897 scripts/mac/download_cn_apps.sh --open            # --arch amd64 给 x86 虚拟机; --dry-run 只看链接
+scripts/mac/download_cn_apps.sh --scp ubuntu@<虚拟机IP>                        # 拷进虚拟机的 ~/Downloads/cf_debs (或共享目录)
+# 虚拟机里:
 scripts/ubuntu/install_cn_apps.sh --list      # 每个应用的下载页 / 架构 / 包名 / 手机版 fallback
-# 在虚拟机的浏览器里把各家 arm64 deb 下到 ~/Downloads (微信 / QQ / 钉钉 / WPS / 百度网盘 / 腾讯视频 / 哔哩哔哩 / 中望CAD / 悟空图像)
-sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads     # 自动跳过 x86_64-only 的包 (Chrome / Edge 在 arm64 装不上)
+sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads/cf_debs     # 自动跳过 x86_64-only 的包 (Chrome / Edge 在 arm64 装不上)
 # Firefox 用 Mozilla APT 仓库的 deb, Chromium 用 ppa:xtradeb/apps 的 deb; 不要用默认 snap (进程逃出 cgroup)
 python3 run_linux.py configs/ubuntu_cn_desktop.json --catalog   # 哪些已装, 哪些会退到手机版
 ```
@@ -234,8 +238,9 @@ sudo scripts/ubuntu/setup_zram.sh 4096    # 4 GB zstd zram, 优先级高于 /swa
 显式写了 `"oss"` / `"placeholder"` 才允许。
 
 ```bash
+scripts/mac/download_cn_apps.sh [--arch arm64|amd64] [--only wechat,qq] [--open] [--scp user@vm]   # 在 Mac 上批量下载 deb (见下)
 scripts/ubuntu/install_cn_apps.sh --list       # 每个桌面版: 下载页 / 架构 / deb 包名 / 备注 / 它的手机版 fallback
-sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads     # apt install ./*.deb (自动跳过架构不符的包)
+sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads/cf_debs     # apt install ./*.deb (自动跳过架构不符的包)
 python3 run_linux.py configs/ubuntu_cn_desktop.json --catalog   # 整个目录: kind / 是否已装 / 没装时会退到哪一条
 scripts/ubuntu/install_mobile_apps.sh --list   # 按配置里的 apps 逐个列: 桌面版状态 / 手机版状态 / 实际会跑哪一个
 ```
@@ -257,6 +262,16 @@ scripts/ubuntu/install_mobile_apps.sh --list   # 按配置里的 apps 逐个列:
 | `zwcad` | 中望CAD | 计算 | deb / run (zwsoft.cn, 国产平台版) | 是 | 目录里没预置手机版包名 (中望 CAD 派客云图), `install_mobile_apps.sh --search 中望` 查到后按 §4.3 加 `zwcad_mobile` |
 | `photosir` | 悟空图像 | 计算 | deb (photosir.com) | 是 | 同上, `--search 悟空图像` |
 | `xiaoyi` | 小艺 | 计算 | **无** (鸿蒙 PC 自带) | – | **`com.huawei.vassistant`**: 华为系统应用, 应用市场无独立 APK, 需从华为手机 `--from-phone` 拉取并同时装 HMS Core (`com.huawei.hwid`); Waydroid 里通常只能跑起界面, 语音 / 云端能力未必可用。还是装不上时, 只有把 `"placeholder"` 加进 `substitute_kinds` 才会退到 `xiaoyi_sim` |
+
+**在 Mac 上下载 (`scripts/mac/download_cn_apps.sh`)**: 厂商基本不给稳定直链, 脚本按应用各用一招——微信: 固定的 universal 地址;
+QQ: im.qq.com 的 `linuxConfig.js`; 钉钉: `dingtalk.com/win/d/qd=linux_<arch>` 的跳转; WPS: amd64 用 linux.wps.cn 页面并按页面里的
+`downLoad()` 给 CDN 链接签名 (`?t=&k=md5(key+path+t)`), arm64 从 365.wps.cn 的脚本包里找; 百度网盘: `pan.baidu.com/disk/cmsdata` 接口
+(仅 amd64); 哔哩哔哩: GitHub releases API; Chrome / Edge: 官方直链 / 仓库目录 (仅 amd64)。腾讯视频 (页面纯脚本渲染, 无稳定直链)、
+中望CAD / 悟空图像 (要注册) 打印页面地址, `--open` 直接开浏览器, 手动存成 `~/Downloads/cf_debs/<id>_<arch>.deb`; 也可以
+`URL_tencent_video=... ` 强制指定任一应用的地址。只依赖 macOS 自带的 bash 3.2 + curl; 下载可续传, 校验 deb 头, 每个包的
+来源 / 大小 / sha256 记在 `SOURCES.txt`, 重跑只补缺的。**注意**: qqdl.gtimg.cn / wpscdn.cn 等 CDN 拒绝境外 IP (403), 走全局代理时
+把这些域名放 DIRECT, 或者先 `unset https_proxy` 再跑; GitHub 那一个反过来需要代理 (`PROXY=http://127.0.0.1:7897`, Clash 规则模式两者兼顾)。
+`--scp user@vm` 下载完直接拷进虚拟机; 用 UTM / Parallels 共享目录也行。
 
 每个桌面版都记在 `cf/linux/apps.py` (`kind="desktop"`), 它的手机版是 `<id>_mobile` (`kind="mobile"`), 由 `substitute` 串成链
 `jianying -> jianying_mobile (-> kdenlive)`。`resolve()` 只沿着 `substitute_kinds` 允许的 kind 往下走 (默认 `["mobile"]`)。
@@ -665,6 +680,7 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `scripts/ubuntu/cf_enter.sh` | 每个新终端 (`source`) | 等价于上一条, 显式传当前 shell 的 pid (tmux / VS Code 终端用这个) |
 | `scripts/ubuntu/cf_adopt.sh` | runner 内部 (sudo) | 把别的 uid 的进程 (Waydroid 里的 Android 应用) 移进 `/cf/<app>`; sudoers 规则由 `setup_waydroid.sh --install` 写 |
 | `scripts/ubuntu/setup_zram.sh [MB] [算法] / --off` | 每次开机 (sudo) | zstd zram swap (默认 4 GB), 让 `memory.high` 有地方放匿名页 |
+| `scripts/mac/download_cn_apps.sh [--arch arm64\|amd64] [--only a,b] [--open] [--dry-run] [--scp user@vm]` (在 Mac 上跑) | 装应用前 | 在宿主机批量下载各应用的 Ubuntu deb 到 `~/Downloads/cf_debs` (解析厂商页面 / 接口 / 签名链接; 无直链的打印页面或开浏览器), 记 SOURCES.txt, 可直接 scp 进虚拟机 |
 | `scripts/ubuntu/install_cn_apps.sh [--list] [--check] [DIR]` | 装应用 | 列出 13 个应用的下载页 / 架构 / 包名 / 手机版 fallback; 从目录批量安装 deb (跳过 x86_64-only) |
 | `scripts/ubuntu/setup_waydroid.sh [--install] [--status] [--stop]` | 有应用没有桌面版时 | Waydroid 仓库 + binder 模块 + init (一次); 每次登录起嵌套 weston X11 窗口 + 会话 + adb connect |
 | `scripts/ubuntu/install_mobile_apps.sh [--list] [--missing] [--from-phone SN pkg…] [--search 名]` | 同上 | 桌面版缺失的那些应用的手机版 APK: 下载并 `adb install`; 小艺从华为手机导出 |
