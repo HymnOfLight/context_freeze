@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Install the mainland-China desktop apps from a directory of .deb files you downloaded from the
-# vendors (the download pages are printed by --list; most of them need a browser click-through or a
-# login, so this is not automated):
+# Install the mainland-China desktop apps from a directory of .deb files.  Download them on the Mac
+# with scripts/mac/download_cn_apps.sh (resolves the vendors' links, ~/Downloads/cf_debs, --scp copies
+# the directory into the VM); the few without a stable link are downloaded by hand from the pages
+# printed by --list.
 #
 #     scripts/ubuntu/install_cn_apps.sh --list            # per app: download page, arch, package name
-#     sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads   # apt install ./*.deb (resolves dependencies)
+#     sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads/cf_debs   # apt install ./*.deb (resolves dependencies)
 #     scripts/ubuntu/install_cn_apps.sh --check           # what the runner will consider installed
 #
 # After installing, start each app once by hand (scripts/ubuntu/cf_launch.sh <id>), accept the
@@ -33,7 +34,7 @@ PY
     python3 -c "from cf.linux import apps as A; print(A.catalog_table())"
     exit 0 ;;
   "" | -h | --help)
-    sed -n '2,12p' "$0"; exit 0 ;;
+    sed -n '2,9p' "$0"; exit 0 ;;
 esac
 if [ "$(id -u)" != 0 ]; then echo "run with sudo for installation" >&2; exit 1; fi
 dir="$1"
