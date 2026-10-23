@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Install the mainland-China desktop apps from a directory of .deb files.  Download them on the Mac
 # with scripts/mac/download_cn_apps.sh (resolves the vendors' links, ~/Downloads/cf_debs, --scp copies
-# the directory into the VM); the few without a stable link are downloaded by hand from the pages
-# printed by --list.
+# the directory into the VM, --install runs this script there); the few without a stable link are
+# downloaded by hand from the pages printed by --list.
 #
 #     scripts/ubuntu/install_cn_apps.sh --list            # per app: download page, arch, package name
 #     sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads/cf_debs   # apt install ./*.deb (resolves dependencies)
