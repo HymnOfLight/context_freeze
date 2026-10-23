@@ -49,6 +49,8 @@
   "work": false,
   "work_s": 3.0,
   "work_overrides": {},
+  "_comment_onboard": "scripts/ubuntu/cf_onboard.sh (= --onboard): 统一账号 (configs/accounts.json, 从 accounts.example.json 复制) 登录向导, 逐个应用: 启动进 cgroup -> 提示登录方式并等主窗口出现 (登录框小, 主窗口 >= main) -> 提示准备动作 (聊天: 点开会话让输入框有焦点; WPS: 新建空白文档) -> 演练一轮 work 脚本 + 读两次 oracle -> ready. onboard_overrides 按 id 覆盖 {main: [宽, 高], method, needs, prep}.",
+  "onboard_overrides": {},
   "settle_s": 2.0,
   "warmup_dwell_s": 10.0,
   "minimize_background": false,
