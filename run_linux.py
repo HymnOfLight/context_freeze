@@ -87,6 +87,12 @@ def main(argv=None) -> int:
     ap.add_argument("--catalog", action="store_true")
     ap.add_argument("--mobile-status", action="store_true", help="Waydroid / adb state and which mobile builds are installed")
     ap.add_argument("--launch", nargs="+", metavar="APP", help="start these apps into their cgroups and exit")
+    ap.add_argument("--onboard", nargs="*", metavar="APP",
+                    help="guided first login + rehearsal of the work script per app (default: the config's apps) and exit")
+    ap.add_argument("--onboard-check", action="store_true",
+                    help="login / readiness state of the config's apps (or those given to --onboard) and exit; rc 1 when not ready")
+    ap.add_argument("--onboard-timeout", type=float, default=600.0, metavar="S", help="wait this long per app for the login")
+    ap.add_argument("--yes", action="store_true", help="--onboard without prompts: detect windows only, never wait for Enter")
     ap.add_argument("--release", action="store_true", help="clear all limits under /sys/fs/cgroup/cf and exit")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args(argv)
@@ -208,6 +214,35 @@ def main(argv=None) -> int:
             r = dev.launch(id_)
             print(f"{id_:15s} {r.get('launch_state')} status={r.get('status')} pids={dev.pids(id_)} "
                   f"wid={r.get('wid')} ping={r.get('ping_ms')}")
+        dev.close()
+        return 0
+    if args.onboard is not None or args.onboard_check:
+        from cf.linux import onboard as OB
+        from cf.linux.work import make_work_driver
+        dev = LinuxDesktop(cat=cat, notifications=False, mobile=make_mobile_runtime(base))
+        dev.probe()
+        used, subs, missing = resolve_with(dev.mobile)
+        if args.onboard:
+            targets = []
+            for id_ in args.onboard:
+                if id_ not in cat:
+                    print(f"{id_}: unknown app"); continue
+                targets.append(id_)
+        else:
+            targets = [u for u in used if cat[u].kind != "placeholder"]
+        if args.onboard_check:
+            rc = OB.check(dev, targets, base)
+            dev.close()
+            return rc
+        if not dev.tree.inside():
+            print("!! this shell is not inside /cf (source scripts/ubuntu/cf_enter.sh first); apps started now would "
+                  "run outside their cgroups", file=sys.stderr)
+        OB.ensure_accounts_file()
+        work = make_work_driver(dev, base) if not (dev.caps.get("session_type") == "wayland") else None
+        if work is None:
+            print("!! Wayland session: the rehearsal (xdotool / clipboard) is skipped; log in with 'Ubuntu on Xorg'")
+        OB.onboard(dev, targets, work=work, cfg=base, interactive=None if not args.yes else False,
+                   timeout=args.onboard_timeout, work_s=float(base.get("work_s", 3.0)))
         dev.close()
         return 0
     if args.m_fg_from:

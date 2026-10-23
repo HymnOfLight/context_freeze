@@ -1,0 +1,17 @@
+{
+  "_comment": "cp configs/accounts.example.json configs/accounts.json (git 忽略). 一个实验专用手机号注册全部应用; 注册在手机 App 里完成 (Linux 客户端都不能注册), 微信 / QQ 的 Linux 版只能用这部手机扫码登录. --onboard 按这里的内容逐个提示.",
+  "phone": "+86 1xxxxxxxxxx",
+  "nickname": "cf-bench",
+  "email": "",
+  "apps": {
+    "wechat": {"account": "", "method": "qr", "note": "手机微信保持登录, 扫码后在手机上点确认"},
+    "qq": {"account": "QQ号", "method": "qr", "note": "手机 QQ 扫码; 或 QQ 号 + 密码"},
+    "dingtalk": {"account": "", "method": "phone", "note": "短信验证码; 首次建组织 'cf-bench'"},
+    "wps": {"account": "", "method": "optional", "note": "可不登录"},
+    "baidunetdisk": {"account": "", "method": "qr", "note": "手机百度网盘扫码"},
+    "bilibili": {"account": "", "method": "optional", "note": "可不登录"},
+    "tencent_video": {"account": "", "method": "optional", "note": "微信 / QQ 扫码"},
+    "zwcad": {"account": "", "method": "account", "note": "官网注册 + Linux 试用授权"},
+    "photosir": {"account": "", "method": "optional", "note": ""}
+  }
+}
