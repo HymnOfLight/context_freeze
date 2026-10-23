@@ -40,6 +40,8 @@
 2. UTM → *Create a New VM* → **Virtualize** (不要 Emulate) → Linux → 选 ISO → CPU **4 核**, 内存 **8192 MB**, 磁盘 **64 GB**;
    建好后在 VM 设置里关掉 *Display → Retina Mode*, 不开 Balloon。
 3. 装系统 (方案 A 是文本安装器): 不勾任何 snap, 勾 **Install OpenSSH server**; 记住密码 (后面全程要 sudo)。
+   分区页选默认的 "Use an entire disk" + LVM 时, 安装器 **只给根卷分配一半磁盘** (40 GB 盘 → 20 GB 的 `ubuntu-lv`), 其余留在卷组里不用;
+   在这一页把 `ubuntu-lv` 的 Size 改成最大值, 或者装完后扩 (§10 "磁盘只用了一半")。
    安装器显示完成后 **先在 UTM 里把 ISO 弹出 (CD/DVD → Clear) 再 reboot**, 否则重启又进安装器或黑屏光标闪动。
 4. 方案 A 装桌面 (**先** 装 Mozilla 仓库的 Firefox deb, 否则 `ubuntu-desktop-minimal` 依赖的 firefox 过渡包会去装 snap, 在
    snap 商店连不上时 dpkg 直接报错, 见 §10):
@@ -635,6 +637,17 @@ post-inst 里跑 `snap install firefox`, snap 商店连不上 (代理 / 国内�
 **`git checkout cursor/...: pathspec did not match` / `couldn't find remote ref`** — 先 `git remote -v`: 如果 origin 不是
 `HymnOfLight/context_freeze.git` 就是 clone 错了仓库, 重新 clone; 是对的话 `git fetch origin cursor/ubuntu-throttle-on-unfocus-c246`
 (分支名带 `cursor/` 前缀)。
+
+**磁盘只用了一半就报满 (`df -h /` 20 GB, 但虚拟机给了 40 GB)** — live-server 安装器的默认 LVM 布局只把卷组的一半分给根卷 `ubuntu-lv`,
+剩下的留着 "以后用"。`sudo vgs` 看到 `VFree` 还有十几 GB 就是这种情况, 在线扩到全部 (ext4 不用卸载, 几秒钟):
+
+```bash
+sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubuntu-vg/ubuntu-lv && df -h /
+```
+
+不是 LVM (方案 B 的桌面 ISO 默认是普通分区) 而是事后在 UTM / Parallels 里把虚拟磁盘调大了的, 分区本身没跟着长:
+`sudo growpart /dev/vda 2 && sudo resize2fs /dev/vda2` (`lsblk` 看根分区实际是哪个设备 / 编号; 需要 `cloud-guest-utils` 包)。
+扩完再把下载残留清掉: `sudo apt clean`, `rm ~/Downloads/cf_debs/*.part`。
 
 **`check_env.sh`: `FAIL /sys/fs/cgroup/cf missing`** — 每次开机都要 `sudo scripts/ubuntu/setup_cgroups.sh` (§3); `run_all.sh` 会自己做。
 `warn only disk swap` 用 `sudo scripts/ubuntu/setup_zram.sh 4096` 解决 (`run_all.sh` 默认也会做)。
