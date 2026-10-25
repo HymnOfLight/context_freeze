@@ -269,6 +269,34 @@ def test_placeholder_fill_runs_uninstalled_apps_as_placeholders(tmp_path, monkey
     assert A.CATALOG["wechat"].kind == "desktop"                                  # global catalogue untouched
 
 
+def test_placeholder_apps_replace_installed_apps_without_an_account(tmp_path, monkeypatch):
+    """An experiment without any account: wechat is installed, but we run its stand-in; apps that
+    are not installed are still filled by placeholder_fill; the rest run for real."""
+    from cf.linux import apps as A
+    monkeypatch.setattr(A, "is_installed", lambda a, arch=None, mobile=None:
+                        a.kind == "placeholder" or a.id in OVERRIDES or a.id == "wechat")
+    monkeypatch.setattr(A, "EXTRA_NAMES", dict(A.EXTRA_NAMES))
+    cfg = cfg_for(tmp_path, "static", apps=APPS[:2] + ["wechat", "qq"], placeholder_fill=True,
+                  placeholder_apps=["wechat", "nonexistent"], trace={"kind": "zipf", "T": 6, "seed": 1})
+
+    class Dev(FakeLinuxDesktop):
+        def is_installed(self, a):
+            return A.is_installed(a)
+
+    exp = ThrottleExperiment(cfg, Dev(APPS[:2] + ["wechat", "qq"], seed=1), log=lambda *a: None)
+    path = exp.run()
+    meta = records(path)[0]
+    assert sorted(meta["placeholders"]) == ["qq", "wechat"]
+    assert meta["kinds"] == {APPS[0]: "desktop", APPS[1]: "desktop", "wechat": "placeholder", "qq": "placeholder"}
+    assert exp.dev.cat["wechat"].cmd.startswith("python3 -m cf.linux.placeholder_app --app wechat ")
+    assert summarize(load(path))["n_placeholders"] == 2
+    assert A.CATALOG["wechat"].kind == "desktop"
+    # with_overrides alone: forced placeholders keep their id, unknown ids are ignored, overrides still apply first
+    cat = A.with_overrides({"wechat": {"name": "WX"}}, ["wechat", "nope"])
+    assert cat["wechat"].kind == "placeholder" and cat["wechat"].name == "WX(占位)" and "nope" not in cat
+    assert A.with_overrides(None, None)["wechat"].kind == "desktop"
+
+
 def test_per_app_rows_report_and_plots(tmp_path):
     from cf.linux.analyze import per_app_rows, PER_APP_COLS, main as analyze_main
     paths = []

@@ -73,6 +73,8 @@ def main(argv=None) -> int:
     ap.add_argument("--no-strict", action="store_true", help="warn instead of abort on preflight problems")
     ap.add_argument("--placeholders", action="store_true",
                     help="apps without an installed build run as the bundled placeholder under their own id (placeholder_fill)")
+    ap.add_argument("--placeholder-apps", metavar="ID,ID", help="run these apps as the placeholder even when installed "
+                    "(no account for them; adds to the config's placeholder_apps)")
     ap.add_argument("--dwell", type=float, nargs="+", metavar="S", help="dwell per step: one value, or lo hi for a uniform range")
     ap.add_argument("--work", action="store_true",
                     help="scripted work on the foreground app (type / scroll / swipe) + content oracle before it is "
@@ -122,7 +124,10 @@ def main(argv=None) -> int:
         base["work"] = True
     if args.work_s is not None:
         base["work_s"] = args.work_s
-    cat = A.with_overrides(base.get("app_overrides"))
+    if args.placeholder_apps:
+        base["placeholder_apps"] = list(dict.fromkeys(list(base.get("placeholder_apps") or [])
+                                                      + [x for x in args.placeholder_apps.split(",") if x]))
+    cat = A.with_overrides(base.get("app_overrides"), base.get("placeholder_apps"))
     kinds = base.get("substitute_kinds", list(A.DEFAULT_SUBSTITUTE_KINDS))
 
     def mobile_runtime():
