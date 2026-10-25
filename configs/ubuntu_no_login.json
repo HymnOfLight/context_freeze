@@ -1,0 +1,84 @@
+{
+  "_comment": "方案三: 一个账号都不注册, 先把数据跑出来. 与 ubuntu_cn_desktop.json 相同的 13 个应用 / 场景 / 限流参数, 区别只有两点: (1) placeholder_apps: 需要登录才有内容的应用 (微信 / QQ / 钉钉 / 百度网盘) 即使装了也用内置占位程序顶替 (同 id, 场景不变; 推送类占位每 15 s 发一条真实桌面通知, 下载类占位持续写盘), 所以不会弹出扫码框; (2) placeholder_fill=true: 没装的 (剪映 / 小艺 / 腾讯视频 / 中望CAD …) 也用占位顶替. 真正跑厂商程序的是不需要登录的: WPS (关掉登录弹窗)、哔哩哔哩 (不登录可播放)、Firefox / Chrome (开一个长网页)、悟空图像 / 中望CAD (装了的话). report.md / analyze 的 n_placeholders 列记录每格有几个占位, 论文里把这些格与 '真实应用' 分开写. 之后有了实验账号, 把 id 从 placeholder_apps 里删掉、cf_onboard.sh 登录即可, 其它不变.",
+  "apps": [
+    "wechat",
+    "qq",
+    "dingtalk",
+    "baidunetdisk",
+    "firefox",
+    "chrome",
+    "tencent_video",
+    "bilibili",
+    "wps",
+    "jianying",
+    "zwcad",
+    "photosir",
+    "xiaoyi"
+  ],
+  "app_overrides": {
+    "tencent_video": {
+      "cmd": "tencent-video"
+    },
+    "xiaoyi_sim": {
+      "cmd": "python3 -m cf.linux.placeholder_app --app xiaoyi_sim --title '小艺(占位)' --cpu 0.6 --mem 400"
+    }
+  },
+  "placeholder_apps": [
+    "wechat",
+    "qq",
+    "dingtalk",
+    "baidunetdisk"
+  ],
+  "placeholder_fill": true,
+  "substitute_kinds": [
+    "mobile"
+  ],
+  "mobile": {
+    "backend": "waydroid"
+  },
+  "never_throttle": [],
+  "policy": "static",
+  "policy_kw": {},
+  "eta": 0.7,
+  "throttle": {
+    "cpu_mode": "quota",
+    "cpu_cores": 1.0,
+    "cpuset_cpus": "last",
+    "cpu_weight": 20,
+    "mem_frac": 0.5,
+    "mem_min_mb": 192,
+    "mem_hard": false,
+    "mem_hard_factor": 1.5,
+    "swap_max_mb": null,
+    "io_weight": null,
+    "proactive_reclaim": true
+  },
+  "cpu_throttle_resident": true,
+  "trace": {
+    "kind": "scenario",
+    "scenario": "office",
+    "T": 60,
+    "seed": 1
+  },
+  "dwell_s": [
+    5.0,
+    12.0
+  ],
+  "sample_every_s": 2.0,
+  "_comment_work": "work=true: 真实应用上做脚本化操作 (WPS 打字 / B站与浏览器滚页 / CAD 缩放), 占位程序走 statefile oracle (pid 不变、计数不回退). 不需要登录, 但 cf_onboard.sh 的准备动作仍要做一次: WPS 新建空白文档并把光标放正文, B站 / 浏览器停在可滚动的页面.",
+  "work": true,
+  "work_s": 3.0,
+  "work_overrides": {},
+  "onboard_overrides": {},
+  "settle_s": 2.0,
+  "warmup_dwell_s": 10.0,
+  "minimize_background": false,
+  "default_rho": null,
+  "notifications": true,
+  "adopt_strays": true,
+  "sudo_adopt": false,
+  "launch_timeout_s": 90,
+  "ping_timeout_s": 15,
+  "min_ram_mb": 6144,
+  "out_dir": "results"
+}
