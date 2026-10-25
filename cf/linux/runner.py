@@ -44,6 +44,7 @@ DEFAULTS = {
     # apps that are not installed (desktop, nor an allowed substitute) run as the bundled placeholder
     # program under their own id, so the whole matrix can be run before the vendor apps are in place
     "placeholder_fill": False,
+    "placeholder_apps": [],            # run these as the placeholder even when installed (no account for them)
     # scripted work on the foreground app + content-level state oracle (cf.linux.work); --work
     "work": False,
     "work_s": 3.0,                     # seconds of scripted work at the start of each foreground dwell
@@ -161,7 +162,7 @@ class ThrottleExperiment(Experiment):
     # ------------------------------------------------------------- lifecycle
     def prepare(self) -> None:
         dev = self.dev
-        dev.cat = A.with_overrides(self.cfg.get("app_overrides"))
+        dev.cat = A.with_overrides(self.cfg.get("app_overrides"), self.cfg.get("placeholder_apps"))
         dev.sudo_adopt = bool(self.cfg["sudo_adopt"])
         dev.launch_timeout = float(self.cfg["launch_timeout_s"])
         dev.ping_timeout = float(self.cfg["ping_timeout_s"])
@@ -185,7 +186,10 @@ class ThrottleExperiment(Experiment):
             return
         kinds = list(self.cfg["substitute_kinds"] or [])
         used, subs, missing = A.resolve(self.cfg["apps"], dev.cat, installed=dev.is_installed, substitute_kinds=kinds)
-        self.placeholders = []
+        self.placeholders = [a for a in used if dev.cat[a].kind == "placeholder" and a in (self.cfg["placeholder_apps"] or [])]
+        if self.placeholders:
+            self.log.warn(f"placeholder_apps: {len(self.placeholders)} app(s) run as the bundled placeholder although "
+                          f"installed (no account): " + ", ".join(display_name(p) for p in self.placeholders))
         if missing and self.cfg["placeholder_fill"]:
             for m in list(missing):
                 if m not in dev.cat:
@@ -196,9 +200,10 @@ class ThrottleExperiment(Experiment):
                     A.EXTRA_NAMES[m] = dev.cat[m].name
                     missing.remove(m)
                     used.append(m)
-            if self.placeholders:
-                self.log.warn(f"placeholder_fill: {len(self.placeholders)} app(s) without an installed build run as the "
-                              f"bundled placeholder program: " + ", ".join(display_name(p) for p in self.placeholders))
+            filled = [p for p in self.placeholders if p not in (self.cfg["placeholder_apps"] or [])]
+            if filled:
+                self.log.warn(f"placeholder_fill: {len(filled)} app(s) without an installed build run as the "
+                              f"bundled placeholder program: " + ", ".join(display_name(p) for p in filled))
             used = [a for a in self.cfg["apps"] if a in used] + [a for a in used if a not in self.cfg["apps"]]
         for want, got in subs:
             self.log.warn(f"{display_name(want)} ({want}): no Ubuntu desktop build installed - using "

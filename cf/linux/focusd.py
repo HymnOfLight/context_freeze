@@ -91,7 +91,7 @@ class FocusDaemon:
         self.log = as_logger(log)
         self.tree = tree or CgroupTree()
         self.profile = ThrottleProfile.from_cfg(cfg.get("throttle"))
-        self.cat = A.with_overrides(cfg.get("app_overrides") or {})
+        self.cat = A.with_overrides(cfg.get("app_overrides") or {}, cfg.get("placeholder_apps"))
         self.never = set(cfg.get("never_throttle") or [])
         self.delay_s = delay_s
         self.resident_tier = resident_tier

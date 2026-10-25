@@ -239,9 +239,11 @@ def app(id_: str) -> LinuxApp:
     return CATALOG[id_]
 
 
-def with_overrides(overrides: Optional[dict]) -> dict[str, LinuxApp]:
+def with_overrides(overrides: Optional[dict], placeholder_apps: Optional[Sequence[str]] = None) -> dict[str, LinuxApp]:
     """Catalogue with per-app field overrides from the config (`app_overrides`), plus new apps
-    defined there with at least cmd / match / wm_class."""
+    defined there with at least cmd / match / wm_class.  `placeholder_apps` (config key of the same
+    name) are then replaced by the bundled stand-in under their own id even when the vendor build
+    is installed - for apps whose login we do not have (an experiment without any account)."""
     cat = {k: LinuxApp(**v.to_dict()) for k, v in CATALOG.items()}
     for id_, ov in (overrides or {}).items():
         if id_ in cat:
@@ -264,6 +266,10 @@ def with_overrides(overrides: Optional[dict]) -> dict[str, LinuxApp]:
                 d["arch"] = tuple(ov["arch"])
             cat[id_] = LinuxApp(**d)
             EXTRA_NAMES[id_] = d["name"]
+    for id_ in placeholder_apps or ():
+        if id_ in cat and cat[id_].kind != "placeholder":
+            cat[id_] = placeholder_for(cat[id_])
+            EXTRA_NAMES[id_] = cat[id_].name
     return cat
 
 

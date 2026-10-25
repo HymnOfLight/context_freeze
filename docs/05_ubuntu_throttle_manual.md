@@ -136,7 +136,7 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy s
 PRESET=night scripts/ubuntu/run_all.sh                             # 一条命令: 体检 → 快照 → 冒烟 → 过夜矩阵 → report.md (tmux 里跑)
 ```
 
-账号怎么注册、每个应用在 Linux 上怎么登录、登录后要停在什么界面, 见 §4.6。应用还没装齐也能先把数据跑出来: `PLACEHOLDERS=1 PRESET=night scripts/ubuntu/run_all.sh` (没装的用占位程序顶替, id 不变; 装齐后同一命令重跑)。
+账号怎么注册、每个应用在 Linux 上怎么登录、登录后要停在什么界面, 见 §4.6; **一个账号都不想注册** 先用 `configs/ubuntu_no_login.json` (§4.7: 微信 / QQ / 钉钉 / 百度网盘 用占位顶替, 其余真跑)。应用还没装齐也能先把数据跑出来: `PLACEHOLDERS=1 PRESET=night scripts/ubuntu/run_all.sh` (没装的用占位程序顶替, id 不变; 装齐后同一命令重跑)。
 卡住时先看 §10: Wayland 会话、shell 不在 /cf、snap 进程逃出 cgroup、无 swap、Waydroid 的 binder / adb 都有条目。
 
 ---
@@ -345,6 +345,31 @@ x86_64 虚拟机 (非 Apple 芯片) 上的 arm64-only APK 需要 Waydroid 的 li
 
 顺序即链上的顺序: 桌面版 → 手机版 → 开源替代 (kdenlive / librecad / gimp, `install_deps.sh --subs`) → 占位程序。不写时只到手机版为止。
 
+两个独立的占位开关 (与 `substitute_kinds` 无关, 都保留应用自己的 id, 场景 / hub / flows 不变):
+
+* `placeholder_fill: true` (= `--placeholders`): **没装的**应用用内置占位程序顶替;
+* `placeholder_apps: ["wechat", …]` (= `--placeholder-apps wechat,qq`): **装了也用占位**——给那些没有账号就没有内容的应用 (见 §4.7)。
+
+### 4.7 一个账号都不注册, 先跑数据 (`configs/ubuntu_no_login.json`)
+
+不想用个人社交账号、实验专用号又还没办时, 用这份配置: 与 `ubuntu_cn_desktop.json` 同样的 13 个应用 / 场景 / 限流参数, 只是
+`placeholder_apps = [wechat, qq, dingtalk, baidunetdisk]` (装了也不启动厂商程序, 不会弹扫码框) 加 `placeholder_fill = true`
+(没装的同样顶替), `work = true`。真正跑厂商程序的只有**不需要登录**的: WPS (关掉登录弹窗)、哔哩哔哩 (不登录可播放)、Firefox / Chrome
+(开一个长网页)、中望CAD / 悟空图像 (装了的话)。占位程序不是空壳: 推送类每 15 s 发一条**真实的桌面通知** (通知计数 / 延迟指标照常),
+下载类持续写盘, 计算类 3 个 worker 烧 CPU, 都有状态文件 (`statefile` oracle: pid 不变、计数不回退)。
+
+```bash
+source scripts/ubuntu/cf_enter.sh
+scripts/ubuntu/cf_onboard.sh --yes                                   # 不需要账号, 但 WPS / B站 / 浏览器的 "准备动作" 做一次 (见 §4.6 表第三列)
+CONFIG=configs/ubuntu_no_login.json scripts/ubuntu/cf_onboard.sh    #   (交互版: 逐个提示; 占位程序自动通过)
+python3 run_linux.py configs/ubuntu_no_login.json --scenario office --policy static --T 30     # 单格试跑
+CONFIG=configs/ubuntu_no_login.json PRESET=night WORK=1 scripts/ubuntu/run_all.sh              # 过夜矩阵 (tmux)
+```
+
+结果里每格的 `n_placeholders` (analyze / report.md) 记录有几个占位; 论文里把这些格与 "全部真实应用" 的格分开写。之后有了实验账号,
+把 id 从 `placeholder_apps` 里删掉、`cf_onboard.sh` 登录, 其它不变; 同一 seed 下场景序列一致, 新旧结果可以逐格对照。
+限制: 占位程序没有厂商程序的真实内存曲线 (Electron 应用 300–900 MB vs 占位 120–500 MB) 和网络行为, 所以 **页入成本 / `download_mbps` 这两类指标只在真实应用的格里有意义**, 时延 / CPU 限流 / 状态保留 / 通知到达的机制结论不受影响。
+
 ### 4.5 首次启动、登录、核对窗口
 
 ```bash
@@ -424,6 +449,7 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 | `dwell_s` / `settle_s` / `warmup_dwell_s` | [5, 12] / 2 / 10 | 每步停留 / 切换后等待 / warmup 每应用停留 (秒)。`dwell_s` 给一个数 = 固定; 给 `[lo, hi]` = 每步按 seed 均匀抽样 (同一 seed 下各策略的每一步停留相同, 可直接对比); 每条 `step` 记录带 `dwell_s` |
 | `sample_every_s` | 2.0 | > 0 时停留期间每隔这么多秒做一次轻量采样 (PSI cpu/mem/io、zram、MemAvailable、swap in/out、每应用 PSS / swap / cpu / 写盘 / 节流时间 / tier) → `step.timeline`, 画时间序列 (`--plots-dir` 的 `*_timeline.png`); 0 关闭 |
 | `placeholder_fill` | false | true (或 `--placeholders`): 没装上的应用用内置占位程序顶替, **id 不变**, 场景 / 轨迹不变 (`meta.placeholders` 列出); 在真实应用装齐之前就能跑完整矩阵, 之后同一命令重跑即用真实应用 |
+| `placeholder_apps` | `[]` | 这些 id 即使装了也用占位程序顶替 (没有账号的应用; §4.7); CLI `--placeholder-apps a,b` 追加 |
 | `work` / `work_s` | false / 3.0 | true (或 `--work`): 每步前台停留的开头在前台应用上做 `work_s` 秒 **脚本化操作** (打草稿 / 滚动 / 上滑), 切走前记一个内容 oracle, 回来时重读比较 → `launch.work_state_ok`, 不一致计入 `state_lost` 与 `work_fail` (§6.6) |
 | `work_overrides` | `{}` | 按应用 id 覆盖脚本: `{"wechat": {"kind": "none", "oracle": "screen"}}`; 字段 `kind` (`edit` `draft` `browse` `view` `swipe` `none`) / `oracle` (`clipboard` `title` `screen` `statefile` `ui` `none`) / `text` / `scroll` / `swipes` / `tolerance` (screen 的汉明距离容差, 默认 12/256 位) |
 | `onboard_overrides` | `{}` | 按 id 覆盖 §4.6 的登录知识: `{"wechat": {"main": [600, 400], "needs": "…", "prep": "…", "method": "qr"}}` |
