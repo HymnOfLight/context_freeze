@@ -133,8 +133,12 @@ scripts/ubuntu/cf_onboard.sh                                       # 逐个: 启
 scripts/ubuntu/cf_onboard.sh --check                               # 哪些已登录 / 就绪 (results/onboard/state.json); 没就绪的 cf_onboard.sh <id> 重做
 python3 run_linux.py configs/ubuntu_cn_desktop.json --discover     # WM_CLASS / 命令名与目录不同的, 写进 app_overrides
 python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 60
-PRESET=night scripts/ubuntu/run_all.sh                             # 一条命令: 体检 → 快照 → 冒烟 → 过夜矩阵 → report.md (tmux 里跑)
+ONBOARD=1 WORK=1 PRESET=full scripts/ubuntu/run_all.sh            # 全量: 体检 → 登录向导 (就是上面两条 cf_onboard) → 快照 → 冒烟 → 全矩阵 + 脚本操作 → report.md (tmux 里跑)
+PRESET=night scripts/ubuntu/run_all.sh                             # 已登录好时的过夜档: 体检 → 快照 → 冒烟 → 过夜矩阵 → report.md
 ```
+
+`ONBOARD=1` 时 `run_all.sh` 先在终端里跑一遍 `cf_onboard.sh` (没 `accounts.json` 会从模板复制一份), 然后 `--check` 不全就绪就停下 (返回 2),
+不会带着没登录的应用去跑十几个小时的矩阵; 确认要带着跑就 `ONBOARD=0`。
 
 账号怎么注册、每个应用在 Linux 上怎么登录、登录后要停在什么界面, 见 §4.6; **一个账号都不想注册** 先用 `configs/ubuntu_no_login.json` (§4.7: 微信 / QQ / 钉钉 / 百度网盘 用占位顶替, 其余真跑)。应用还没装齐也能先把数据跑出来: `PLACEHOLDERS=1 PRESET=night scripts/ubuntu/run_all.sh` (没装的用占位程序顶替, id 不变; 装齐后同一命令重跑)。
 卡住时先看 §10: Wayland 会话、shell 不在 /cf、snap 进程逃出 cgroup、无 swap、Waydroid 的 binder / adb 都有条目。
@@ -198,10 +202,12 @@ xdotool getactivewindow getwindowname    # 能打印出桌面上当前窗口名 
 
 ### 2.5 走 macOS 上的代理 (Clash 等, 端口 7897)
 
-虚拟机 → 宿主的地址是网关 (`ip route | awk '/default/{print $3}'`, UTM 共享网络通常 192.168.64.1)。Clash 要勾 **Allow LAN**。
+虚拟机 → 宿主的地址按虚拟机软件不同: UTM 共享网络是网关 (`ip route | awk '/default/{print $3}'`, 通常 192.168.64.1);
+**VMware NAT 的网关 `x.x.x.2` 是 NAT 路由器, 不是宿主** — 宿主是同网段的 `.1` (例: 网关 192.168.248.2 → 宿主 192.168.248.1),
+写成 `.2` 会得到 `Connection refused`; VirtualBox NAT 固定 `10.0.2.2`。Clash 要勾 **Allow LAN**。
 
 ```bash
-GW=$(ip route | awk '/default/{print $3}')
+GW=$(ip route | awk '/default/{print $3}')                 # UTM: 直接用; VMware: GW=${GW%.*}.1; VirtualBox: GW=10.0.2.2
 # apt 单独配置 (sudo 默认不带环境变量)
 printf 'Acquire::http::Proxy "http://%s:7897";\nAcquire::https::Proxy "http://%s:7897";\n' $GW $GW | sudo tee /etc/apt/apt.conf.d/95proxy
 # 当前 shell / 全局 (重新登录生效)
@@ -398,7 +404,7 @@ catalogue id (`APP`) / 命令行。常见修正:
 | 微信 | 手机微信扫码 + 手机上确认; 没有密码登录, **每次冷启动都要重扫** | 点开 "文件传输助手", 输入框点一下 (`draft` 往这里打字, 不发送) |
 | QQ | 手机 QQ 扫码 (或 QQ 号 + 密码) | 点开 "我的电脑" / 任一会话, 输入框点一下 |
 | 钉钉 | 手机号 + 验证码 / 手机钉钉扫码; 首次建一个组织 "cf-bench" | 点开一个会话, 输入框点一下, 关掉引导 |
-| WPS | 可不登录 (关掉弹窗) | 新建空白文字文档, 光标在正文 (`edit` 打字 + 回车, 不保存) |
+| WPS | 可不登录 (关掉弹窗) | 启动命令直接打开 `~/.cache/context_freeze/blank.docx` (自动生成, 不经过联网的 "新建" 首页); 关掉弹窗, 在正文点一下让光标在文档里 (`edit` 打字 + 回车, 不保存) |
 | 百度网盘 | 手机百度网盘扫码 / 手机号验证码 | 挂一个大文件下载任务 (后台下载负载), 停在传输列表 |
 | 哔哩哔哩 / 腾讯视频 | 可不登录; 扫码 / 验证码 | 首页推荐流 / 剧集页 (+ 一个缓存任务) (`browse` 滚动) |
 | Chrome / Edge / Firefox | 不需要账号 (不要登录浏览器同步) | 一个能向下滚动的长网页 |
@@ -503,6 +509,7 @@ scripts/ubuntu/run_all.sh                           # 默认矩阵 -> results/ub
 PRESET=night scripts/ubuntu/run_all.sh              # 过夜档 (推荐在 tmux 里跑: tmux new -s cf)
 PRESET=full PLACEHOLDERS=1 scripts/ubuntu/run_all.sh
 WORK=1 PRESET=night scripts/ubuntu/run_all.sh       # 同上 + 脚本化操作; 冒烟阶段把 work_fail = 0 也当作不变量, OUT/work_plan.txt 记下每个应用的脚本
+ONBOARD=1 WORK=1 PRESET=full scripts/ubuntu/run_all.sh   # 真实应用全量: 先跑登录向导 (§4.6), --check 不全就绪则停 (rc 2), 全就绪再冒烟 + 全矩阵
 PRESET=quick scripts/ubuntu/run_all.sh              # 只做冒烟
 SKIP_SMOKE=1 OUT=results/run2 T=40 scripts/ubuntu/run_all.sh
 
@@ -732,6 +739,11 @@ sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubunt
 **下载类应用的 `download_mbps` 很低且各格都一样** — 代理在整形流量 (§2.5), 或者下载源本身限速; 实验前 `unset http_proxy https_proxy all_proxy`,
 并在 `none` 基线里确认未限流时的速率明显更高。
 
+**WPS 卡在 "新建" 首页转圈 / `edit` 脚本打不进字** — "新建" 页是内嵌网页, 要联网拉 docer 模板; 所以 `apps.py` 里 WPS 的启动命令直接打开
+`~/.cache/context_freeze/blank.docx` (启动前自动生成), 不经过那一页。手动 `wps` 启动的会停在首页: 关掉, 用 `scripts/ubuntu/cf_launch.sh wps`。
+文件损坏时 `python3 -m cf.linux.blankdoc --reset` 重建 (`run_all.sh ONBOARD=1` 每次都重建)。
+`apt` 走代理 `Could not connect to x.x.x.2:7897 Connection refused` — VMware NAT 的宿主是 `.1` 不是网关 `.2` (§2.5); 删掉 `/etc/apt/apt.conf.d/95proxy`。
+
 **`--work`: 所有 step 的 `work.status` 都是 `not-active`** — `xdotool` 发键前核对的是 `_NET_ACTIVE_WINDOW`, 它不是该应用的窗口:
 焦点保护 (见 `activate` 失败一条) 或该应用弹了对话框; `--discover` 看当前活动窗口。Wayland 会话下也是这个现象 (只支持 X11)。
 
@@ -777,7 +789,7 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `python3 run_linux.py CONFIG --policy … --eta … --T … --scenario … [--work] [--resume FILE]` | 单格实验 | 一次实验 → `results/<name>.jsonl` (+ `.log`, `.ckpt`); Ctrl+C 安全, `--resume` 续跑 |
 | `cf/linux/work.py` (`WorkDriver`: `X11WorkDriver` + `AdbWorkDriver`) | `--work` 内部 | 每类应用的默认脚本 (打草稿 / 滚动 / 缩放 / 上滑) 与内容 oracle (clipboard / title / screen / statefile / ui), 比较规则; `work_overrides` 按 id 覆盖 |
 | `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / WORK (+ WORK_S) / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
-| `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= PLACEHOLDERS= WORK= WORK_S= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → probe / catalog / mobile (/ work_plan) 快照 → 冒烟 (检查 state_lost / oom / COLD / work_fail = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
+| `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= ONBOARD= PLACEHOLDERS= WORK= WORK_S= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → (`ONBOARD=1`: 登录向导 + `--check`, 不全就绪即停) → probe / catalog / mobile (/ work_plan) 快照 → 冒烟 (检查 state_lost / oom / COLD / work_fail = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
 | `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / Pareto 点 / 图 / Markdown 报告 |
 | `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |
 | `python3 -m cf.linux.placeholder_app --app ID --title T [--cpu f --mem MB --io-mbps n --notify-every s --workers k]` | 冒烟 / 占位 | 内置 X11 占位程序: 可控的 CPU / 内存 / 写盘 / 通知负载, 状态写到 `/tmp/cf_placeholder_<id>.json` |
