@@ -10,6 +10,8 @@
 #   PRESET=quick scripts/ubuntu/run_all.sh                     # smoke test only (office, none + static, T=15)
 #   PLACEHOLDERS=1 PRESET=night scripts/ubuntu/run_all.sh      # apps not installed yet run as the bundled placeholder
 #   WORK=1 PRESET=night scripts/ubuntu/run_all.sh              # scripted work on the foreground app, content re-checked on return (work_state_ok)
+#   ONBOARD=1 WORK=1 PRESET=full scripts/ubuntu/run_all.sh      # the real-app run: first walk every app through login + prep + rehearsal
+#                                                                 (scripts/ubuntu/cf_onboard.sh, interactive), stop unless all are ready, then the matrix
 #   OUT=results/run3 T=60 CONFIG=configs/ubuntu_cn_desktop.json scripts/ubuntu/run_all.sh
 #   SKIP_SMOKE=1 scripts/ubuntu/run_all.sh                     # smoke already passed; go straight to the matrix
 #   ZRAM_MB=0 scripts/ubuntu/run_all.sh                        # do not touch swap (default: create 4 GB zram if none)
@@ -37,7 +39,7 @@ esac
 mkdir -p "$OUT"
 LOG="$OUT/run_all.log"
 exec > >(tee -a "$LOG") 2>&1
-echo "== run_all $(date -Is): preset=$PRESET T=$T config=$CONFIG out=$OUT placeholders=${PLACEHOLDERS:-0} work=${WORK:-0}"
+echo "== run_all $(date -Is): preset=$PRESET T=$T config=$CONFIG out=$OUT placeholders=${PLACEHOLDERS:-0} work=${WORK:-0} onboard=${ONBOARD:-0}"
 
 step() { echo; echo "==== [$1] $2"; }
 done_marker() { [ -f "$OUT/.done_$1" ]; }
@@ -97,11 +99,26 @@ if [ "${WORK:-0}" = 1 ]; then
   python3 run_linux.py "$CONFIG" --work-plan ${PLACEHOLDERS:+--placeholders} | tee "$OUT/work_plan.txt" || true
   command -v xclip >/dev/null 2>&1 || echo "  note: xclip missing -> the clipboard oracle is unavailable (apt install xclip)"
 fi
-if [ "${PLACEHOLDERS:-0}" != 1 ]; then
+if [ "${ONBOARD:-0}" = 1 ]; then
+  # 3c. the real-app run: every app logged in with the experiment account and left where the work script can act
+  step 3c "onboarding (login + prep + rehearsal of the work script)"
+  [ -f configs/accounts.json ] || { cp configs/accounts.example.json configs/accounts.json
+    echo "  created configs/accounts.json from the template - put the experiment phone number in it (manual §4.6)"; }
+  python3 -m cf.linux.blankdoc --reset >/dev/null                      # fresh blank.docx: no drafts from the last run
+  if [ -t 0 ]; then
+    CONFIG="$CONFIG" scripts/ubuntu/cf_onboard.sh || true
+  else
+    echo "  no terminal: running --onboard --yes (window detection only, no prompts)"
+    python3 run_linux.py "$CONFIG" --onboard --yes || true
+  fi
+  python3 run_linux.py "$CONFIG" --onboard-check | tee "$OUT/onboard.txt" || {
+    echo "!! not every app is ready (table above). Fix them (re-run scripts/ubuntu/cf_onboard.sh <id>), or ONBOARD=0 to"
+    echo "   run anyway - work_state_ok will be meaningless for the apps that are not ready." >&2; exit 2; }
+elif [ "${PLACEHOLDERS:-0}" != 1 ]; then
   # logged in + prepared for the work script?  (recorded by scripts/ubuntu/cf_onboard.sh; a warning, not a stop:
   # an app can be logged in without having been onboarded)
   python3 run_linux.py "$CONFIG" --onboard-check | tee "$OUT/onboard.txt" \
-    || echo "  note: some apps were not onboarded / not ready -> run scripts/ubuntu/cf_onboard.sh before a WORK=1 matrix"
+    || echo "  note: some apps were not onboarded / not ready -> ONBOARD=1 (or scripts/ubuntu/cf_onboard.sh) before a WORK=1 matrix"
 fi
 if grep -q '^missing:' "$OUT/apps_resolved.txt" && [ "${PLACEHOLDERS:-0}" != 1 ]; then
   echo "  note: $(grep -c '^missing:' "$OUT/apps_resolved.txt") app(s) are not installed and will be skipped;"

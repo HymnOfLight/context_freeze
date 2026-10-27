@@ -24,6 +24,7 @@ from typing import Optional
 from .. import parsers as P
 from ..logging_util import as_logger
 from . import apps as A
+from . import blankdoc
 from . import procs as PR
 from . import x11
 from .cgroup import CgroupTree, ThrottleProfile, HOST_LEAF, apply_tier
@@ -206,6 +207,8 @@ class LinuxDesktop:
 
         env = dict(os.environ)
         env.setdefault("PYTHONPATH", REPO_ROOT)
+        if blankdoc.BLANK_TOKEN in a.cmd:
+            blankdoc.ensure()
         p = subprocess.Popen(a.cmd, shell=True, cwd=REPO_ROOT, env=env, stdin=subprocess.DEVNULL,
                              stdout=logf, stderr=subprocess.STDOUT, start_new_session=True,
                              preexec_fn=_enter_cgroup)

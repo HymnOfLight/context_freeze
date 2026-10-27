@@ -62,6 +62,7 @@ NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40  # 场景
 WORK=1 NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40   # 每格加 --work: 脚本代替人工点击 (打草稿 / 滚页 / 上滑), 切回时核对内容 -> work_state_ok / work_fail
 python3 -m cf.linux.analyze results/ubuntu_matrix_*/*.jsonl --per-app --plots-dir plots --md report.md   # 每格表 / 每应用表 / 时间序列与 CDF 图 / Markdown 报告
 PRESET=night scripts/ubuntu/run_all.sh                                   # 或者一条命令: cgroup+zram → 体检 → 快照 → 冒烟 → 矩阵 → report.md (可中断重跑)
+ONBOARD=1 WORK=1 PRESET=full scripts/ubuntu/run_all.sh                  # 真实应用全量: 同上, 前面多一步登录向导 + 就绪检查 (不全就绪就停), 矩阵每格带脚本操作
 python3 -m cf.linux.focusd --config configs/ubuntu_cn_desktop.json       # 日常使用: 焦点一变就按同样规则限流
 ```
 

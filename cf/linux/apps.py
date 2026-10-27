@@ -163,10 +163,12 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
              install="https://page.dingtalk.com/wow/dingtalk/act/download  (Linux 版 deb, x86_64 / arm64)", substitute="dingtalk_mobile"),
     # -------------------------------------------------------------- compute
     LinuxApp("wps", "WPS Office", "compute",
-             cmd="wps", match=r"/opt/kingsoft/wps-office/|wpsoffice|(^|/)(wps|et|wpp|wpspdf)(\s|$)",
+             cmd="wps ~/.cache/context_freeze/blank.docx",      # straight into an editable document (cf.linux.blankdoc)
+             match=r"/opt/kingsoft/wps-office/|wpsoffice|(^|/)(wps|et|wpp|wpspdf)(\s|$)",
              wm_class=r"^(wps|Wps|et|wpp|wpspdf|wpsoffice)", package="wps-office", exe="/usr/bin/wps",
              install="https://linux.wps.cn/  (deb, x86_64 / arm64)", substitute="wps_mobile",
-             note="打开一个几十页带图的文档并让它做拼写检查 / 重新分页, 作为后台计算负载"),
+             note="启动即打开 ~/.cache/context_freeze/blank.docx (跳过联网的 '新建' 首页; edit 脚本往正文打字, 不保存); "
+                  "想要更重的后台计算负载就把 cmd 改成打开一个几十页带图的文档"),
     LinuxApp("jianying", "剪映", "compute",
              cmd="", match=r"jianying|capcut", wm_class=r"jianying|capcut", linux=False, substitute="jianying_mobile",
              install="无 Linux 桌面版 (剪映专业版只有 Windows / macOS) -> 用手机版 剪映 (com.lemon.lv) 在 Waydroid 里跑 (jianying_mobile). "
