@@ -276,7 +276,23 @@ def with_overrides(overrides: Optional[dict], placeholder_apps: Optional[Sequenc
 
 
 def _first_token(cmd: str) -> str:
-    return cmd.split()[0] if cmd.strip() else ""
+    return cmd.split()[0] if cmd.split() else ""
+
+
+def launch_cmd(a: LinuxApp) -> str:
+    """The shell command that actually starts the app.  `cmd` names the launcher as the vendor
+    documents it (`dingtalk`, `bilibili`), but several debs install only /opt/apps/.../Elevator.sh
+    plus a .desktop file and nothing on PATH - `is_installed` accepts them through `exe`, so the
+    launch must too: when the first token of `cmd` is not on PATH and `exe` exists, run `exe` with
+    the same arguments."""
+    cmd = a.cmd or ""
+    tok = _first_token(cmd)
+    if not tok or tok == "python3" or "/" in tok or shutil.which(tok):
+        return cmd
+    if a.exe and os.path.exists(a.exe):
+        rest = cmd.split(None, 1)[1] if len(cmd.split(None, 1)) > 1 else ""
+        return f"{a.exe} {rest}".rstrip()
+    return cmd
 
 
 def is_installed(a: LinuxApp, arch: Optional[str] = None, mobile=None) -> bool:

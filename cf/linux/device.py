@@ -209,7 +209,11 @@ class LinuxDesktop:
         env.setdefault("PYTHONPATH", REPO_ROOT)
         if blankdoc.BLANK_TOKEN in a.cmd:
             blankdoc.ensure()
-        p = subprocess.Popen(a.cmd, shell=True, cwd=REPO_ROOT, env=env, stdin=subprocess.DEVNULL,
+        cmd = A.launch_cmd(a)
+        if cmd != a.cmd:
+            logf.write(f"== cf: '{a.cmd.split()[0]}' is not on PATH, starting {cmd}\n".encode())
+            logf.flush()
+        p = subprocess.Popen(cmd, shell=True, cwd=REPO_ROOT, env=env, stdin=subprocess.DEVNULL,
                              stdout=logf, stderr=subprocess.STDOUT, start_new_session=True,
                              preexec_fn=_enter_cgroup)
         logf.close()

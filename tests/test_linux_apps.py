@@ -68,6 +68,21 @@ def test_is_installed_for_mobile_entries_needs_a_runtime():
     assert A.is_installed(A.CATALOG["jianying"], mobile=_FakeMobile(["com.lemon.lv"])) is False
 
 
+def test_launch_cmd_falls_back_to_exe_when_the_launcher_is_not_on_path(tmp_path, monkeypatch):
+    """DingTalk / bilibili debs install /opt/apps/.../files/... and a .desktop file but nothing on PATH:
+    is_installed() says yes through `exe`, so the launch has to start `exe` too."""
+    exe = tmp_path / "Elevator.sh"
+    exe.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(A.shutil, "which", lambda tok: None)
+    a = A.LinuxApp("dingtalk", "钉钉", "push", "dingtalk", "x", "x", exe=str(exe))
+    assert A.launch_cmd(a) == str(exe)
+    assert A.launch_cmd(A.LinuxApp("b", "b", "push", "bilibili --no-sandbox", "x", "x", exe=str(exe))) == f"{exe} --no-sandbox"
+    assert A.launch_cmd(A.LinuxApp("w", "w", "push", "wps ~/x.docx", "x", "x", exe=str(tmp_path / "missing"))) == "wps ~/x.docx"
+    assert A.launch_cmd(A.LinuxApp("p", "p", "push", "python3 -m cf.linux.placeholder", "x", "x", exe=str(exe))).startswith("python3")
+    monkeypatch.setattr(A.shutil, "which", lambda tok: "/usr/bin/" + tok)
+    assert A.launch_cmd(a) == "dingtalk"                                   # on PATH: untouched
+
+
 def test_resolve_prefers_desktop_then_mobile_and_only_opts_into_oss_or_placeholder():
     desktop = {"wechat", "wps"}
     mobile = {"com.lemon.lv", "com.tencent.mm"}            # 剪映 and 微信 APKs present
