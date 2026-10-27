@@ -733,6 +733,13 @@ sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubunt
 **`check_env.sh`: `FAIL /sys/fs/cgroup/cf missing`** — 每次开机都要 `sudo scripts/ubuntu/setup_cgroups.sh` (§3); `run_all.sh` 会自己做。
 `warn only disk swap` 用 `sudo scripts/ubuntu/setup_zram.sh 4096` 解决 (`run_all.sh` 默认也会做)。
 
+**`zramctl: /dev/zram0: failed to reset: Device or resource busy`** — zram 的 reset / disksize 接口在有人打开着这个块设备时返回 EBUSY。
+刚 `modprobe` 或刚 `swapoff` 后的一两秒是 udev / udisks 在探测它 (脚本现在会 `udevadm settle` 并重试 10 次, 一般自己就过了);
+重试后仍然报就是真有人占着: `fuser -v /dev/zram0`、`findmnt -S /dev/zram0`、`systemctl list-units --all '*zram*' 'dev-zram*.swap'` —
+装过 `zram-tools` (`zramswap.service`) / `systemd-zram-generator` / `zram-config` 的机器开机就会自己占住 zram0, 这种情况直接用它们建好的 zram
+(`ZRAM_MB=0 scripts/ubuntu/run_all.sh`, 只要 `/proc/swaps` 里有 zram 就行), 或者 `systemctl disable --now zramswap` 后重跑脚本。
+`--off` 时 `swapoff` 失败 (空闲内存装不下换出的页) 会跳过该设备并提示, 先关掉几个应用再 `--off`。
+
 **预算策略 (lru / landlord / hybrid) 的结果和 static 一模一样, `budget_violations = T`** — η 低于 shrunk floor (§5 "关于 η 与预算的语义"):
 看 `eta_min` 列, 用 η ≥ eta_min + 0.05 重跑, 或 `MEM_FRAC=0.3`。
 
