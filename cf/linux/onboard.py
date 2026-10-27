@@ -155,7 +155,7 @@ def not_ready(apps: list[str], state: Optional[dict] = None) -> tuple[list[str],
 
 # ------------------------------------------------------------------ detection
 def main_window(dev, app_id: str, spec: dict, infos: Optional[list[dict]] = None,
-                geom: Callable[[int], Optional[tuple[int, int]]] = x11.geometry) -> Optional[dict]:
+                geom: Optional[Callable[[int], Optional[tuple[int, int]]]] = None) -> Optional[dict]:
     """The app's logged-in main window: a normal window at least `main` big.  Mobile builds:
     the shared Android display when the app's package is in the foreground."""
     a = dev.cat[app_id]
@@ -164,21 +164,47 @@ def main_window(dev, app_id: str, spec: dict, infos: Optional[list[dict]] = None
         if mb is None or not mb.available or (a.package and mb.foreground_pkg() != a.package):
             return None
         return dev.window(app_id, infos)
-    pids = dev.pids(app_id)
-    hits = x11.windows_for(pids, a.wm_class, a.name_rx or None, infos)
     min_w, min_h = spec["main"]
     best = None
-    for w in hits:
-        if w.get("type", "") not in ("", "_NET_WM_WINDOW_TYPE_NORMAL"):
-            continue
-        g = geom(w["wid"])
-        if not g:
-            continue
-        w = dict(w, geometry=list(g))
+    for w in candidate_windows(dev, app_id, infos, geom):
+        g = w["geometry"]
         if g[0] >= min_w and g[1] >= min_h:
             if best is None or g[0] * g[1] > best["geometry"][0] * best["geometry"][1]:
                 best = w
     return best
+
+
+def candidate_windows(dev, app_id: str, infos: Optional[list[dict]] = None,
+                      geom: Optional[Callable[[int], Optional[tuple[int, int]]]] = None) -> list[dict]:
+    """Every normal-type window of a desktop app that still exists, with its geometry, largest
+    first - `main_window` picks from these; `check` shows them when none is big enough."""
+    a = dev.cat[app_id]
+    geom = geom or x11.geometry
+    hits = x11.windows_for(dev.pids(app_id), a.wm_class, a.name_rx or None, infos)
+    out = []
+    for w in hits:
+        if w.get("type", "") not in ("", "_NET_WM_WINDOW_TYPE_NORMAL"):
+            continue
+        g = geom(w["wid"])
+        if g:
+            out.append(dict(w, geometry=list(g)))
+    return sorted(out, key=lambda w: -(w["geometry"][0] * w["geometry"][1]))
+
+
+def seen_windows(dev, app_id: str, spec: dict) -> str:
+    """Short diagnosis for the `check` table when no main window qualifies: what *was* found."""
+    a = dev.cat[app_id]
+    if a.is_mobile:
+        return "-"
+    pids = dev.pids(app_id)
+    all_hits = x11.windows_for(pids, a.wm_class, a.name_rx or None)
+    if not all_hits:
+        return "no window matched" if pids else "-"
+    cands = candidate_windows(dev, app_id, all_hits)
+    if not cands:
+        return f"{len(all_hits)} non-normal ({(all_hits[0].get('type') or '?').replace('_NET_WM_WINDOW_TYPE_', '').lower()})"
+    g = cands[0]["geometry"]
+    return f"largest {g[0]}x{g[1]} < {spec['main'][0]}x{spec['main'][1]}"
 
 
 # ------------------------------------------------------------------ interaction
@@ -309,7 +335,10 @@ def onboard(dev, apps: list[str], work=None, cfg: Optional[dict] = None, interac
             state[app_id] = rec
             save_state(state, state_path)
             continue
-        wid = (win or {}).get("wid") or r.get("wid")
+        # the window the launch found is usually the login / QR dialog, gone after the login:
+        # when no main window was detected, re-pick whatever window the app has *now*
+        wid = (win or {}).get("wid") or (dev.window(app_id) or {}).get("wid") or r.get("wid")
+        rec["wid"] = rec.get("wid") or wid
         rec["prep"] = ask(f"准备: {spec['prep']}", interactive, out=out)
         if work is not None and rec["prep"]:
             out("    演练: 做一轮脚本操作, 读两次状态摘要 ...")
@@ -347,6 +376,10 @@ def summary(apps: list[str], state: Optional[dict] = None, cat: Optional[dict] =
         rh = r.get("rehearsal") or {}
         detail = (f"{rh.get('kind', '-')} -> {rh.get('oracle', '-')} work={rh.get('work_status', '-')} "
                   f"stable={rh.get('stable')}" if rh else (r.get("launch") or "-"))
+        if rh and rh.get("oracle_error"):
+            detail += f" err={str(rh['oracle_error'])[:40]}"
+        if r.get("login_how") and r.get("login_how") != "detected":
+            detail += f" login={r['login_how']}"
         rows.append(f"{a:15s} {str(r.get('logged_in')):10s} {str(r.get('ready')):6s} {str(r.get('method')):9s} {detail}"
                     f"  @{(r.get('at') or '')[:16]}")
     return "\n".join(rows)
@@ -358,7 +391,8 @@ def check(dev, apps: list[str], cfg: Optional[dict] = None, out=print) -> int:
     overrides = (cfg or {}).get("onboard_overrides") or {}
     st = load_state()
     bad = 0
-    out("app             installed  running  main_window        onboarded  ready")
+    out("app             installed  running  main_window                 onboarded  ready  why")
+    hints = []
     for a in apps:
         ap = dev.cat[a]
         inst = dev.available(a)
@@ -367,13 +401,45 @@ def check(dev, apps: list[str], cfg: Optional[dict] = None, out=print) -> int:
         win = main_window(dev, a, spec) if inst and (pids or ap.is_mobile) else None
         rec = st.get(a) or {}
         ready = bool(rec.get("ready")) and (win is not None or not inst)
+        why = ""
         if inst and not ready:
             bad += 1
-        out(f"{a:15s} {str(inst):10s} {str(bool(pids)):8s} "
-            f"{(str(win.get('geometry')) if win else '-'):18s} {str(bool(rec)):10s} {str(ready)}")
+            why = _why_not_ready(rec, pids, win, ap)
+            if why.startswith("not running") or why.startswith("launch"):
+                hints.append(f"results/app_logs/{a}.log")
+        shown = str(win.get("geometry")) if win else (seen_windows(dev, a, spec) if inst and pids else "-")
+        out(f"{a:15s} {str(inst):10s} {str(bool(pids)):8s} {shown:27s} {str(bool(rec)):10s} {str(ready):6s} {why}")
     if bad:
-        out(f"\n{bad} app(s) not ready: scripts/ubuntu/cf_onboard.sh  (or run_linux.py CONFIG --onboard <ids>)")
+        out(f"\n{bad} app(s) not ready: scripts/ubuntu/cf_onboard.sh <id…>  (or run_linux.py CONFIG --onboard <ids>)"
+            + (f"; crashed / not started: see {' '.join(hints)}" if hints else "")
+            + "; windows not recognised: run_linux.py CONFIG --discover (then app_overrides / onboard_overrides.main)")
     return 1 if bad else 0
+
+
+def _why_not_ready(rec: dict, pids: list[int], win: Optional[dict], ap: LinuxApp) -> str:
+    """One phrase per failure mode, for the `check` table."""
+    if not rec:
+        return "never onboarded"
+    if not pids and not ap.is_mobile:
+        return f"not running ({rec.get('launch') or 'launch?'})"
+    if rec.get("launch") == "TIMEOUT" or (rec.get("launch") or "").startswith("error"):
+        return f"launch {rec.get('launch')}"
+    if rec.get("logged_in") is False or rec.get("login_how") in ("timeout", "skipped"):
+        return f"login {rec.get('login_how')}"
+    if win is None:
+        return "no main window now (main= too big? see --discover)"
+    rh = rec.get("rehearsal") or {}
+    if rec.get("prep") is False:
+        return "prep skipped"
+    if rh and rh.get("work_status") not in ("ok", "skipped"):
+        return f"work {rh.get('work_status')}"
+    if rh and rh.get("oracle_error"):
+        return f"oracle {rh.get('oracle')}: {rh.get('oracle_error')}"
+    if rh and rh.get("stable") is None:
+        return f"oracle {rh.get('oracle')} read nothing"
+    if rh and rh.get("stable") is False:
+        return f"oracle {rh.get('oracle')} unstable"
+    return "not ready"
 
 
 def accounts_template_exists() -> bool:
