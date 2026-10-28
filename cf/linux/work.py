@@ -54,6 +54,16 @@ _BY_ID = {
     "edge": {"kind": "browse", "oracle": "title", "scroll": 10},
     "tencent_video": {"kind": "browse", "oracle": "title", "scroll": 6},
     "bilibili": {"kind": "browse", "oracle": "title", "scroll": 6},
+    "xunlei": {"kind": "browse", "oracle": "title", "scroll": 4},          # scroll the task list; the task keeps writing
+    "iqiyi": {"kind": "browse", "oracle": "title", "scroll": 6},           # the episode page; title = the series
+    "douyin": {"kind": "view", "oracle": "title", "scroll": 1},            # one wheel notch = next video in the feed
+    "netease_music": {"kind": "browse", "oracle": "title", "scroll": 6},   # playlist page; the song keeps playing
+    # online docs / meetings
+    "shimo": {"kind": "edit", "oracle": "clipboard"},
+    "tencent_docs": {"kind": "edit", "oracle": "clipboard"},
+    "wemeet": {"kind": "none", "oracle": "title"},                         # resident only, never inside a meeting
+    "feishu": {"kind": "draft", "oracle": "clipboard"},
+    "wecom": {"kind": "draft", "oracle": "clipboard"},
     # chat: type an unsent draft into the focused input box, read it back
     "wechat": {"kind": "draft", "oracle": "clipboard"},
     "qq": {"kind": "draft", "oracle": "clipboard"},
