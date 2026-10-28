@@ -34,7 +34,7 @@ if [ "${QUICK:-0}" = 1 ]; then
   SCENARIOS="${SCENARIOS:-office}"; POLICIES="${POLICIES:-none static}"; ETAS="${ETAS:-0.7}"; SEEDS="${SEEDS:-1}"; T=15
 fi
 if [ "${NIGHT:-0}" = 1 ]; then
-  SCENARIOS="${SCENARIOS:-office download chat design}"
+  SCENARIOS="${SCENARIOS:-office download chat design media}"
   POLICIES="${POLICIES:-none static lru landlord hybrid}"
   ETAS="${ETAS:-0.6 0.8}"
   SEEDS="${SEEDS:-1}"
@@ -44,7 +44,7 @@ if [ "${NIGHT:-0}" = 1 ]; then
   MEM_HARD="${MEM_HARD:-1}"
 fi
 if [ "${FULL:-0}" = 1 ]; then
-  SCENARIOS="${SCENARIOS:-office download chat design day}"
+  SCENARIOS="${SCENARIOS:-office download chat design media day}"
   POLICIES="${POLICIES:-none static lru landlord hybrid markov}"
   ETAS="${ETAS:-0.55 0.7 0.85}"
   SEEDS="${SEEDS:-1 2}"
@@ -57,7 +57,7 @@ fi
 POLICIES="${POLICIES:-none static lru landlord hybrid}"
 ETAS="${ETAS:-0.6 0.8}"
 SEEDS="${SEEDS:-1}"
-SCENARIOS="${SCENARIOS:-office download chat design}"
+SCENARIOS="${SCENARIOS:-office download chat design media}"
 PROFILES="${PROFILES:-}"            # "1c:0.5 1c:0.3": cpu_cores:mem_frac variants (static policy)
 CPU_MODES="${CPU_MODES:-}"          # "quota cpuset": cpu_mode variants (static policy; quota is the default run)
 RESIDENT="${RESIDENT:-1}"           # "1 0": cpu_throttle_resident on / off for the budgeted policies

@@ -83,6 +83,63 @@ def test_launch_cmd_falls_back_to_exe_when_the_launcher_is_not_on_path(tmp_path,
     assert A.launch_cmd(a) == "dingtalk"                                   # on PATH: untouched
 
 
+def _fake_deb(tmp_path, pkg, desktop_files):
+    """A dpkg `.list` for `pkg` plus the .desktop files it names (dict path-under-tmp -> text)."""
+    info = tmp_path / "dpkg"
+    info.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for rel, text in desktop_files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        paths.append(str(p))
+    (info / f"{pkg}.list").write_text("\n".join([f"/opt/apps/{pkg}", f"/opt/apps/{pkg}/files/bin/x", *paths]) + "\n")
+    return str(info)
+
+
+def test_launch_cmd_falls_back_to_the_desktop_exec_of_the_installed_package(tmp_path, monkeypatch):
+    """星火 / UOS debs (`com.xunlei.download`, `com.iqiyi.otohime` ...) install under /opt/apps/<pkg>/
+    and only ship a .desktop file: the app is recognised through `alt_packages` and started with
+    the menu entry's Exec line (field codes stripped, cmd arguments kept)."""
+    monkeypatch.setattr(A.shutil, "which", lambda tok: None)
+    info = _fake_deb(tmp_path, "com.xunlei.download", {
+        "opt/apps/com.xunlei.download/entries/applications/com.xunlei.download.desktop":
+            "[Desktop Entry]\nName=迅雷\nExec=/opt/apps/com.xunlei.download/files/start.sh %U\n"
+            "StartupWMClass=Thunder\nIcon=x\n\n[Desktop Action New]\nExec=/bin/false\n",
+        "opt/apps/com.xunlei.download/files/hidden.desktop":
+            "[Desktop Entry]\nName=helper\nNoDisplay=true\nExec=/bin/true\n",
+    })
+    a = A.LinuxApp("xunlei", "迅雷", "download", "thunder", "x", "x", package="xunlei",
+                   alt_packages=("com.xunlei.download",))
+    assert A.installed_package(a, info) == "com.xunlei.download"
+    d = A.desktop_entry(a, info)
+    assert d["exec"] == "/opt/apps/com.xunlei.download/files/start.sh"      # %U dropped, action group ignored
+    assert d["name"] == "迅雷" and d["startupwmclass"] == "Thunder" and d["package"] == "com.xunlei.download"
+    assert A.launch_cmd(a, info) == "/opt/apps/com.xunlei.download/files/start.sh"
+    b = A.LinuxApp("xunlei", "迅雷", "download", "thunder --no-sandbox", "x", "x", alt_packages=("com.xunlei.download",))
+    assert A.launch_cmd(b, info) == "/opt/apps/com.xunlei.download/files/start.sh --no-sandbox"
+    # nothing installed -> cmd is left alone (the launch fails with 127 and is logged as such)
+    assert A.installed_package(A.LinuxApp("q", "q", "download", "quark", "x", "x", package="quark"), info) is None
+    assert A.launch_cmd(A.LinuxApp("q", "q", "download", "quark", "x", "x", package="quark"), info) == "quark"
+    # a package whose only .desktop is NoDisplay has no usable launcher
+    info2 = _fake_deb(tmp_path / "t2", "shimo", {"opt/apps/shimo/x.desktop": "[Desktop Entry]\nNoDisplay=true\nExec=/bin/true\n"})
+    assert A.desktop_entry(A.LinuxApp("shimo", "x", "compute", "shimo", "x", "x", package="shimo"), info2) is None
+
+
+def test_parse_desktop_entry_handles_comments_quotes_and_missing_group():
+    d = A.parse_desktop_entry("# comment\n[Desktop Entry]\nExec=\"/opt/a b/run\" --flag %f %u\nName=A\nName[zh_CN]=甲\n")
+    assert d["exec"] == '"/opt/a b/run" --flag' and d["name"] == "A"
+    assert A.parse_desktop_entry("Exec=/bin/true\n") == {}                 # no [Desktop Entry] group
+
+
+def test_catalog_marks_the_arm64_additions_and_their_packages():
+    cat = A.CATALOG
+    for i in ("xunlei", "iqiyi", "douyin", "netease_music", "shimo"):
+        assert i in cat and "aarch64" in cat[i].arch and cat[i].package
+    assert "com.baidu.baidunetdisk" in cat["baidunetdisk"].alt_packages
+    assert cat["xunlei"].alt_packages[0] == "xunlei"
+
+
 def test_resolve_prefers_desktop_then_mobile_and_only_opts_into_oss_or_placeholder():
     desktop = {"wechat", "wps"}
     mobile = {"com.lemon.lv", "com.tencent.mm"}            # 剪映 and 微信 APKs present

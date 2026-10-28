@@ -49,6 +49,7 @@ class LinuxApp:
     name_rx: str = ""                  # regex on the window title (fallback)
     notify_names: tuple[str, ...] = () # app_name values the app passes to org.freedesktop.Notifications
     package: str = ""                  # dpkg package (availability check: dpkg -s)
+    alt_packages: tuple[str, ...] = () # other package names the same app ships under (UOS / 星火 builds)
     exe: str = ""                      # absolute path of the main binary (availability check)
     arch: tuple[str, ...] = ("x86_64", "aarch64")
     install: str = ""                  # where to get it
@@ -111,11 +112,33 @@ def _m(id_: str, name: str, category: str, package: str, install: str, **kw) -> 
 CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
     # ------------------------------------------------------------- download
     LinuxApp("baidunetdisk", "百度网盘", "download",
-             cmd="baidunetdisk", match=r"/opt/baidunetdisk/|baidunetdisk", wm_class=r"baidunetdisk",
-             package="baidunetdisk", exe="/opt/baidunetdisk/baidunetdisk",
-             install="https://pan.baidu.com/download#linux  (deb; x86_64 公开页, arm64 版见统信/麒麟应用商店或联系百度获取)",
+             cmd="baidunetdisk", match=r"/opt/baidunetdisk/|/opt/apps/com\.baidu\.baidunetdisk/|baidunetdisk",
+             wm_class=r"(?i)baidu.?netdisk", name_rx=r"百度网盘|Baidu Netdisk",
+             package="baidunetdisk", alt_packages=("com.baidu.baidunetdisk",), exe="/opt/baidunetdisk/baidunetdisk",
+             install="https://pan.baidu.com/download#linux  (deb; x86_64 公开页, arm64 版: 星火应用商店 arm64 仓库 / 统信商店的官方构建)",
              substitute="baidunetdisk_mobile",
              note="登录后把一个大文件的下载任务挂着, 实验期间它就是后台下载负载"),
+    LinuxApp("xunlei", "迅雷", "download",
+             cmd="thunder", match=r"(?i)xunlei|thunder|/opt/apps/com\.xunlei\.download/", wm_class=r"(?i)thunder|xunlei",
+             name_rx=r"迅雷|Thunder", package="com.xunlei.download", alt_packages=("xunlei", "thunder"), exe="",
+             install="星火应用商店 arm64 / x86_64 仓库 (迅雷官方 Linux 版, 官网未上架; 包 com.xunlei.download)",
+             note="登录后挂一个大文件的下载任务 (如 Ubuntu ISO 的 HTTP / 磁力链接), 停在任务列表; 与百度网盘一样是持续写盘的后台负载"),
+    LinuxApp("iqiyi", "爱奇艺", "download",
+             cmd="iqiyi", match=r"(?i)iqiyi", wm_class=r"(?i)iqiyi", name_rx=r"爱奇艺|iQIYI",
+             package="com.iqiyi.otohime", alt_packages=("iqiyi",), exe="",
+             install="星火应用商店 arm64 仓库 (com.iqiyi.otohime: 把爱奇艺的 localwebapp 客户端重新打包, 非官方)",
+             note="可不登录; 打开一个剧集页播放 = 持续网络 + 解码负载 (虚拟机里是软解, 会吃 CPU)"),
+    LinuxApp("douyin", "抖音", "download",
+             cmd="douyin", match=r"(?i)douyin", wm_class=r"(?i)douyin", name_rx=r"抖音|Douyin",
+             package="com.douyin.otohime", alt_packages=("douyin",), exe="",
+             install="星火应用商店 arm64 仓库 (com.douyin.otohime, 网页版套壳, 非官方)",
+             note="可不登录; 停在推荐流, 滚轮切下一条视频 (view 脚本)"),
+    LinuxApp("netease_music", "网易云音乐", "download",
+             cmd="netease-cloud-music", match=r"(?i)netease.?cloud.?music|cloudmusic", wm_class=r"(?i)netease|cloudmusic",
+             name_rx=r"网易云音乐|NetEase Cloud Music", package="netease.cloud.music.otohime",
+             alt_packages=("netease-cloud-music",), exe="",
+             install="星火应用商店 arm64 仓库 (netease.cloud.music.otohime: deepin 商店的官方 Electron 版 3.x) 或 music.163.com 的 x86_64 deb",
+             note="必须登录 (手机号 + 验证码 / 扫码); 播放一个歌单后停在歌单页: 后台持续解码 + 网络, 比视频轻"),
     LinuxApp("firefox", "Firefox", "download",
              cmd="firefox", match=r"(^|/)firefox(-esr)?(\s|$)|/usr/lib/firefox", wm_class=r"^(firefox|Navigator)",
              package="firefox", exe="/usr/bin/firefox",
@@ -198,9 +221,14 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
              cmd="", match=r"jianying|capcut", wm_class=r"jianying|capcut", linux=False, substitute="jianying_mobile",
              install="无 Linux 桌面版 (剪映专业版只有 Windows / macOS) -> 用手机版 剪映 (com.lemon.lv) 在 Waydroid 里跑 (jianying_mobile). "
                      "也可用 Wine/deepin-wine 运行 Windows 版, 自行在 app_overrides 里给出 cmd/match/wm_class"),
+    LinuxApp("shimo", "石墨文档", "compute",
+             cmd="shimo", match=r"(?i)shimo", wm_class=r"(?i)shimo", name_rx=r"石墨文档|Shimo",
+             package="shimo", alt_packages=("com.shimo.otohime", "shimo-docs"), exe="",
+             install="https://shimo.im/download  (Linux deb) / 星火应用商店 arm64 仓库 (包 shimo)",
+             note="实验手机号 + 验证码登录; 新建一个文档, 光标在正文 (edit 脚本打字, 云端自动保存)"),
     LinuxApp("zwcad", "中望CAD", "compute",
              cmd="zwcad", match=r"(?i)zwcad", wm_class=r"(?i)zwcad", name_rx=r"中望|ZWCAD",
-             package="zwcad", exe="",
+             package="zwcad", alt_packages=("zwcad2026", "zwcad2025", "zwcad2024", "ZWCAD"), exe="",
              install="https://www.zwsoft.cn/product/zwcad-linux  (Linux 版 deb / run, x86_64 / arm64 国产平台)",
              note="有 Linux 桌面版 (统信 / 麒麟 / Ubuntu deb); 手机版 (中望CAD派客云图) 包名请用 install_mobile_apps.sh --search 确认后在 app_overrides 里加 zwcad_mobile"),
     LinuxApp("photosir", "悟空图像 PhotoSir", "compute",
@@ -304,19 +332,78 @@ def _first_token(cmd: str) -> str:
     return cmd.split()[0] if cmd.split() else ""
 
 
-def launch_cmd(a: LinuxApp) -> str:
+DPKG_INFO = "/var/lib/dpkg/info"
+_DESKTOP_FIELD_CODES = re.compile(r"\s*%[a-zA-Z]")
+
+
+def installed_package(a: LinuxApp, dpkg_info: str = DPKG_INFO) -> Optional[str]:
+    """The dpkg package this app is installed under (`package` or one of `alt_packages`), or None."""
+    for p in (a.package, *a.alt_packages):
+        if p and os.path.exists(os.path.join(dpkg_info, f"{p}.list")):
+            return p
+    return None
+
+
+def parse_desktop_entry(text: str) -> dict:
+    """Exec / Name / StartupWMClass of the [Desktop Entry] group, field codes (%U, %f ...) removed."""
+    out: dict = {}
+    in_group = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("["):
+            in_group = s == "[Desktop Entry]"
+            continue
+        if not in_group or "=" not in s or s.startswith("#"):
+            continue
+        k, v = s.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if k == "Exec":
+            out["exec"] = _DESKTOP_FIELD_CODES.sub("", v).strip()
+        elif k in ("Name", "StartupWMClass", "Icon", "NoDisplay") and k.lower() not in out:
+            out[k.lower()] = v
+    return out
+
+
+def desktop_entry(a: LinuxApp, dpkg_info: str = DPKG_INFO) -> Optional[dict]:
+    """The launcher of the installed package: the first .desktop file dpkg knows about (menu
+    entries first), parsed.  This is what the GUI's app grid runs, so it is the most reliable
+    start command for vendor / UOS / 星火 debs whose binaries are not on PATH."""
+    p = installed_package(a, dpkg_info)
+    if not p:
+        return None
+    try:
+        with open(os.path.join(dpkg_info, f"{p}.list"), encoding="utf-8", errors="replace") as f:
+            files = [ln.strip() for ln in f if ln.strip().endswith(".desktop")]
+    except OSError:
+        return None
+    files.sort(key=lambda s: (not ("/applications/" in s), s))
+    for path in files:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                d = parse_desktop_entry(f.read())
+        except OSError:
+            continue
+        if d.get("exec") and d.get("nodisplay", "").lower() != "true":
+            d["path"], d["package"] = path, p
+            return d
+    return None
+
+
+def launch_cmd(a: LinuxApp, dpkg_info: str = DPKG_INFO) -> str:
     """The shell command that actually starts the app.  `cmd` names the launcher as the vendor
-    documents it (`dingtalk`, `bilibili`), but several debs install only /opt/apps/.../Elevator.sh
-    plus a .desktop file and nothing on PATH - `is_installed` accepts them through `exe`, so the
-    launch must too: when the first token of `cmd` is not on PATH and `exe` exists, run `exe` with
-    the same arguments."""
+    documents it (`dingtalk`, `bilibili`), but many debs put nothing on PATH: when the first token
+    of `cmd` is not a command, fall back to `exe` (if it exists) and then to the Exec line of the
+    installed package's .desktop file, keeping the arguments of `cmd`."""
     cmd = a.cmd or ""
     tok = _first_token(cmd)
     if not tok or tok == "python3" or "/" in tok or shutil.which(tok):
         return cmd
+    rest = cmd.split(None, 1)[1] if len(cmd.split(None, 1)) > 1 else ""
     if a.exe and os.path.exists(a.exe):
-        rest = cmd.split(None, 1)[1] if len(cmd.split(None, 1)) > 1 else ""
         return f"{a.exe} {rest}".rstrip()
+    d = desktop_entry(a, dpkg_info)
+    if d:
+        return f"{d['exec']} {rest}".rstrip()
     return cmd
 
 
@@ -339,9 +426,7 @@ def is_installed(a: LinuxApp, arch: Optional[str] = None, mobile=None) -> bool:
         return True
     if shutil.which(tok):
         return True
-    if a.package and os.path.exists(f"/var/lib/dpkg/info/{a.package}.list"):
-        return True
-    return False
+    return installed_package(a) is not None
 
 
 DEFAULT_SUBSTITUTE_KINDS: tuple[str, ...] = ("mobile",)
@@ -404,18 +489,23 @@ WECHAT, QQ, DINGTALK = "wechat", "qq", "dingtalk"
 NETDISK, FIREFOX, CHROME, CHROMIUM, EDGE, TVIDEO, BILI = ("baidunetdisk", "firefox", "chrome", "chromium",
                                                           "edge", "tencent_video", "bilibili")
 WPS, JIANYING, ZWCAD, PHOTOSIR, XIAOYI = "wps", "jianying", "zwcad", "photosir", "xiaoyi"
+XUNLEI, IQIYI, DOUYIN, MUSIC163, SHIMO, WEMEET, FEISHU, WECOM, TDOCS = (
+    "xunlei", "iqiyi", "douyin", "netease_music", "shimo", "wemeet", "feishu", "wecom", "tencent_docs")
 
 SCENARIOS: dict[str, Scenario] = {
     "office": Scenario(
         "office", "办公",
-        apps={WECHAT: 5, WPS: 5, DINGTALK: 4, FIREFOX: 3, NETDISK: 2, QQ: 1, CHROME: 1, XIAOYI: 1},
+        apps={WECHAT: 5, WPS: 5, DINGTALK: 4, FIREFOX: 3, NETDISK: 2, QQ: 1, CHROME: 1, XIAOYI: 1,
+              WEMEET: 1, SHIMO: 1, FEISHU: 1, WECOM: 1, TDOCS: 1},
         hub=WECHAT,
         flows=[[NETDISK, WPS, NETDISK],          # 网盘里的文件用 WPS 打开再回去
                [DINGTALK, WPS, DINGTALK],        # 钉钉收到文档 -> 编辑 -> 回复
                [WECHAT, FIREFOX, WECHAT],        # 微信里的链接
+               [DINGTALK, WEMEET, DINGTALK],     # 群里点开会议链接
+               [WECHAT, SHIMO, WECHAT],          # 微信里打开共享文档
                [WPS, XIAOYI, WPS]],              # 问一下助手再回文档
         p_hub=0.30, p_flow=0.30, stickiness=0.20,
-        description="微信/钉钉为枢纽, WPS 长时间前台, 网盘在后台下载; 固定路径多"),
+        description="微信/钉钉为枢纽, WPS 长时间前台, 网盘在后台下载; 固定路径多 (会议 / 在线文档 / 飞书 / 企业微信装了才参与)"),
     "design": Scenario(
         "design", "设计/计算",
         apps={ZWCAD: 5, PHOTOSIR: 4, JIANYING: 3, WECHAT: 3, FIREFOX: 2, WPS: 1, NETDISK: 1},
@@ -428,26 +518,38 @@ SCENARIOS: dict[str, Scenario] = {
         description="重计算应用 (CAD / 图像 / 视频剪辑) 在后台继续渲染导出; 限 1 核后进度变慢但不中断"),
     "download": Scenario(
         "download", "下载",
-        apps={WECHAT: 4, NETDISK: 4, BILI: 3, TVIDEO: 3, FIREFOX: 3, WPS: 2, QQ: 1},
+        apps={WECHAT: 4, NETDISK: 4, XUNLEI: 3, BILI: 3, TVIDEO: 3, FIREFOX: 3, WPS: 2, QQ: 1, MUSIC163: 1},
         hub=WECHAT,
         flows=[[BILI, WECHAT, BILI],
                [TVIDEO, FIREFOX, TVIDEO],
                [NETDISK, WPS, NETDISK],
+               [FIREFOX, XUNLEI],                # 浏览器里的链接丢给迅雷
                [FIREFOX, NETDISK]],              # 浏览器里的链接转存网盘
         p_hub=0.25, p_flow=0.25, stickiness=0.30,
-        description="三个下载客户端 + 浏览器在后台持续写盘; 观察限 CPU / 内存后下载吞吐 (write_bytes) 的变化"),
+        description="下载客户端 (网盘 / 迅雷 / 视频缓存) + 浏览器在后台持续写盘; 观察限 CPU / 内存后下载吞吐 (write_bytes) 的变化"),
     "chat": Scenario(
         "chat", "消息",
-        apps={WECHAT: 5, QQ: 4, DINGTALK: 4, FIREFOX: 2, BILI: 2, WPS: 1, XIAOYI: 1},
+        apps={WECHAT: 5, QQ: 4, DINGTALK: 4, FIREFOX: 2, BILI: 2, WPS: 1, XIAOYI: 1, WEMEET: 1, FEISHU: 1, WECOM: 1},
         hub=WECHAT,
         flows=[[QQ, WECHAT, QQ],
                [DINGTALK, WECHAT, DINGTALK],
                [WECHAT, BILI, WECHAT]],
         p_hub=0.35, p_flow=0.25, stickiness=0.30,
-        description="三个 IM 在后台收推送; 限制后通知是否仍按时到达 (notifications) 是核心观测量"),
+        description="三个 IM (+ 会议 / 飞书 / 企业微信) 在后台收推送; 限制后通知是否仍按时到达 (notifications) 是核心观测量"),
+    "media": Scenario(
+        "media", "娱乐",
+        apps={DOUYIN: 4, IQIYI: 4, MUSIC163: 3, BILI: 3, WECHAT: 3, QQ: 1.5, FIREFOX: 1, TVIDEO: 1},
+        hub=DOUYIN,
+        flows=[[DOUYIN, WECHAT, DOUYIN],         # 刷到一条分享给朋友再回来
+               [IQIYI, WECHAT, IQIYI],
+               [MUSIC163, FIREFOX, MUSIC163],    # 听歌时查点东西
+               [BILI, QQ, BILI]],
+        p_hub=0.25, p_flow=0.20, stickiness=0.30,
+        description="短视频 / 长视频 / 音乐在前后台交替: 后台的播放器被限到 1 核后是否卡顿 (activate / ping), 音乐是否断"),
 }
 
-DAY_SCHEDULE: list[tuple[str, float]] = [("chat", 0.15), ("office", 0.40), ("download", 0.15), ("design", 0.30)]
+DAY_SCHEDULE: list[tuple[str, float]] = [("chat", 0.15), ("office", 0.35), ("download", 0.15), ("design", 0.20),
+                                         ("media", 0.15)]
 
 
 def scenario_dict(name: str) -> dict:
@@ -525,7 +627,14 @@ def catalog_table(cat: Optional[dict[str, LinuxApp]] = None, arch: Optional[str]
             inst = "no (no linux build)" if not a.linux else "no"
         if a.substitute and inst != "yes":
             inst += f" -> {a.substitute}"
-        rows.append((a.id, a.name, a.kind, a.category, inst, (a.package if a.is_mobile else a.cmd) or "-",
-                     (a.install or a.note)[:90]))
+        how = a.package if a.is_mobile else a.cmd
+        if inst == "yes" and not a.is_mobile:
+            real = launch_cmd(a)
+            if real != a.cmd:                       # vendor deb with nothing on PATH: show what will run
+                how = f"{a.cmd} -> {real}"
+            pkg = installed_package(a)
+            if pkg and pkg != a.package:
+                how += f"  [{pkg}]"
+        rows.append((a.id, a.name, a.kind, a.category, inst, (how or "-")[:70], (a.install or a.note)[:90]))
     widths = [max(len(str(r[i])) for r in rows) for i in range(6)]
     return "\n".join("  ".join(str(c).ljust(widths[i]) for i, c in enumerate(r[:6])) + "  " + r[6] for r in rows)

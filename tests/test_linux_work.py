@@ -30,6 +30,13 @@ def test_default_spec_by_id_category_and_kind():
     assert W.default_spec(cat["bilibili"]) == {"kind": "browse", "oracle": "title", "scroll": 6}
     assert W.default_spec(cat["zwcad"])["oracle"] == "screen"
     assert W.default_spec(cat["baidunetdisk"]) == {"kind": "none", "oracle": "title"}
+    # the arm64 / 星火 additions: players are browsed by title, douyin is one wheel notch per video,
+    # online docs are typed into like WPS, the meeting client is resident only
+    assert W.default_spec(cat["xunlei"]) == {"kind": "browse", "oracle": "title", "scroll": 4}
+    assert W.default_spec(cat["douyin"]) == {"kind": "view", "oracle": "title", "scroll": 1}
+    assert W.default_spec(cat["netease_music"])["kind"] == "browse"
+    assert W.default_spec(cat["shimo"]) == {"kind": "edit", "oracle": "clipboard"}
+    assert W.default_spec(cat["wemeet"]) == {"kind": "none", "oracle": "title"}
     # unknown id -> category default; unknown category -> harmless title check
     assert W.default_spec(LinuxApp("x", "x", "push", "true", "x", "x")) == {"kind": "draft", "oracle": "clipboard"}
     assert W.default_spec(LinuxApp("x", "x", "other", "true", "x", "x")) == {"kind": "none", "oracle": "title"}

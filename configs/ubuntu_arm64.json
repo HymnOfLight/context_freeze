@@ -1,0 +1,79 @@
+{
+  "_comment": "arm64 虚拟机 (UTM / Apple Silicon) 上实际装好的真机应用集合, 全部真跑、带脚本操作 (work=true). 下载: 百度网盘 / 迅雷 / 爱奇艺 / 抖音 / 网易云音乐 / Firefox; 推送: 微信 / QQ / 钉钉 / 腾讯会议; 计算: WPS / 中望CAD / 石墨文档. 哔哩哔哩装了但在虚拟机里软解太卡, 故意不列 (场景里引用它的切换会被 restrict 丢掉); 百度网盘 / Chrome / Edge 没有 arm64 公开版, 剪映 / 小艺 没有 Linux 版, 腾讯视频 / 悟空图像 未装 -> 都不在列表里. 星火商店 / 统信构建的包装在 /opt/apps/<包名>/, 启动名不在 PATH: launch 会自动改用包的 .desktop Exec (install_cn_apps.sh --check 的 cmd 列显示实际命令); WM_CLASS 和目录猜的不一样时用 --discover 看到后写进 app_overrides.",
+  "apps": [
+    "wechat",
+    "qq",
+    "dingtalk",
+    "wemeet",
+    "baidunetdisk",
+    "xunlei",
+    "iqiyi",
+    "douyin",
+    "netease_music",
+    "firefox",
+    "wps",
+    "zwcad",
+    "shimo"
+  ],
+  "_comment_app_overrides": "厂商包的命令名 / WM_CLASS 可能与 catalogue 不同; 用 --discover 看到实际值后在这里覆盖, 字段同 cf/linux/apps.py 的 LinuxApp (cmd, match, wm_class, name_rx, notify_names, exe, package). 也可以加入新应用 (键 = 新 id, 至少给 cmd / match / wm_class / category).",
+  "app_overrides": {},
+  "_comment_substitutes": "substitute_kinds: 桌面版缺失时允许退到的 kind, 顺序即 catalogue 里 substitute 链的顺序: mobile = 同一应用的手机版 (Waydroid, scripts/ubuntu/setup_waydroid.sh + install_mobile_apps.sh --missing); 要再退到开源替代品 (kdenlive/librecad/gimp) 或内置占位程序才加 \"oss\" / \"placeholder\". mobile: Android 运行时参数, 默认取 `waydroid status` 的 IP:5555; 有手机版应用时请把 sudo_adopt 设为 true (Android 进程属于别的 uid, 移进 /cf/<app> 需要 root).",
+  "substitute_kinds": [
+    "mobile"
+  ],
+  "mobile": {
+    "backend": "waydroid"
+  },
+  "never_throttle": [],
+  "policy": "static",
+  "policy_kw": {},
+  "eta": 0.7,
+  "_comment_eta": "预算 B = eta x sum(m_fg). shrunk 应用仍占 memory.high = mem_frac x m_fg (不低于 mem_min_mb), 所以后台总占用有下限 eta_min ~ mem_frac x (1 - 1/n); mem_frac=0.5 时 eta < ~0.5 的预算不可达, lru/landlord/hybrid 会退化成 static (runner 会 WARN, analyze 给出 eta_min / eta_feasible). 比较策略请用 eta >= 0.6, 或把 mem_frac 调小 (run_matrix.sh MEM_FRAC=0.3).",
+  "throttle": {
+    "cpu_mode": "quota",
+    "cpu_cores": 1.0,
+    "cpuset_cpus": "last",
+    "cpu_weight": 20,
+    "mem_frac": 0.5,
+    "mem_min_mb": 192,
+    "mem_hard": false,
+    "mem_hard_factor": 1.5,
+    "swap_max_mb": null,
+    "io_weight": null,
+    "proactive_reclaim": true,
+    "_comment": "cpu_mode quota: 每个后台应用 cpu.max = cpu_cores 个核心的带宽 (默认 1 核); cpuset: 所有后台应用共享 cpuset_cpus 这 (几) 个核 (last = 编号最大的核); both 两者都用. mem_frac: 预算外 (shrunk) 应用的 memory.high = mem_frac x m_fg (不低于 mem_min_mb). mem_hard=false 时不设 memory.max, 内核只回收 / 节流, 不会 OOM kill -> 不丢状态. swap_max_mb 限制单个应用的 swap 用量 (null 不限); 注意 memory.high + 很小的 swap 上限 = 应用几乎不能分配内存, 只会慢, 仍不会死."
+  },
+  "cpu_throttle_resident": true,
+  "_comment_tiers": "cpu_throttle_resident=true: 预算内的后台应用 (S_t) 也限 CPU (tier bg), 只有预算外的才额外限内存 (tier shrunk) -> 所有切走的窗口都受 CPU 限制, 策略只决定内存分层; false: 预算内的后台应用完全不受限.",
+  "trace": {
+    "kind": "scenario",
+    "scenario": "office",
+    "T": 60,
+    "seed": 1,
+    "_comment": "scenario: office 办公 | design 设计/计算 | download 下载 | chat 消息 | media 娱乐 (抖音 / 爱奇艺 / 网易云 / B站); kind=day 按 chat 15% -> office 35% -> download 15% -> design 20% -> media 15% 依次经历. 场景里本机没装的应用自动剔除 (design 场景只剩 中望 / 微信 / Firefox / WPS / 网盘, 仍 >= 2 个可跑). 也可内联 {\"apps\":{id:权重},\"hub\":id,\"flows\":[[id,id,...]],\"p_hub\":0.3,\"p_flow\":0.25,\"stickiness\":0.2}."
+  },
+  "dwell_s": [
+    5.0,
+    12.0
+  ],
+  "_comment_dwell": "每步在前台停留的秒数: 一个数 = 固定; [lo, hi] = 每步按 seed 均匀抽样 (同一 seed 下各策略逐步一致, 可直接对比). sample_every_s > 0 时在停留期间每隔这么多秒轻量采样一次 (PSI / swap / 每应用 PSS / cpu / 节流时间 -> step.timeline, 画时间序列图); 0 关闭. placeholder_fill=true: 未安装的应用用内置占位程序顶替 (同 id, 场景不变), 便于在真实应用装齐前跑完整矩阵 (--placeholders).",
+  "sample_every_s": 2.0,
+  "placeholder_fill": false,
+  "_comment_work": "work=true (或 --work): 每步前台停留开始时在前台应用上做 work_s 秒脚本化操作 (cf/linux/work.py: 聊天 = 输入一段未发送草稿, WPS = 输入一行文字, 浏览器/视频 = 滚轮翻页, CAD/图像 = 滚轮缩放, 手机版 = 上滑/输入), 切走前读一次状态 oracle (clipboard = ctrl+a ctrl+c 的 md5, title = 窗口标题, screen = 窗口像素哈希, statefile = 占位程序计数器, ui = Android 活动 + 界面文字哈希), 应用再回到前台时重读并比较 -> launch.work_state_ok, 不一致计入 state_lost 与 work_fail. 默认按应用 id / 类别选 (--work-plan 查看); work_overrides 按 id 覆盖 {kind, oracle, text, scroll, swipes, tolerance}, kind=none 关闭某个应用的输入. 注意: clipboard oracle 会覆盖系统剪贴板; 微信/QQ 需要先点开一个会话让输入框有焦点.",
+  "work": true,
+  "work_s": 3.0,
+  "work_overrides": {},
+  "_comment_onboard": "scripts/ubuntu/cf_onboard.sh (= --onboard): 统一账号 (configs/accounts.json, 从 accounts.example.json 复制) 登录向导, 逐个应用: 启动进 cgroup -> 提示登录方式并等主窗口出现 (登录框小, 主窗口 >= main) -> 提示准备动作 (聊天: 点开会话让输入框有焦点; WPS: 新建空白文档) -> 演练一轮 work 脚本 + 读两次 oracle -> ready. onboard_overrides 按 id 覆盖 {main: [宽, 高], method, needs, prep}.",
+  "onboard_overrides": {},
+  "settle_s": 2.0,
+  "warmup_dwell_s": 10.0,
+  "minimize_background": false,
+  "default_rho": null,
+  "notifications": true,
+  "adopt_strays": true,
+  "sudo_adopt": false,
+  "launch_timeout_s": 90,
+  "ping_timeout_s": 15,
+  "min_ram_mb": 6144,
+  "out_dir": "results"
+}
