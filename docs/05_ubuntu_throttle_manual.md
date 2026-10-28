@@ -431,6 +431,18 @@ runner 的 preflight 会对 "从未 onboard" / "上次未就绪" 的应用给 wa
 `OUT/onboard.txt`。重启虚拟机后应用都要重新登录 (微信每次冷启动都要扫码), 所以 **每次开机跑一遍 `cf_onboard.sh`**, 已登录的应用几秒就过。
 Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常。
 
+**`--check` 表最后一列 `why` 告诉你每个未就绪应用卡在哪一步**, 按它处理:
+
+| `why` | 意思 | 怎么办 |
+|---|---|---|
+| `not running (TIMEOUT)` | 启动后没出窗口, 进程也不在了 (崩溃 / 启动命令不对) | 看 `results/app_logs/<id>.log`; `command not found` 说明启动名不在 PATH (现在会自动改用 `exe` 路径), 其他报错按日志; 手动能起来就用 `--discover` 核对 `cmd` 写进 `app_overrides` |
+| `login timeout / skipped` | 等了 `--onboard-timeout` (默认 600 s) 没见到 ≥ `main` 的主窗口 | 登录完成后重跑 `cf_onboard.sh <id>`; 主窗口本来就小的在 `onboard_overrides` 里改 `main` |
+| `no main window now (...)` | 记录是就绪的, 但现在没有一个 ≥ `main` 的普通窗口; `main_window` 列写着实际找到的最大窗口 (`largest 640x400 < 700x500`) 或 `no window matched` | 窗口被最小化 / 关掉了就点开; 尺寸偏小就放大窗口或改 `main`; `no window matched` = WM_CLASS / 标题都对不上, `--discover` 看真实的 WM_CLASS 写进 `app_overrides.wm_class` |
+| `work not-active` | 脚本发键前核对 `_NET_ACTIVE_WINDOW` 不是它: 切前台失败 (GNOME 焦点保护 / 弹窗挡住) 或当时记的是已经消失的登录框 | 重跑 `cf_onboard.sh <id>` (现在会重新找当前窗口); 还不行看 §10 "activate 失败" |
+| `oracle clipboard: xclip: ...` | 没装 xclip | `sudo apt install xclip` |
+| `oracle clipboard read nothing` | ctrl+a / ctrl+c 后剪贴板没有文本: 输入框没焦点, 或该应用复制出来的不是文本 | 在输入框 / 正文里点一下再重跑; WPS 确认光标在 blank.docx 正文而不是 "新建" 页 |
+| `oracle ... unstable` | 两次读到的内容不同 (有东西在自动变: 动画标题、输入法候选) | 换 oracle (`work_overrides`: `"oracle": "title"` / `"screen"`) |
+
 ## 5. 配置文件参考 (`configs/ubuntu_cn_desktop.json`)
 
 | 键 | 默认 | 含义 |

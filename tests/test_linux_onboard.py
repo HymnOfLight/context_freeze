@@ -222,14 +222,77 @@ def test_check_table(tmp_path, monkeypatch):
     monkeypatch.setattr(OB, "main_window", lambda d, a, spec, infos=None, geom=None:
                         {"wid": 5, "geometry": [1000, 700]} if a in dev.logged else None)
     monkeypatch.setattr(OB, "load_state", lambda path=None: {"wps": {"ready": True}, "wechat": {"ready": True}})
+    monkeypatch.setattr(OB, "seen_windows", lambda d, a, spec: "largest 640x400 < 700x500")
     out = []
     rc = OB.check(dev, ["wps", "wechat", "qq"], out=out.append)
     text = "\n".join(out)
-    assert rc == 1 and "wechat          True       True     -" in text     # onboarded, but its main window is gone now
+    # onboarded, but its main window is gone now: the table says what it did find and why that is not enough
+    assert rc == 1 and "wechat          True       True     largest 640x400 < 700x500" in text
+    assert "no main window now" in text and "--discover" in text
     assert "wps             True       True     [1000, 700]" in text
     assert "qq              False" in text                                  # not installed: never counted as bad
     monkeypatch.setattr(OB, "main_window", lambda d, a, spec, infos=None, geom=None: {"wid": 5, "geometry": [9, 9]})
     assert OB.check(dev, ["wps", "wechat"], out=lambda s: None) == 0
+
+
+def test_check_explains_each_failure_mode(monkeypatch):
+    cat = A.CATALOG
+    ap = cat["wechat"]
+    why = OB._why_not_ready
+    assert why({}, [1], None, ap) == "never onboarded"
+    assert why({"launch": "TIMEOUT"}, [], None, ap) == "not running (TIMEOUT)"          # crashed: see app_logs
+    assert why({"launch": "COLD", "login_how": "timeout"}, [1], {"wid": 1}, ap) == "login timeout"
+    assert why({"launch": "COLD", "logged_in": True, "login_how": "confirmed"}, [1], None, ap).startswith("no main window now")
+    rec = {"launch": "COLD", "logged_in": True, "login_how": "detected", "prep": True,
+           "rehearsal": {"oracle": "clipboard", "work_status": "not-active", "stable": None}}
+    assert why(rec, [1], {"wid": 1}, ap) == "work not-active"
+    rec["rehearsal"] = {"oracle": "clipboard", "work_status": "ok", "stable": None, "oracle_error": "xclip: [Errno 2]"}
+    assert why(rec, [1], {"wid": 1}, ap) == "oracle clipboard: xclip: [Errno 2]"
+    rec["rehearsal"] = {"oracle": "clipboard", "work_status": "ok", "stable": None}
+    assert why(rec, [1], {"wid": 1}, ap) == "oracle clipboard read nothing"
+    rec["rehearsal"] = {"oracle": "clipboard", "work_status": "ok", "stable": False}
+    assert why(rec, [1], {"wid": 1}, ap) == "oracle clipboard unstable"
+    # the summary table carries the oracle error and a non-automatic login too
+    st = {"wechat": {"logged_in": True, "login_how": "confirmed", "ready": False, "method": "qr", "at": "2026-10-27T09:58",
+                     "rehearsal": {"kind": "draft", "oracle": "clipboard", "work_status": "not-active", "stable": None,
+                                   "oracle_error": "not-active"}}}
+    row = OB.summary(["wechat"], st)
+    assert "err=not-active" in row and "login=confirmed" in row
+
+
+def test_seen_windows_describes_what_was_found(monkeypatch):
+    cat = A.CATALOG
+    dev = _Dev(cat, {"wechat": [100], "wps": [200], "qq": [300]})
+    infos = {
+        100: [{"wid": 1, "pid": 100, "wm_class": ["wechat", "wechat"], "name": "微信", "type": "", "state": []}],
+        200: [{"wid": 2, "pid": 200, "wm_class": ["wps", "wps"], "name": "", "type": "_NET_WM_WINDOW_TYPE_DOCK", "state": []}],
+        300: [],
+    }
+    monkeypatch.setattr(OB.x11, "windows_for", lambda pids, c=None, n=None, infos_=None: infos.get(next(iter(pids), 0), []))
+    monkeypatch.setattr(OB.x11, "geometry", lambda wid: {1: (640, 400), 2: (50, 50)}.get(wid))
+    assert OB.seen_windows(dev, "wechat", OB.login_spec(cat["wechat"])) == "largest 640x400 < 700x500"
+    assert OB.seen_windows(dev, "wps", OB.login_spec(cat["wps"])) == "1 non-normal (dock)"
+    assert OB.seen_windows(dev, "qq", OB.login_spec(cat["qq"])) == "no window matched"
+    assert OB.seen_windows(_Dev(cat), "qq", OB.login_spec(cat["qq"])) == "-"            # not running at all
+
+
+def test_onboard_repicks_the_window_after_a_manual_confirmation(tmp_path, monkeypatch):
+    """The launch sees the QR dialog; after Enter the main window is a different wid - rehearse that one."""
+    cat = A.CATALOG
+    dev = _WalkDev(cat, logged=set(), installed={"wechat"})
+    dev.window = lambda id_, infos=None, pids=None: {"wid": 0x2222, "name": "微信"}       # what exists now
+    monkeypatch.setattr(OB, "main_window", lambda d, a, spec, infos=None, geom=None: None)
+    monkeypatch.setattr(OB, "wait_for", lambda cond, timeout, prompt, interactive, out=print: (None, "confirmed"))
+    monkeypatch.setattr(OB, "ask", lambda prompt, interactive, out=print: True)
+    seen = {}
+    class Rec(FakeWorkDriver):
+        def work(self, app_id, wid, seconds, t):
+            seen["wid"] = wid
+            return super().work(app_id, wid, seconds, t)
+    monkeypatch.setattr(x11, "activate", lambda wid, timeout=10: {"ok": True})
+    st = OB.onboard(dev, ["wechat"], work=Rec(dev), interactive=True, timeout=0, work_s=0,
+                    out=lambda s: None, state_path=str(tmp_path / "s.json"))
+    assert seen["wid"] == 0x2222 and st["wechat"]["wid"] == 0x2222 and st["wechat"]["logged_in"] is True
 
 
 # ------------------------------------------------------------------ Xvfb: real geometry
