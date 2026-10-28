@@ -275,6 +275,27 @@ scripts/ubuntu/install_mobile_apps.sh --list   # 按配置里的 apps 逐个列:
 | `photosir` | 悟空图像 | 计算 | deb (photosir.com) | 是 | 同上, `--search 悟空图像` |
 | `xiaoyi` | 小艺 | 计算 | **无** (鸿蒙 PC 自带) | – | **`com.huawei.vassistant`**: 华为系统应用, 应用市场无独立 APK, 需从华为手机 `--from-phone` 拉取并同时装 HMS Core (`com.huawei.hwid`); Waydroid 里通常只能跑起界面, 语音 / 云端能力未必可用。还是装不上时, 只有把 `"placeholder"` 加进 `substitute_kinds` 才会退到 `xiaoyi_sim` |
 
+**arm64 虚拟机 (UTM / Apple Silicon) 能装的真机应用**比上表少: 百度网盘 / Chrome / Edge 没有 arm64 公开版, 剪映 / 小艺没有 Linux 版。
+为了让 arm64 上也有足够多的真实应用, 目录里另外收了 4 个**有官方 arm64 deb** 的常用国产应用 (不在默认场景里, 要用时加进配置的 `apps`
+并在内联场景里给权重, 见 §5):
+
+| id | 应用 | 类别 | 下载 (都要在浏览器里手动下, 选 ARM64 + deb) | 登录 |
+|---|---|---|---|---|
+| `feishu` | 飞书 | 推送 | https://www.feishu.cn/download → Linux 客户端 → deb → ARM64 (`Feishu-linux_arm64-*.deb`) | 手机号 + 验证码, 首次建一个团队 |
+| `wecom` | 企业微信 | 推送 | https://work.weixin.qq.com/ → 下载 → Linux 桌面端 → ARM deb | 手机企业微信 / 微信扫码, 首次建一个企业 |
+| `wemeet` | 腾讯会议 | 推送 | https://meeting.tencent.com/download/ → Linux → ARM64 (`TencentMeeting_*_arm64_*.deb`) | 手机号 + **密码** (先在手机上设; Linux 版扫码 / 验证码常失败); 只做常驻 / 通知负载, `work` 为 none |
+| `tencent_docs` | 腾讯文档 | 计算 | https://docs.qq.com/desktop/ → Linux → ARM deb (`TencentDocs-arm64.deb`) | 微信 / QQ 扫码; 新建文档停在正文 |
+
+QQ 音乐 / 网易云音乐 / 抖音 / 爱奇艺 等只有第三方重新打包的 arm64 deb (GitHub kota-rina3/hokeshi 之类), 来源不可控, 没有收录;
+ToDesk / 向日葵有官方 arm64 但不属于三类负载。这 4 个的包名 / 命令名以安装后 `--discover` 看到的为准 (`app_overrides`)。
+
+**批量安装** (手动下好的 deb 全放一个目录, 文件名随意):
+
+```bash
+sudo scripts/ubuntu/install_cn_apps.sh --firefox ~/Downloads/cf_debs   # Firefox deb 版 + xclip, 然后目录里每个 deb: 架构不对跳过 / 同版本已装跳过 / apt install
+scripts/ubuntu/install_cn_apps.sh --check                               # 哪些被认作已安装
+```
+
 **在 Mac 上下载 (`scripts/mac/download_cn_apps.sh`)**: 厂商基本不给稳定直链, 脚本按应用各用一招——微信: 固定的 universal 地址;
 QQ: im.qq.com 的 `linuxConfig.js`; 钉钉: `dingtalk.com/win/d/qd=linux_<arch>` 的跳转; WPS: amd64 用 linux.wps.cn 页面并按页面里的
 `downLoad()` 给 CDN 链接签名 (`?t=&k=md5(key+path+t)`), arm64 从 365.wps.cn 的脚本包里找; 百度网盘: `pan.baidu.com/disk/cmsdata` 接口
@@ -799,7 +820,7 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `scripts/ubuntu/cf_adopt.sh` | runner 内部 (sudo) | 把别的 uid 的进程 (Waydroid 里的 Android 应用) 移进 `/cf/<app>`; sudoers 规则由 `setup_waydroid.sh --install` 写 |
 | `scripts/ubuntu/setup_zram.sh [MB] [算法] / --off` | 每次开机 (sudo) | zstd zram swap (默认 4 GB), 让 `memory.high` 有地方放匿名页 |
 | `scripts/mac/download_cn_apps.sh [--arch arm64\|amd64] [--only a,b] [--open] [--dry-run] [--refresh] [--keep-foreign] [--scp user@vm] [--install] [--vm-repo P]` (在 Mac 上跑, 虚拟机里也能跑) | 装应用前 | 在宿主机批量下载各应用的 Ubuntu deb 到 `~/Downloads/cf_debs` (解析厂商页面 / 接口 / 签名链接; 无直链的打印页面或开浏览器), 记 SOURCES.txt; 重跑跳过已有的 (含手动存的厂商文件名), 自动删架构不符 / 损坏的包; `--scp --install` 一键拷进虚拟机并安装 |
-| `scripts/ubuntu/install_cn_apps.sh [--list] [--check] [DIR]` | 装应用 | 列出 13 个应用的下载页 / 架构 / 包名 / 手机版 fallback; 从目录批量安装 deb (跳过 x86_64-only) |
+| `scripts/ubuntu/install_cn_apps.sh [--list] [--check] [--firefox] [DIR]` | 装应用 | 列出全部桌面应用的下载页 / 架构 / 包名 / 手机版 fallback (本机没有的架构标 `!!`); `--firefox` 装 Mozilla deb 版 + xclip; 从目录批量安装 deb: 另一架构 / 同版本已装的跳过, 结尾列 installed / skipped / FAILED |
 | `scripts/ubuntu/setup_waydroid.sh [--install] [--status] [--stop]` | 有应用没有桌面版时 | Waydroid 仓库 + binder 模块 + init (一次); 每次登录起嵌套 weston X11 窗口 + 会话 + adb connect |
 | `scripts/ubuntu/install_mobile_apps.sh [--list] [--missing] [--from-phone SN pkg…] [--search 名]` | 同上 | 桌面版缺失的那些应用的手机版 APK: 下载并 `adb install`; 小艺从华为手机导出 |
 | `scripts/ubuntu/cf_launch.sh app…` | 首次登录 | 把应用启动进各自的 cgroup 并保持运行 (扫码 / 登录 / 关新手引导一次, 之后实验复用) |
