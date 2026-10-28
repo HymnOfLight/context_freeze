@@ -275,19 +275,36 @@ scripts/ubuntu/install_mobile_apps.sh --list   # 按配置里的 apps 逐个列:
 | `photosir` | 悟空图像 | 计算 | deb (photosir.com) | 是 | 同上, `--search 悟空图像` |
 | `xiaoyi` | 小艺 | 计算 | **无** (鸿蒙 PC 自带) | – | **`com.huawei.vassistant`**: 华为系统应用, 应用市场无独立 APK, 需从华为手机 `--from-phone` 拉取并同时装 HMS Core (`com.huawei.hwid`); Waydroid 里通常只能跑起界面, 语音 / 云端能力未必可用。还是装不上时, 只有把 `"placeholder"` 加进 `substitute_kinds` 才会退到 `xiaoyi_sim` |
 
-**arm64 虚拟机 (UTM / Apple Silicon) 能装的真机应用**比上表少: 百度网盘 / Chrome / Edge 没有 arm64 公开版, 剪映 / 小艺没有 Linux 版。
-为了让 arm64 上也有足够多的真实应用, 目录里另外收了 4 个**有官方 arm64 deb** 的常用国产应用 (不在默认场景里, 要用时加进配置的 `apps`
-并在内联场景里给权重, 见 §5):
+**arm64 虚拟机 (UTM / Apple Silicon) 能装的真机应用**比上表少: Chrome / Edge 没有 arm64 公开版, 剪映 / 小艺没有 Linux 版。
+为了让 arm64 上也有足够多的真实应用, 目录里另外收了两组应用。第一组 4 个有**官方 arm64 deb** (在浏览器里手动下, 选 ARM64 + deb):
 
-| id | 应用 | 类别 | 下载 (都要在浏览器里手动下, 选 ARM64 + deb) | 登录 |
+| id | 应用 | 类别 | 下载 | 登录 |
 |---|---|---|---|---|
 | `feishu` | 飞书 | 推送 | https://www.feishu.cn/download → Linux 客户端 → deb → ARM64 (`Feishu-linux_arm64-*.deb`) | 手机号 + 验证码, 首次建一个团队 |
 | `wecom` | 企业微信 | 推送 | https://work.weixin.qq.com/ → 下载 → Linux 桌面端 → ARM deb | 手机企业微信 / 微信扫码, 首次建一个企业 |
 | `wemeet` | 腾讯会议 | 推送 | https://meeting.tencent.com/download/ → Linux → ARM64 (`TencentMeeting_*_arm64_*.deb`) | 手机号 + **密码** (先在手机上设; Linux 版扫码 / 验证码常失败); 只做常驻 / 通知负载, `work` 为 none |
 | `tencent_docs` | 腾讯文档 | 计算 | https://docs.qq.com/desktop/ → Linux → ARM deb (`TencentDocs-arm64.deb`) | 微信 / QQ 扫码; 新建文档停在正文 |
 
-QQ 音乐 / 网易云音乐 / 抖音 / 爱奇艺 等只有第三方重新打包的 arm64 deb (GitHub kota-rina3/hokeshi 之类), 来源不可控, 没有收录;
-ToDesk / 向日葵有官方 arm64 但不属于三类负载。这 4 个的包名 / 命令名以安装后 `--discover` 看到的为准 (`app_overrides`)。
+第二组来自**星火应用商店 arm64 仓库** (https://mirrors.sdu.edu.cn/spark-store/arm64-apm/ 的 `store/` 子目录, 或装好 Spark Store 后在商店里搜;
+`.otohime` 后缀的是星火用 Wine / 容器重新打包的 Android 或 Windows 版, 其它是统信 UOS 商店的原生 Linux 版):
+
+| id | 应用 | 类别 | 包名 (dpkg) | 登录 / 准备 (`--onboard` 会逐条提示) |
+|---|---|---|---|---|
+| `baidunetdisk` | 百度网盘 | 下载 | `com.baidu.baidunetdisk` (UOS 4.17.x arm64) | 手机百度网盘扫码; 挂一个大文件下载 |
+| `xunlei` | 迅雷 | 下载 | `com.xunlei.download` | 手机号 + 验证码 / 扫码 (不登录不能建任务); 建一个大文件 http 下载任务停在任务列表 |
+| `iqiyi` | 爱奇艺 | 下载 | `com.iqiyi.otohime` | 可不登录; 开一个免费剧集播放 |
+| `douyin` | 抖音 | 下载 | `com.douyin.otohime` | 可不登录; 停在推荐流, 鼠标放视频上 |
+| `netease_music` | 网易云音乐 | 下载 | `netease.cloud.music.otohime` | 必须登录 (手机号 + 验证码 / 扫码); 放一个歌单后停在歌单页 |
+| `shimo` | 石墨文档 | 计算 | `shimo` | 手机号 + 验证码 / 微信扫码; 新建文档, 光标在正文 |
+
+同一仓库里还有夸克网盘 (`quark-cloud-drive`)、中国移动云盘 (`com.cmic.mcloud`)、金山文档 (`cn.kdocs.kdesktop`)、腾讯元宝、华为云会议、
+360 浏览器 (`browser360-cn-stable`)、ToDesk, 没有收进目录; 要用时按 §4.3 的方式在 `app_overrides` 里补条目。
+
+这些包装在 `/opt/apps/<包名>/files/` 下, **什么都不放进 PATH**: 启动器只认包里的 `.desktop` 文件。程序会自动识别: `is_installed` 看
+`/var/lib/dpkg/info/<包名>.list` (目录条目的 `package` 或 `alt_packages` 任一命中), `launch_cmd` 在 `cmd` 不在 PATH 上时依次改用 `exe` 和该包
+`.desktop` 的 `Exec` 行 (去掉 `%U` 之类的占位, 保留 `cmd` 里的参数)。`install_cn_apps.sh --check` / `--catalog` 的 cmd 列显示
+`thunder -> /opt/apps/com.xunlei.download/files/start.sh  [com.xunlei.download]` 就是识别成功; 窗口的 WM_CLASS 跟目录猜的不一样时
+(`--discover` 看), 写 `app_overrides.<id>.wm_class`。装好的全部应用集合有现成配置 `configs/ubuntu_arm64.json` (§5)。
 
 **批量安装** (手动下好的 deb 全放一个目录, 文件名随意):
 
@@ -427,6 +444,11 @@ catalogue id (`APP`) / 命令行。常见修正:
 | 钉钉 | 手机号 + 验证码 / 手机钉钉扫码; 首次建一个组织 "cf-bench" | 点开一个会话, 输入框点一下, 关掉引导 |
 | WPS | 可不登录 (关掉弹窗) | 启动命令直接打开 `~/.cache/context_freeze/blank.docx` (自动生成, 不经过联网的 "新建" 首页); 关掉弹窗, 在正文点一下让光标在文档里 (`edit` 打字 + 回车, 不保存) |
 | 百度网盘 | 手机百度网盘扫码 / 手机号验证码 | 挂一个大文件下载任务 (后台下载负载), 停在传输列表 |
+| 迅雷 | 手机号 + 验证码 / 手机迅雷扫码 (不登录不能建任务) | 新建一个大文件 http 下载任务 (如 Ubuntu ISO), 停在任务列表 (`browse` 滚动列表) |
+| 爱奇艺 / 抖音 | 可不登录; 手机扫码 | 爱奇艺: 开一个免费剧集播放 (`browse` 滚动剧集页); 抖音: 停在推荐流, 鼠标放在视频区 (`view` 每次滚一格 = 切下一条) |
+| 网易云音乐 | **必须登录**: 手机号 + 验证码 / 手机扫码 | 播放一个歌单让它一直放, 停在歌单页 (`browse` 滚动歌曲列表); 后台被限后歌是否断是观测点 |
+| 石墨文档 / 腾讯文档 | 手机号 + 验证码 / 微信扫码 | 新建一个文档, 在正文点一下 (`edit` 打字 + 回车, 云端自动保存) |
+| 腾讯会议 / 飞书 / 企业微信 | 手机号 + 密码 (会议) / 验证码 (飞书) / 扫码 (企微) | 会议停在主界面不进会 (`none`, 只做常驻); 飞书 / 企微点开一个会话, 输入框点一下 (`draft`) |
 | 哔哩哔哩 / 腾讯视频 | 可不登录; 扫码 / 验证码 | 首页推荐流 / 剧集页 (+ 一个缓存任务) (`browse` 滚动) |
 | Chrome / Edge / Firefox | 不需要账号 (不要登录浏览器同步) | 一个能向下滚动的长网页 |
 | 中望 CAD / 悟空图像 | 中望账号 + 试用授权 / 可不登录 | 打开一张图纸 / 图片, 鼠标停在画布 (`view` 滚轮缩放) |
@@ -466,6 +488,10 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 
 ## 5. 配置文件参考 (`configs/ubuntu_cn_desktop.json`)
 
+现成的配置: `ubuntu_cn_desktop.json` (手册默认的 13 个应用, x86 / 齐全时用), `ubuntu_arm64.json` (arm64 虚拟机实际装好的 13 个:
+微信 / QQ / 钉钉 / 腾讯会议 / 百度网盘 / 迅雷 / 爱奇艺 / 抖音 / 网易云音乐 / Firefox / WPS / 中望CAD / 石墨文档, 全部真跑 + `work`; 哔哩哔哩在
+虚拟机里软解太卡故意不列), `ubuntu_no_login.json` (§4.7), `ubuntu_placeholders.json` (冒烟)。
+
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `apps` | 13 个 id | 实验集合 (桌面版 id); 没装的沿 `substitute` 链找 `substitute_kinds` 允许的替代, 都没有则 WARN 并剔除 (少于 2 个时报错) |
@@ -484,7 +510,7 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 | `throttle.io_weight` | null | 后台 `io.weight` (需要 io 控制器, 对下载类应用有用) |
 | `throttle.proactive_reclaim` | true | 降档时立即写 `memory.reclaim` (内核 ≥ 5.19) |
 | `cpu_throttle_resident` | true | 预算内的后台应用也限 CPU (`bg`); false 则预算内的完全不受限, 策略只决定内存 |
-| `trace` | scenario office T=60 | `kind`: `scenario` (`office` `design` `download` `chat`) / `day` (四场景依次经历) / `zipf` / `markov`; 也可内联 `{"apps":{id:权重},"hub":id,"flows":[[...]]}` |
+| `trace` | scenario office T=60 | `kind`: `scenario` (`office` 办公 / `design` 设计 / `download` 下载 / `chat` 消息 / `media` 娱乐: 抖音 / 爱奇艺 / 网易云 / B站) / `day` (五场景按 15/35/15/20/15 % 依次经历) / `zipf` / `markov`; 也可内联 `{"apps":{id:权重},"hub":id,"flows":[[...]]}`。场景里本机没装 (不在 `apps`) 的应用自动剔除, 只要剩 ≥ 2 个就能跑 |
 | `dwell_s` / `settle_s` / `warmup_dwell_s` | [5, 12] / 2 / 10 | 每步停留 / 切换后等待 / warmup 每应用停留 (秒)。`dwell_s` 给一个数 = 固定; 给 `[lo, hi]` = 每步按 seed 均匀抽样 (同一 seed 下各策略的每一步停留相同, 可直接对比); 每条 `step` 记录带 `dwell_s` |
 | `sample_every_s` | 2.0 | > 0 时停留期间每隔这么多秒做一次轻量采样 (PSI cpu/mem/io、zram、MemAvailable、swap in/out、每应用 PSS / swap / cpu / 写盘 / 节流时间 / tier) → `step.timeline`, 画时间序列 (`--plots-dir` 的 `*_timeline.png`); 0 关闭 |
 | `placeholder_fill` | false | true (或 `--placeholders`): 没装上的应用用内置占位程序顶替, **id 不变**, 场景 / 轨迹不变 (`meta.placeholders` 列出); 在真实应用装齐之前就能跑完整矩阵, 之后同一命令重跑即用真实应用 |
@@ -525,9 +551,9 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy l
 python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario design --policy static --cpu-cores 0.5 --mem-frac 0.3
 
 # 6.3 矩阵: 场景 x 策略 x η x 种子 (+ 限流档位变体), 同一目录, 同一预算分母 (第一格的 m_fg 复用到所有格)
-scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60       # 默认: 4 场景 x (none static lru landlord hybrid) x η 0.6/0.8, ~30 格 ~8 h
+scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60       # 默认: 5 场景 (office download chat design media) x (none static lru landlord hybrid) x η 0.6/0.8, ~40 格 ~10 h
 NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40   # 过夜档: + 1c:0.3 / 0.5c:0.5 / cpuset / swap128 / memhard 对照, ~50 格 ~10 h
-FULL=1  scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60   # 全量: 5 场景 (含 day) x 6 策略 x η 0.55/0.7/0.85 x 2 seed x 全部变体, ~350 格, 数天 (可中断续跑)
+FULL=1  scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60   # 全量: 6 场景 (含 day) x 6 策略 x η 0.55/0.7/0.85 x 2 seed x 全部变体, ~350 格, 数天 (可中断续跑)
 PROFILES="1c:0.5 1c:0.3 0.5c:0.5" POLICIES="none static" scripts/ubuntu/run_matrix.sh     # 只比限流强度
 CPU_MODES="quota cpuset" RESIDENT="1 0" SWAP_CAPS="512 128" MEM_HARD=1 scripts/ubuntu/run_matrix.sh   # 单独点名变体
 MEM_FRAC=0.3 ETAS="0.4 0.6" scripts/ubuntu/run_matrix.sh                                 # 第二遍: 更小的 memory.high (文件名加 _mf0.3)
@@ -575,7 +601,10 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --release
 | 微信 / QQ / 钉钉 | `draft`: 往焦点输入框键入 `cf-work <id> t<step> 草稿未保存 ` | `clipboard`: ctrl+a ctrl+c 后剪贴板文本的长度 + md5 | 需要先手动点开一个会话让输入框有焦点 (登录时顺手做) |
 | WPS | `edit`: 键入同样一行 + 回车 | `clipboard` | 文档不保存; 回来时 ctrl+a 全选再 End 取消选区 |
 | 浏览器 / 腾讯视频 / 哔哩哔哩 | `browse`: 滚轮下翻 `scroll` 格再回退 1/4 | `title`: `_NET_WM_NAME` (页面标题) | 像素会随视频变化, 所以只认标题; 页面被重载会换标题 / 回到顶部 |
-| 百度网盘 / 小艺 | `none` | `title` | 下载本身在后台进行 (`write_mb` 已经度量) |
+| 百度网盘 / 小艺 / 腾讯会议 | `none` | `title` | 下载本身在后台进行 (`write_mb` 已经度量); 会议只做常驻 |
+| 迅雷 / 爱奇艺 / 网易云音乐 | `browse`: 滚动任务列表 / 剧集页 / 歌单 (`scroll` 4 / 6 / 6) | `title` | 下载 / 播放在后台继续; 标题 = 任务数 / 剧名 / 歌名, 被重载才会变 |
+| 抖音 | `view`: 滚轮 1 格 (= 切到下一条视频) | `title` | 每次 work 都翻一条, 后台被限到 1 核后回来是否卡顿看 `activate_ms` / `ping_ms` |
+| 石墨文档 / 腾讯文档 / 飞书 / 企业微信 | 同 WPS (`edit`) / 同微信 (`draft`) | `clipboard` | 在线文档云端自动保存, 回来时内容应完整 |
 | 中望CAD / 悟空图像 / kdenlive / librecad / gimp | `view`: 滚轮缩放 `scroll` 格 | `screen`: 窗口像素 16×16 均值哈希 (python-xlib `get_image`, 只取客户区), 汉明距离 ≤ `tolerance` 算相同 | 对光标闪烁、时钟数字不敏感, 对视图重置 / 重新打开敏感 |
 | 占位程序 | `none` | `statefile`: `/tmp/cf_placeholder_<id>.json` 的 `pid` 不变且 `counter` 不回退 | 冒烟配置用 |
 | 手机版 (Waydroid) | 下载 / 视频类 `swipe` (上滑 `swipes` 次, 短视频翻页); 推送类 `draft` (`input text`); 计算类 `view` (滑动) | `ui`: 最前 Activity + uiautomator dump 里全部文字 (数字抹掉) 的 md5; 也可选 `screen` (`screencap`) | 冷启动回到 Splash / 首页 → Activity 不同 → False |
@@ -834,5 +863,6 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |
 | `python3 -m cf.linux.placeholder_app --app ID --title T [--cpu f --mem MB --io-mbps n --notify-every s --workers k]` | 冒烟 / 占位 | 内置 X11 占位程序: 可控的 CPU / 内存 / 写盘 / 通知负载, 状态写到 `/tmp/cf_placeholder_<id>.json` |
 | `configs/ubuntu_cn_desktop.json` | 主配置 | 13 个应用、`substitute_kinds` / `mobile`、限流档位、轨迹、`dwell_s` 范围、`sample_every_s`、`placeholder_fill`、`work` / `work_s` / `work_overrides` |
+| `configs/ubuntu_arm64.json` | arm64 真机集合 | UTM 虚拟机实际装好的 13 个应用 (含星火商店的 迅雷 / 爱奇艺 / 抖音 / 网易云音乐 / 石墨文档 和 UOS 百度网盘), `work=true`, 五场景 (含 `media`) |
 | `configs/ubuntu_placeholders.json` | 冒烟 | 4 个占位程序的最小配置 (任何 X11 会话可跑, 含 Xvfb) |
 | `results/<matrix>/{summary,summary_agg,per_app,pareto}.csv`, `plots/*.png`, `report.md`, `matrix.env`, `*.console.log` | 产物 | 表 / 图 / 报告 / 本次矩阵的参数与机器信息 / 每格控制台输出 |
