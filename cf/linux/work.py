@@ -189,6 +189,7 @@ class X11WorkDriver:
         self.log = log
         self._disp = None
         self.err = ""
+        self.focus: Optional[str] = None      # who had the focus when the app was found not active
 
     # -- helpers
     def _display(self):
@@ -217,8 +218,24 @@ class X11WorkDriver:
             subprocess.run(["xdotool", "click", "--delay", "80", "--repeat", str(abs(n)), "5" if n > 0 else "4"],
                            capture_output=True, timeout=30)
 
-    def _active(self, wid: Optional[int]) -> bool:
-        return bool(wid) and x11.active_window() == wid
+    def _active(self, a: LinuxApp, wid: Optional[int]) -> bool:
+        """The app is in front: `wid` itself or another toplevel of the same app (QQ / DingTalk pop
+        a conversation out into its own window, WPS re-creates the document window) - XTEST input
+        goes to whatever has the focus, so any window of the app is a valid target.  `self.focus`
+        keeps a description of the window that had the focus, for the onboarding's diagnosis."""
+        act = x11.active_window()
+        self.focus = None
+        if not wid or not act:
+            return False
+        if act == wid:
+            return True
+        info = x11.window_info(act)
+        pids = self.dev.pids(a.id) if hasattr(self.dev, "pids") else []
+        if x11.windows_for(pids, a.wm_class, a.name_rx or None, [info]):
+            return True
+        self.focus = (f"0x{act:x} '{(info.get('name') or '')[:40]}' "
+                      f"[{'/'.join(info.get('wm_class') or []) or '?'}]")
+        return False
 
     def window_hash(self, wid: int) -> Optional[str]:
         d = self._display()
@@ -263,8 +280,9 @@ class X11WorkDriver:
         if kind == "none":
             rec["status"] = "skipped"
             return rec
-        if not self._active(wid):
+        if not self._active(a, wid):
             rec["status"] = "not-active"
+            rec["focus"] = self.focus
             return rec
         try:
             if kind in ("edit", "draft"):
@@ -309,8 +327,9 @@ class X11WorkDriver:
             if out["value"] is None:
                 out["error"] = self.err[:80]
         elif o == "clipboard":
-            if not self._active(wid):
+            if not self._active(a, wid):
                 out["error"] = "not-active"
+                out["focus"] = self.focus
                 return out
             self._key("ctrl+a", "ctrl+c")
             time.sleep(0.3)
