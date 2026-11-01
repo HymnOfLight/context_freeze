@@ -30,7 +30,7 @@
 │                                       #   国产应用目录 (下载/通知推送/计算处理; 桌面版 -> 同一应用的手机版), Waydroid 手机版运行时, 占位程序, ThrottleExperiment,
 │                                       #   work (脚本化操作 + 内容 oracle: xdotool / adb), focusd, analyze
 ├── run_experiment.py               # 真机 (Android 模拟器) 实验入口
-├── run_linux.py                    # Ubuntu 虚拟机实验入口 (--probe / --discover / --catalog / --mobile-status / --work-plan / --launch / --release)
+├── run_linux.py                    # Ubuntu 虚拟机实验入口 (--probe / --discover / --catalog / --menu / --mobile-status / --work-plan / --launch / --release)
 └── tests/                          # 解析器、策略、Bellman(与穷举一致)、runner 端到端 (假设备 / 假桌面)、cgroup 档位、X11 (Xvfb)、focusd
 ```
 

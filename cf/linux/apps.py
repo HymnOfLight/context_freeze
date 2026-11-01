@@ -119,7 +119,7 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
              substitute="baidunetdisk_mobile",
              note="登录后把一个大文件的下载任务挂着, 实验期间它就是后台下载负载"),
     LinuxApp("xunlei", "迅雷", "download",
-             cmd="thunder", match=r"(?i)xunlei|thunder|/opt/apps/com\.xunlei\.download/", wm_class=r"(?i)thunder|xunlei",
+             cmd="thunder", match=r"(?i)xunlei|thunder|/opt/apps/com\.xunlei\.download/", wm_class=r"(?i)(thunder|xunlei)(?!bird)",
              name_rx=r"迅雷|Thunder", package="com.xunlei.download", alt_packages=("xunlei", "thunder"), exe="",
              install="星火应用商店 arm64 / x86_64 仓库 (迅雷官方 Linux 版, 官网未上架; 包 com.xunlei.download)",
              note="登录后挂一个大文件的下载任务 (如 Ubuntu ISO 的 HTTP / 磁力链接), 停在任务列表; 与百度网盘一样是持续写盘的后台负载"),
@@ -338,17 +338,19 @@ _DESKTOP_FIELD_CODES = re.compile(r"\s*%[a-zA-Z]")
 
 
 _PKG_SEPS = ".-_:+"
+_WORD_SEPS = _PKG_SEPS + " \t()[]/,，（）"
 
 
-def _matches_component(rx: "re.Pattern", name: str) -> bool:
+def _matches_component(rx: "re.Pattern", name: str, seps: str = _PKG_SEPS) -> bool:
     """Does the regex match whole dotted / dashed components of a package name?  'xunlei' in
     com.xunlei.download yes, 'thunder' in thunderbird no (the app regexes are written for
-    process command lines, so a bare substring match would be far too loose here)."""
+    process command lines, so a bare substring match would be far too loose here).  With
+    `seps=_WORD_SEPS` the same for the words of a menu title ('Thunder' vs 'Thunderbird')."""
     for m in rx.finditer(name):
         if m.end() == m.start():
             continue
-        left_ok = m.start() == 0 or name[m.start() - 1] in _PKG_SEPS
-        right_ok = m.end() == len(name) or name[m.end()] in _PKG_SEPS
+        left_ok = m.start() == 0 or name[m.start() - 1] in seps
+        right_ok = m.end() == len(name) or name[m.end()] in seps
         if left_ok and right_ok:
             return True
     return False
@@ -400,32 +402,150 @@ def parse_desktop_entry(text: str) -> dict:
             out["exec"] = _DESKTOP_FIELD_CODES.sub("", v).strip()
         elif k in ("Name", "StartupWMClass", "Icon", "NoDisplay") and k.lower() not in out:
             out[k.lower()] = v
+        if k == "Name" or k.startswith("Name[") or k == "GenericName" or k.startswith("GenericName["):
+            out.setdefault("names", [])
+            if v and v not in out["names"]:
+                out["names"].append(v)
     return out
 
 
-def desktop_entry(a: LinuxApp, dpkg_info: str = DPKG_INFO) -> Optional[dict]:
-    """The launcher of the installed package: the first .desktop file dpkg knows about (menu
-    entries first), parsed.  This is what the GUI's app grid runs, so it is the most reliable
-    start command for vendor / UOS / 星火 debs whose binaries are not on PATH."""
-    p = installed_package(a, dpkg_info)
-    if not p:
-        return None
-    try:
-        with open(os.path.join(dpkg_info, f"{p}.list"), encoding="utf-8", errors="replace") as f:
-            files = [ln.strip() for ln in f if ln.strip().endswith(".desktop")]
-    except OSError:
-        return None
-    files.sort(key=lambda s: (not ("/applications/" in s), s))
-    for path in files:
+# ------------------------------------------------------------------ menu entries (any packaging)
+# What the desktop's app grid shows.  Covers whatever dpkg does not: flatpak / snap exports, AppImage
+# launchers in ~/.local, 星火 / UOS entries, Android-app wrappers - if it has an icon in the grid it
+# has a .desktop file in one of these, and its Exec line is the command the user clicks.
+APPLICATION_DIRS = ("/usr/share/applications", "/usr/local/share/applications",
+                    "~/.local/share/applications",
+                    "/var/lib/flatpak/exports/share/applications",
+                    "~/.local/share/flatpak/exports/share/applications",
+                    "/var/lib/snapd/desktop/applications")
+_MENU_CACHE: dict[tuple, list[dict]] = {}
+
+
+def application_dirs() -> list[str]:
+    import glob
+    dirs = [os.path.expanduser(d) for d in APPLICATION_DIRS]
+    for d in os.environ.get("XDG_DATA_DIRS", "").split(":"):
+        if d:
+            dirs.append(os.path.join(d, "applications"))
+    dirs += sorted(glob.glob("/opt/apps/*/entries/applications"))
+    out, seen = [], set()
+    for d in dirs:
+        r = os.path.realpath(d)
+        if r not in seen and os.path.isdir(r):
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+def menu_entries(dirs: Optional[Sequence[str]] = None, refresh: bool = False) -> list[dict]:
+    """Every launchable .desktop entry (NoDisplay ones skipped), parsed, with `path` and `stem`."""
+    dirs = list(dirs) if dirs is not None else application_dirs()
+    key = tuple(dirs)
+    if not refresh and key in _MENU_CACHE:
+        return _MENU_CACHE[key]
+    out: list[dict] = []
+    for d in dirs:
         try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                d = parse_desktop_entry(f.read())
+            files = sorted(f for f in os.listdir(d) if f.endswith(".desktop"))
         except OSError:
             continue
-        if d.get("exec") and d.get("nodisplay", "").lower() != "true":
-            d["path"], d["package"] = path, p
-            return d
+        for f in files:
+            path = os.path.join(d, f)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    e = parse_desktop_entry(fh.read())
+            except OSError:
+                continue
+            if not e.get("exec") or e.get("nodisplay", "").lower() == "true":
+                continue
+            e["path"], e["stem"] = path, f[:-len(".desktop")]
+            out.append(e)
+    _MENU_CACHE[key] = out
+    return out
+
+
+def _rx(pattern: Optional[str]) -> Optional["re.Pattern"]:
+    if not pattern:
+        return None
+    try:
+        return re.compile(pattern, re.I)
+    except re.error:
+        return None
+
+
+def entry_matches(a: LinuxApp, e: dict) -> Optional[str]:
+    """Why a menu entry is this app (None when it is not): its StartupWMClass fits `wm_class`, a
+    menu title is the app's name (`name_rx`, or the id as a whole word), the file name is the
+    package / contains the process regex as a component, or the Exec line matches it."""
+    if a.kind not in ("desktop", "oss") or not a.linux:
+        return None
+    stem = e.get("stem") or ""
+    if stem in (a.package, *a.alt_packages) and stem:
+        return "package"
+    crx = _rx(a.wm_class)
+    if crx and e.get("startupwmclass") and crx.search(e["startupwmclass"]):
+        return "wm_class"
+    nrx = _rx(a.name_rx)
+    for n in e.get("names") or []:
+        if nrx and _matches_component(nrx, n, _WORD_SEPS):
+            return "name"
+        if _matches_component(re.compile(re.escape(a.id), re.I), n, _WORD_SEPS):
+            return "name"
+    mrx = _rx(a.match)
+    if mrx and not stem.startswith("lib") and _matches_component(mrx, stem):
+        return "file"
+    if mrx and _matches_component(mrx, e.get("exec") or "", _WORD_SEPS):    # thunder != thunderbird
+        return "exec"
     return None
+
+
+_HOW_RANK = {"package": 0, "wm_class": 1, "name": 2, "file": 3, "exec": 4}
+
+
+def menu_entry(a: LinuxApp, dirs: Optional[Sequence[str]] = None) -> Optional[dict]:
+    """The app's launcher in the desktop menu, whatever installed it; `how` says what matched.
+    When several entries fit (WPS 文字 / 表格 / 演示) the one whose Exec runs the documented `cmd`
+    wins, then the strongest kind of match."""
+    tok = _first_token(a.cmd or "")
+    best, best_key = None, None
+    for e in menu_entries(dirs):
+        how = entry_matches(a, e)
+        if not how:
+            continue
+        exe = os.path.basename(_first_token(e.get("exec") or ""))
+        key = (0 if tok and exe == tok else 1, _HOW_RANK[how], e["path"])
+        if best_key is None or key < best_key:
+            best, best_key = dict(e, how=how), key
+    return best
+
+
+def desktop_entry(a: LinuxApp, dpkg_info: str = DPKG_INFO,
+                  menu_dirs: Optional[Sequence[str]] = None) -> Optional[dict]:
+    """The app's launcher: the first .desktop file of the installed dpkg package (menu entries
+    first), else the matching entry of the desktop menu (`menu_entry`: flatpak / snap / AppImage /
+    store wrappers that dpkg knows nothing about).  This is what the GUI's app grid runs, so it is
+    the most reliable start command for builds whose binaries are not on PATH."""
+    p = installed_package(a, dpkg_info)
+    if p:
+        try:
+            with open(os.path.join(dpkg_info, f"{p}.list"), encoding="utf-8", errors="replace") as f:
+                files = [ln.strip() for ln in f if ln.strip().endswith(".desktop")]
+        except OSError:
+            files = []
+        files.sort(key=lambda s: (not ("/applications/" in s), s))
+        for path in files:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    d = parse_desktop_entry(f.read())
+            except OSError:
+                continue
+            if d.get("exec") and d.get("nodisplay", "").lower() != "true":
+                d["path"], d["package"], d["how"] = path, p, "dpkg"
+                return d
+    m = menu_entry(a, menu_dirs)
+    if m:
+        m.setdefault("package", None)
+    return m
 
 
 def launch_cmd(a: LinuxApp, dpkg_info: str = DPKG_INFO) -> str:
@@ -465,7 +585,7 @@ def is_installed(a: LinuxApp, arch: Optional[str] = None, mobile=None) -> bool:
         return True
     if shutil.which(tok):
         return True
-    return installed_package(a) is not None
+    return installed_package(a) is not None or menu_entry(a) is not None
 
 
 DEFAULT_SUBSTITUTE_KINDS: tuple[str, ...] = ("mobile",)
@@ -654,6 +774,36 @@ def describe(apps: Optional[Sequence[str]] = None, cat: Optional[dict[str, Linux
     return "\n".join(lines)
 
 
+def menu_table(cat: Optional[dict[str, LinuxApp]] = None, apps: Optional[Sequence[str]] = None,
+               dirs: Optional[Sequence[str]] = None) -> str:
+    """Which menu entry each desktop app of `apps` (default: the whole catalogue) resolves to, and
+    the entries nothing claimed - the raw material for `app_overrides` when a store wrapper or an
+    Android-app launcher does not look like the vendor build at all."""
+    cat = cat or CATALOG
+    ids = [i for i in (apps or list(cat)) if i in cat and cat[i].kind in ("desktop", "oss") and cat[i].linux]
+    entries = menu_entries(dirs)
+    rows = [("id", "matched by", ".desktop", "Name", "StartupWMClass", "Exec")]
+    claimed = set()
+    for i in ids:
+        a = cat[i]
+        m = menu_entry(a, dirs)
+        if m:
+            claimed.add(m["path"])
+            rows.append((i, m["how"], os.path.basename(m["path"]), (m.get("name") or (m.get("names") or ["?"])[0])[:24],
+                         m.get("startupwmclass") or "-", m["exec"][:80]))
+        else:
+            rows.append((i, "-", "(no menu entry)", "-", "-", "-"))
+    widths = [max(len(str(r[k])) for r in rows) for k in range(5)]
+    out = ["  ".join(str(c).ljust(widths[k]) for k, c in enumerate(r[:5])) + "  " + r[5] for r in rows]
+    rest = [e for e in entries if e["path"] not in claimed]
+    out.append(f"\nunclaimed menu entries ({len(rest)}; a missing app hiding here -> app_overrides: "
+               f"{{\"<id>\": {{\"cmd\": \"<Exec>\", \"match\": \"<regex on the process cmdline>\", \"wm_class\": \"<class>\"}}}}):")
+    for e in rest:
+        out.append(f"  {os.path.basename(e['path']):40s} {(e.get('name') or (e.get('names') or ['?'])[0])[:24]:24s} "
+                   f"{(e.get('startupwmclass') or '-'):20s} {e['exec'][:70]}")
+    return "\n".join(out)
+
+
 def catalog_table(cat: Optional[dict[str, LinuxApp]] = None, arch: Optional[str] = None, mobile=None) -> str:
     cat = cat or CATALOG
     rows = [("id", "name", "kind", "category", "installed", "cmd / package", "install / note")]
@@ -674,6 +824,10 @@ def catalog_table(cat: Optional[dict[str, LinuxApp]] = None, arch: Optional[str]
             pkg = installed_package(a)
             if pkg and pkg != a.package:
                 how += f"  [{pkg}]"
+            elif not pkg and real != a.cmd:
+                d = desktop_entry(a)
+                if d and d.get("path"):             # not a deb: say which menu entry it is
+                    how += f"  [{os.path.basename(d['path'])}]"
         rows.append((a.id, a.name, a.kind, a.category, inst, (how or "-")[:70], (a.install or a.note)[:90]))
     widths = [max(len(str(r[i])) for r in rows) for i in range(6)]
     return "\n".join("  ".join(str(c).ljust(widths[i]) for i, c in enumerate(r[:6])) + "  " + r[6] for r in rows)
