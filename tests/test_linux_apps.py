@@ -102,6 +102,7 @@ def test_launch_cmd_falls_back_to_the_desktop_exec_of_the_installed_package(tmp_
     and only ship a .desktop file: the app is recognised through `alt_packages` and started with
     the menu entry's Exec line (field codes stripped, cmd arguments kept)."""
     monkeypatch.setattr(A.shutil, "which", lambda tok: None)
+    monkeypatch.setattr(A, "application_dirs", lambda: [])          # no real desktop menu in this test
     info = _fake_deb(tmp_path, "com.xunlei.download", {
         "opt/apps/com.xunlei.download/entries/applications/com.xunlei.download.desktop":
             "[Desktop Entry]\nName=迅雷\nExec=/opt/apps/com.xunlei.download/files/start.sh %U\n"
@@ -131,6 +132,7 @@ def test_installed_package_falls_back_to_a_dpkg_name_matching_the_app_regex(tmp_
     package whose name has a component matching the app's process regex and that ships a .desktop
     counts - but not thunderbird for 迅雷, and not a library."""
     monkeypatch.setattr(A.shutil, "which", lambda tok: None)
+    monkeypatch.setattr(A, "application_dirs", lambda: [])
     info = _fake_deb(tmp_path, "cn.xunlei.thunder", {"opt/apps/cn.xunlei.thunder/x.desktop": "[Desktop Entry]\nExec=/opt/apps/cn.xunlei.thunder/run\n"})
     _fake_deb(tmp_path, "thunderbird", {"usr/share/applications/thunderbird.desktop": "[Desktop Entry]\nExec=thunderbird\n"})
     (tmp_path / "dpkg" / "libxunlei0:arm64.list").write_text("/usr/lib/libxunlei.so\n")
@@ -147,9 +149,83 @@ def test_installed_package_falls_back_to_a_dpkg_name_matching_the_app_regex(tmp_
 
 
 def test_parse_desktop_entry_handles_comments_quotes_and_missing_group():
-    d = A.parse_desktop_entry("# comment\n[Desktop Entry]\nExec=\"/opt/a b/run\" --flag %f %u\nName=A\nName[zh_CN]=甲\n")
-    assert d["exec"] == '"/opt/a b/run" --flag' and d["name"] == "A"
+    d = A.parse_desktop_entry("# comment\n[Desktop Entry]\nExec=\"/opt/a b/run\" --flag %f %u\nName=A\nName[zh_CN]=甲\n"
+                              "GenericName=Downloader\n")
+    assert d["exec"] == '"/opt/a b/run" --flag' and d["name"] == "A" and d["names"] == ["A", "甲", "Downloader"]
     assert A.parse_desktop_entry("Exec=/bin/true\n") == {}                 # no [Desktop Entry] group
+
+
+def _menu(tmp_path, entries):
+    """A fake applications/ dir: {file stem: desktop text}; returns [dir]."""
+    d = tmp_path / "applications"
+    d.mkdir(parents=True, exist_ok=True)
+    for stem, text in entries.items():
+        (d / f"{stem}.desktop").write_text(text, encoding="utf-8")
+    return [str(d)]
+
+
+_ARM64_GRID = {   # what the arm64 VM's app grid showed while dpkg knew none of them
+    "wemeetapp": "[Desktop Entry]\nName=WemeetApp\nExec=/opt/wemeet/wemeetapp.sh %u\nStartupWMClass=wemeetapp\n",
+    "baidunetdisk": "[Desktop Entry]\nName=Baidu Netdisk\nName[zh_CN]=百度网盘\nExec=/opt/baidunetdisk/baidunetdisk %U\n",
+    "com.qiyi.video": "[Desktop Entry]\nName=爱奇艺\nExec=himirage run com.qiyi.video\nIcon=iqiyi\n",
+    "com.ss.android.ugc.aweme": "[Desktop Entry]\nName=抖音\nExec=himirage run com.ss.android.ugc.aweme\n",
+    "netease-cloud-music": "[Desktop Entry]\nName=Netease Cloud Music\nExec=/opt/netease/ncm/run.sh\n",
+    "thunder": "[Desktop Entry]\nName=thunder\nExec=/opt/thunder/start.sh %U\n",
+    "thunderbird": "[Desktop Entry]\nName=Thunderbird Mail\nExec=thunderbird %u\nStartupWMClass=thunderbird\n",
+    "ceis.app.ai": "[Desktop Entry]\nName=ceis.app.ai\nExec=himirage run ceis.app.ai\n",
+    "wps-office-et": "[Desktop Entry]\nName=WPS 表格\nExec=/usr/bin/et %f\n",
+    "wps-office-wps": "[Desktop Entry]\nName=WPS 文字\nExec=/usr/bin/wps %f\n",
+    "hidden": "[Desktop Entry]\nName=抖音 helper\nNoDisplay=true\nExec=/bin/true\n",
+}
+
+
+def test_menu_entry_recognises_apps_dpkg_does_not_know(tmp_path, monkeypatch):
+    """The second arm64 run: 迅雷 / 爱奇艺 / 抖音 / 网易云 / 网盘 / 腾讯会议 were in the GNOME grid but
+    installed by something other than dpkg -> no .list file, 'not installed'.  The menu entry (any
+    packaging) is matched by StartupWMClass, title, file name or Exec, and its Exec is the launcher."""
+    monkeypatch.setattr(A.shutil, "which", lambda tok: None)
+    monkeypatch.setattr(A, "application_dirs", lambda: [])
+    dirs = _menu(tmp_path, _ARM64_GRID)
+    cat = A.CATALOG
+    got = {i: A.menu_entry(cat[i], dirs) for i in ("wemeet", "baidunetdisk", "iqiyi", "douyin", "netease_music", "xunlei")}
+    assert got["wemeet"]["how"] == "package" and got["wemeet"]["exec"] == "/opt/wemeet/wemeetapp.sh"
+    wm = dict([e for e in A.menu_entries(dirs) if e["stem"] == "wemeetapp"][0], stem="tencent-meeting-x")
+    assert A.entry_matches(cat["wemeet"], wm) == "wm_class"
+    assert got["baidunetdisk"]["how"] == "package" and got["baidunetdisk"]["exec"] == "/opt/baidunetdisk/baidunetdisk"
+    bn = dict([e for e in A.menu_entries(dirs) if e["stem"] == "baidunetdisk"][0], stem="x-netdisk")
+    assert A.entry_matches(cat["baidunetdisk"], bn) == "name"                # 'Baidu Netdisk' / '百度网盘' title
+    assert got["iqiyi"]["how"] == "name" and got["iqiyi"]["exec"] == "himirage run com.qiyi.video"
+    assert got["douyin"]["stem"] == "com.ss.android.ugc.aweme"               # the NoDisplay helper is skipped
+    assert got["netease_music"]["how"] in ("package", "name") and got["netease_music"]["exec"] == "/opt/netease/ncm/run.sh"
+    assert got["xunlei"]["stem"] == "thunder" and got["xunlei"]["exec"] == "/opt/thunder/start.sh"
+    th = dict([e for e in A.menu_entries(dirs) if e["stem"] == "thunder"][0], stem="x-dl")
+    assert A.entry_matches(cat["xunlei"], th) == "name"                      # the bare title 'thunder'
+    # thunderbird is never 迅雷 (title word, file name and Exec are all checked on whole components)
+    tb = [e for e in A.menu_entries(dirs) if e["stem"] == "thunderbird"][0]
+    assert A.entry_matches(cat["xunlei"], tb) is None
+    # several entries fit WPS: the one whose Exec runs the documented `cmd` (wps) wins over 表格
+    assert A.menu_entry(cat["wps"], dirs)["exec"] == "/usr/bin/wps"
+    # unknown vendor wrappers are not claimed by anything
+    assert all(A.entry_matches(a, [e for e in A.menu_entries(dirs) if e["stem"] == "ceis.app.ai"][0]) is None
+               for a in cat.values())
+    # mobile / placeholder / no-linux entries never match a menu entry
+    assert A.menu_entry(cat["wechat_mobile"], dirs) is None and A.menu_entry(cat["jianying"], dirs) is None
+    # and it all feeds is_installed / desktop_entry / launch_cmd when neither PATH nor dpkg know the app
+    monkeypatch.setattr(A, "application_dirs", lambda: dirs)
+    A._MENU_CACHE.clear()
+    info = str(tmp_path / "empty-dpkg"); (tmp_path / "empty-dpkg").mkdir()
+    assert A.installed_package(cat["iqiyi"], info) is None
+    assert A.is_installed(cat["iqiyi"], arch="aarch64") and A.is_installed(cat["wemeet"], arch="aarch64")
+    assert A.desktop_entry(cat["douyin"], info)["how"] == "name" and A.desktop_entry(cat["douyin"], info)["package"] is None
+    assert A.launch_cmd(cat["iqiyi"], info) == "himirage run com.qiyi.video"
+    assert A.launch_cmd(cat["wemeet"], info) == "/opt/wemeet/wemeetapp.sh"
+    assert not A.is_installed(cat["feishu"], arch="aarch64")
+    table = A.catalog_table(cat, arch="aarch64")
+    row = [ln for ln in table.splitlines() if ln.startswith("iqiyi ")][0]
+    assert "yes" in row and "himirage run com.qiyi.video" in row and "[com.qiyi.video.desktop]" in row
+    mt = A.menu_table(cat, ["iqiyi", "xunlei", "feishu"], dirs)
+    assert "iqiyi" in mt and "com.qiyi.video.desktop" in mt and "(no menu entry)" in mt
+    assert "unclaimed menu entries" in mt and "ceis.app.ai" in mt and "thunderbird" in mt
 
 
 def test_catalog_marks_the_arm64_additions_and_their_packages():
