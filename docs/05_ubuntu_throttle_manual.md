@@ -254,6 +254,7 @@ scripts/mac/download_cn_apps.sh --open --scp ubuntu@<vm-ip> --install    # 一�
 scripts/ubuntu/install_cn_apps.sh --list       # 每个桌面版: 下载页 / 架构 / deb 包名 / 备注 / 它的手机版 fallback
 sudo scripts/ubuntu/install_cn_apps.sh ~/Downloads/cf_debs     # apt install ./*.deb (自动跳过架构不符的包)
 python3 run_linux.py configs/ubuntu_cn_desktop.json --catalog   # 整个目录: kind / 是否已装 / 没装时会退到哪一条
+python3 run_linux.py configs/ubuntu_cn_desktop.json --menu      # 桌面菜单里每个应用认领到的 .desktop (非 deb 安装) + 没人认领的条目
 scripts/ubuntu/install_mobile_apps.sh --list   # 按配置里的 apps 逐个列: 桌面版状态 / 手机版状态 / 实际会跑哪一个
 ```
 
@@ -306,6 +307,14 @@ scripts/ubuntu/install_mobile_apps.sh --list   # 按配置里的 apps 逐个列:
 名字成分与该应用进程正则匹配、且带 `.desktop` 的包 (`thunderbird` 不会被当成迅雷)。`install_cn_apps.sh --check` / `--catalog` 的 cmd 列显示
 `thunder -> /opt/apps/com.xunlei.download/files/start.sh  [com.xunlei.download]` 就是识别成功; 窗口的 WM_CLASS 跟目录猜的不一样时
 (`--discover` 看), 写 `app_overrides.<id>.wm_class`。装好的全部应用集合有现成配置 `configs/ubuntu_arm64.json` (§5)。
+
+**不是 deb 装的也认** (flatpak / snap / AppImage / 商店自带的安卓应用包装器 - `dpkg -l` 里没有, 但应用网格里有图标): 最后一道兜底是**桌面菜单
+本身** - 扫 `/usr/share/applications`、`~/.local/share/applications`、flatpak / snap 的 exports 目录和 `/opt/apps/*/entries/applications`
+里所有的 `.desktop`, 按 `StartupWMClass` ↔ `wm_class`、标题 (`Name` / `Name[zh_CN]`) ↔ `name_rx` 或 id、文件名 ↔ 包名 / 进程正则、`Exec` ↔
+进程正则 (都按整词 / 整段匹配, `Thunderbird` 不是 `thunder`) 认领一个条目, 它的 `Exec` 就是启动命令。`python3 run_linux.py CONFIG --menu`
+列出每个应用认领到的条目 (`matched by` 列) 和**没人认领的其余条目**; 配置里的应用在 `--check` 仍是 `no` 时, 就在这份 "unclaimed" 列表里找它,
+把 `Exec` 写进 `app_overrides.<id>.cmd` (`match` / `wm_class` 启动后用 `--discover` 核对)。注意这类启动器进程名未必含应用名 (例如安卓
+包装器), 进程识别靠的是启动时进的 cgroup, 所以**一定要让 `cf_onboard.sh` / `cf_launch.sh` 启动它**, 不要点图标。
 
 **批量安装** (手动下好的 deb 全放一个目录, 文件名随意):
 
@@ -861,7 +870,7 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `scripts/ubuntu/install_mobile_apps.sh [--list] [--missing] [--from-phone SN pkg…] [--search 名]` | 同上 | 桌面版缺失的那些应用的手机版 APK: 下载并 `adb install`; 小艺从华为手机导出 |
 | `scripts/ubuntu/cf_launch.sh app…` | 首次登录 | 把应用启动进各自的 cgroup 并保持运行 (扫码 / 登录 / 关新手引导一次, 之后实验复用) |
 | `scripts/ubuntu/cf_onboard.sh [app…] / --check` + `configs/accounts.json` | 每次开机 | 统一账号登录向导: 启动进 cgroup → 按 `accounts.json` 提示登录方式并等主窗口 → 提示准备动作 → 演练一轮 `--work` 脚本 + oracle; 记 `results/onboard/state.json`, `--check` 列表 (§4.6) |
-| `python3 run_linux.py CONFIG --probe / --catalog / --discover / --mobile-status / --scenario list / --work-plan / --launch / --onboard [--yes] / --onboard-check / --release` | 诊断 | 环境与每应用可用性 / 目录表 / 桌面上实际的 WM_CLASS 与 cgroup 叶 / Android 状态 / 本配置会用哪些应用 / 每应用的脚本化操作与 oracle / 启动 / 清限制 |
+| `python3 run_linux.py CONFIG --probe / --catalog / --menu / --discover / --mobile-status / --scenario list / --work-plan / --launch / --onboard [--yes] / --onboard-check / --release` | 诊断 | 环境与每应用可用性 / 目录表 / 桌面菜单条目 (非 deb 安装也认) / 桌面上实际的 WM_CLASS 与 cgroup 叶 / Android 状态 / 本配置会用哪些应用 / 每应用的脚本化操作与 oracle / 启动 / 清限制 |
 | `python3 run_linux.py CONFIG --policy … --eta … --T … --scenario … [--work] [--resume FILE]` | 单格实验 | 一次实验 → `results/<name>.jsonl` (+ `.log`, `.ckpt`); Ctrl+C 安全, `--resume` 续跑 |
 | `cf/linux/work.py` (`WorkDriver`: `X11WorkDriver` + `AdbWorkDriver`) | `--work` 内部 | 每类应用的默认脚本 (打草稿 / 滚动 / 缩放 / 上滑) 与内容 oracle (clipboard / title / screen / statefile / ui), 比较规则; `work_overrides` 按 id 覆盖 |
 | `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / WORK (+ WORK_S) / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |

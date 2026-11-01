@@ -4,6 +4,7 @@
     python3 run_linux.py configs/ubuntu_cn_desktop.json --probe        # environment + per-app availability
     python3 run_linux.py configs/ubuntu_cn_desktop.json --discover     # windows on screen: pid / WM_CLASS / cmd
     python3 run_linux.py configs/ubuntu_cn_desktop.json --catalog      # the app catalogue and what is installed
+    python3 run_linux.py configs/ubuntu_cn_desktop.json --menu         # desktop menu entries per app (non-deb installs too)
     python3 run_linux.py configs/ubuntu_cn_desktop.json --mobile-status  # Waydroid session / adb / installed APKs
     python3 run_linux.py configs/ubuntu_cn_desktop.json --launch wechat qq   # start apps into their cgroups (log in once)
     python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario list
@@ -87,6 +88,9 @@ def main(argv=None) -> int:
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--probe", action="store_true"); ap.add_argument("--discover", action="store_true")
     ap.add_argument("--catalog", action="store_true")
+    ap.add_argument("--menu", action="store_true",
+                    help="the desktop menu's .desktop entries: which one each catalogue app resolves to (any packaging: "
+                         "deb / flatpak / snap / store wrapper) and the unmatched rest - for app_overrides")
     ap.add_argument("--mobile-status", action="store_true", help="Waydroid / adb state and which mobile builds are installed")
     ap.add_argument("--launch", nargs="+", metavar="APP", help="start these apps into their cgroups and exit")
     ap.add_argument("--onboard", nargs="*", metavar="APP",
@@ -152,6 +156,9 @@ def main(argv=None) -> int:
         print(mb.describe())
         print(A.catalog_table(cat, mobile=mb))
         print(f"\nsubstitute_kinds = {kinds}  (desktop build first; '-> x' = next fallback in the chain)")
+        return 0
+    if args.menu:
+        print(A.menu_table(cat, base.get("apps")))
         return 0
     if args.mobile_status:
         mb = mobile_runtime()
