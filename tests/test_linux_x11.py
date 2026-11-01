@@ -32,6 +32,17 @@ def test_parse_xprop():
     assert info["type"] == "_NET_WM_WINDOW_TYPE_NORMAL" and info["desktop"] == 0
 
 
+def test_parse_xprop_window_type_list_and_is_normal():
+    qt = x11.parse_xprop("_NET_WM_WINDOW_TYPE(ATOM) = _KDE_NET_WM_WINDOW_TYPE_OVERRIDE, _NET_WM_WINDOW_TYPE_NORMAL\n")
+    assert qt["type"] == "_NET_WM_WINDOW_TYPE_NORMAL"
+    assert qt["types"] == ["_KDE_NET_WM_WINDOW_TYPE_OVERRIDE", "_NET_WM_WINDOW_TYPE_NORMAL"]
+    assert x11.is_normal(qt)
+    assert x11.is_normal(x11.parse_xprop("_NET_WM_WINDOW_TYPE(ATOM) = _KDE_NET_WM_WINDOW_TYPE_OVERRIDE\n"))
+    assert x11.is_normal({}) and x11.is_normal({"type": ""})
+    assert not x11.is_normal(x11.parse_xprop("_NET_WM_WINDOW_TYPE(ATOM) = _NET_WM_WINDOW_TYPE_DIALOG\n"))
+    assert not x11.is_normal({"type": "_NET_WM_WINDOW_TYPE_DOCK"})       # old-style single type still works
+
+
 def test_parse_xprop_missing_props():
     info = x11.parse_xprop("_NET_WM_PID:  not found.\nWM_CLASS(STRING) = \"Navigator\", \"firefox\"\n")
     assert info["pid"] is None and info["wm_class"] == ["Navigator", "firefox"] and info["name"] == ""

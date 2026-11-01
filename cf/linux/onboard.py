@@ -210,7 +210,7 @@ def candidate_windows(dev, app_id: str, infos: Optional[list[dict]] = None,
     hits = x11.windows_for(dev.pids(app_id), a.wm_class, a.name_rx or None, infos)
     out = []
     for w in hits:
-        if w.get("type", "") not in ("", "_NET_WM_WINDOW_TYPE_NORMAL"):
+        if not x11.is_normal(w):
             continue
         g = geom(w["wid"])
         if g:
@@ -229,7 +229,9 @@ def seen_windows(dev, app_id: str, spec: dict) -> str:
         return "no window matched" if pids else "-"
     cands = candidate_windows(dev, app_id, all_hits)
     if not cands:
-        return f"{len(all_hits)} non-normal ({(all_hits[0].get('type') or '?').replace('_NET_WM_WINDOW_TYPE_', '').lower()})"
+        kinds = ",".join(sorted({(t or "?").replace("_NET_WM_WINDOW_TYPE_", "").lower()
+                                for h in all_hits for t in (h.get("types") or [h.get("type")])}))
+        return f"{len(all_hits)} non-normal ({kinds})"
     g = cands[0]["geometry"]
     return f"largest {g[0]}x{g[1]} < {spec['main'][0]}x{spec['main'][1]}"
 
@@ -272,6 +274,59 @@ def ask(prompt: str, interactive: bool, out=print) -> bool:
     out(f"    {prompt}  [回车 = 已完成, s = 跳过]")
     line = sys.stdin.readline().strip().lower()
     return line not in ("s", "skip", "n")
+
+
+def ensure_managed(dev, app_id: str, interactive: bool, out=print, grace: float = 10.0) -> Optional[dict]:
+    """An app that was already running when onboarding reached it (HOT) was started by hand, by
+    the desktop's autostart or by D-Bus activation - outside /cf.  Adopt its processes; when that
+    is refused (cgroup v2 only lets us move processes we own the common ancestor of), offer to
+    quit it and start it again from here so the limits apply.  Returns the new launch result or
+    None when nothing was restarted."""
+    dev.adopt(app_id)
+    if dev.pids(app_id):
+        return None
+    stray = dev.stray_pids(app_id)
+    if not stray:
+        return None
+    out(f"    !! 它已经在运行, 但进程 {stray[:4]}{'...' if len(stray) > 4 else ''} 不在 /cf/{app_id} 里 "
+        "(从桌面图标 / 开机自启动打开的), 限流对它无效")
+    if not ask("退出它并由脚本重新启动 (登录态一般会保留; 微信需要重扫)", interactive, out=out):
+        return None
+    terminate(stray, grace)
+    r = dev.launch(app_id)
+    return r
+
+
+def terminate(pids: list[int], grace: float = 10.0) -> None:
+    """SIGTERM the processes (and their children), SIGKILL whatever is still there after `grace`."""
+    import signal
+    from . import procs as PR
+    targets = set(PR.children_of(pids)) | set(pids)
+    for p in targets:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and any(_alive(p) for p in targets):
+        time.sleep(0.25)
+    for p in targets:
+        if _alive(p):
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError:
+                pass
+    time.sleep(0.5)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 # ------------------------------------------------------------------ rehearsal
@@ -343,6 +398,13 @@ def onboard(dev, apps: list[str], work=None, cfg: Optional[dict] = None, interac
             continue
         rec["launch"] = r.get("launch_state")
         out(f"    启动: {r.get('launch_state')} status={r.get('status')} wid={r.get('wid')}")
+        if not a.is_mobile and r.get("launch_state") in ("HOT", "FRONT"):
+            r2 = ensure_managed(dev, app_id, interactive, out=out)
+            if r2 is not None:
+                r = r2
+                rec["launch"] = r.get("launch_state")
+                out(f"    重新启动: {r.get('launch_state')} status={r.get('status')} wid={r.get('wid')}")
+        rec["outside_cgroup"] = len(dev.stray_pids(app_id)) if not a.is_mobile else 0
         if r.get("status") not in ("ok", "not-active") and not r.get("wid"):
             out(f"    !! 没有窗口 ({r.get('status')}); 看 results/app_logs/{app_id}.log, 或 --discover 核对 cmd / wm_class")
             state[app_id] = rec
@@ -425,17 +487,19 @@ def check(dev, apps: list[str], cfg: Optional[dict] = None, out=print) -> int:
         inst = dev.available(a)
         spec = login_spec(ap, overrides)
         pids = dev.pids(a)
+        stray = dev.stray_pids(a, pids) if inst and not ap.is_mobile else []
         win = main_window(dev, a, spec) if inst and (pids or ap.is_mobile) else None
         rec = st.get(a) or {}
-        ready = bool(rec.get("ready")) and (win is not None or not inst)
+        ready = bool(rec.get("ready")) and (win is not None or not inst) and not (stray and not pids)
         why = ""
         if inst and not ready:
             bad += 1
-            why = _why_not_ready(rec, pids, win, ap)
+            why = _why_not_ready(rec, pids, win, ap, stray)
             if why.startswith("not running") or why.startswith("launch"):
                 hints.append(f"results/app_logs/{a}.log")
+        running = str(bool(pids)) if pids or not stray else f"outside /cf ({len(stray)})"
         shown = str(win.get("geometry")) if win else (seen_windows(dev, a, spec) if inst and pids else "-")
-        out(f"{a:15s} {str(inst):10s} {str(bool(pids)):8s} {shown:27s} {str(bool(rec)):10s} {str(ready):6s} {why}")
+        out(f"{a:15s} {str(inst):10s} {running:8s} {shown:27s} {str(bool(rec)):10s} {str(ready):6s} {why}")
     if bad:
         out(f"\n{bad} app(s) not ready: scripts/ubuntu/cf_onboard.sh <id…>  (or run_linux.py CONFIG --onboard <ids>)"
             + (f"; crashed / not started: see {' '.join(hints)}" if hints else "")
@@ -443,8 +507,11 @@ def check(dev, apps: list[str], cfg: Optional[dict] = None, out=print) -> int:
     return 1 if bad else 0
 
 
-def _why_not_ready(rec: dict, pids: list[int], win: Optional[dict], ap: LinuxApp) -> str:
+def _why_not_ready(rec: dict, pids: list[int], win: Optional[dict], ap: LinuxApp,
+                   stray: Optional[list[int]] = None) -> str:
     """One phrase per failure mode, for the `check` table."""
+    if stray and not pids and not ap.is_mobile:
+        return "running outside /cf (desktop icon / autostart): quit it, then cf_onboard.sh " + ap.id
     if not rec:
         return "never onboarded"
     if not pids and not ap.is_mobile:

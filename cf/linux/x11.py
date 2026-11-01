@@ -54,7 +54,8 @@ def xdotool(*args: str, timeout: float = 15) -> str:
 # ------------------------------------------------------------------ parsing
 def parse_xprop(text: str) -> dict:
     """xprop output -> {pid, wm_class: [instance, class], name, protocols: [...], state: [...], type, desktop}."""
-    out: dict = {"pid": None, "wm_class": [], "name": "", "protocols": [], "state": [], "type": "", "desktop": None}
+    out: dict = {"pid": None, "wm_class": [], "name": "", "protocols": [], "state": [], "type": "", "types": [],
+                 "desktop": None}
     for line in text.splitlines():
         m = _XPROP_LINE.match(line.strip())
         if not m:
@@ -73,10 +74,25 @@ def parse_xprop(text: str) -> dict:
         elif key == "_NET_WM_STATE":
             out["state"] = [p.strip() for p in val.split(",") if p.strip()]
         elif key == "_NET_WM_WINDOW_TYPE":
-            out["type"] = val.split(",")[0].strip()
+            types = [t.strip() for t in val.split(",") if t.strip()]
+            out["types"] = types
+            # Qt frameless windows (微信 / WPS / 中望 ...) advertise "_KDE_NET_WM_WINDOW_TYPE_OVERRIDE,
+            # _NET_WM_WINDOW_TYPE_NORMAL": the main window is the NORMAL one, whatever comes first
+            out["type"] = next((t for t in types if t == "_NET_WM_WINDOW_TYPE_NORMAL"), types[0] if types else "")
         elif key == "_NET_WM_DESKTOP":
             out["desktop"] = int(val) if val.lstrip("-").isdigit() else None
     return out
+
+
+_NORMAL_LIKE_TYPES = {"_NET_WM_WINDOW_TYPE_NORMAL", "_KDE_NET_WM_WINDOW_TYPE_OVERRIDE"}
+
+
+def is_normal(info: dict) -> bool:
+    """Is this a top-level application window (as opposed to a dialog, tooltip, dock, menu ...)?
+    No type at all counts as normal (EWMH default); so does a Qt frameless main window, which
+    only carries the KDE override hint (plus NORMAL in newer Qt)."""
+    types = info.get("types") or ([info["type"]] if info.get("type") else [])
+    return not types or all(t in _NORMAL_LIKE_TYPES for t in types) or "_NET_WM_WINDOW_TYPE_NORMAL" in types
 
 
 def parse_window_ids(text: str) -> list[int]:
@@ -165,7 +181,7 @@ def windows_for(pids: Iterable[int], class_rx: Optional[str] = None, name_rx: Op
             hits.append(info)
 
     def rank(i: dict) -> tuple:
-        normal = i.get("type", "") in ("", "_NET_WM_WINDOW_TYPE_NORMAL")
+        normal = is_normal(i)
         hidden = "_NET_WM_STATE_HIDDEN" in i.get("state", [])
         skip = "_NET_WM_STATE_SKIP_TASKBAR" in i.get("state", [])
         return (not normal, skip, hidden, -(i.get("pid") in pids))
