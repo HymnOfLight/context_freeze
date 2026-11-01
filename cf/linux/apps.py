@@ -444,6 +444,7 @@ def menu_entries(dirs: Optional[Sequence[str]] = None, refresh: bool = False) ->
     if not refresh and key in _MENU_CACHE:
         return _MENU_CACHE[key]
     out: list[dict] = []
+    seen: set[str] = set()                 # the same file reachable from two dirs (symlinked /opt/apps entries)
     for d in dirs:
         try:
             files = sorted(f for f in os.listdir(d) if f.endswith(".desktop"))
@@ -451,6 +452,10 @@ def menu_entries(dirs: Optional[Sequence[str]] = None, refresh: bool = False) ->
             continue
         for f in files:
             path = os.path.join(d, f)
+            real = os.path.realpath(path)
+            if real in seen or f[:-len(".desktop")] in {e["stem"] for e in out}:
+                continue
+            seen.add(real)
             try:
                 with open(path, encoding="utf-8", errors="replace") as fh:
                     e = parse_desktop_entry(fh.read())
