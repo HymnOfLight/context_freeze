@@ -78,6 +78,9 @@ class AppSampleL:
                 "cg_psi_cpu_some_us": (cg.get("psi_cpu") or {}).get("some_total")}
 
 
+PING_MISSES_TO_GIVE_UP = 2
+
+
 class LinuxDesktop:
     def __init__(self, cat: Optional[dict[str, A.LinuxApp]] = None, tree: Optional[CgroupTree] = None,
                  profile: Optional[ThrottleProfile] = None, log=None, notifications: bool = True,
@@ -98,6 +101,8 @@ class LinuxDesktop:
         self.notify = NotifyCounter() if notifications else None
         self.spawned: dict[str, subprocess.Popen] = {}
         self._warned_unmanaged: set[str] = set()
+        self._ping_misses: dict[str, int] = {}       # consecutive unanswered pings per app
+        self.ping_dead: set[str] = set()             # apps that advertise _NET_WM_PING but never answer
 
     # ------------------------------------------------------------- probing
     def probe(self) -> dict:
@@ -327,11 +332,23 @@ class LinuxDesktop:
         res["activate_ms"] = act.get("activate_ms")
         if not act.get("ok"):
             res["status"] = act.get("error", "activate-failed")
-        if self.pinger and self.pinger.available:
+        if self.pinger and self.pinger.available and id_ in self.ping_dead:
+            res["ping_ms"], res["ping_supported"] = None, False      # learned: it never answers, do not wait
+        elif self.pinger and self.pinger.available:
             res["ping_ms"] = self.pinger.ping(win["wid"], timeout=self.ping_timeout)
             res["ping_supported"] = self.pinger.supports(win["wid"])
             if res["ping_supported"] and res["ping_ms"] is None:
                 res["status"] = "ping-timeout"
+                # 微信 / 钉钉 / 中望 list _NET_WM_PING in WM_PROTOCOLS but never reply (Qt frameless
+                # windows); after two misses while the activation itself worked, treat the app as
+                # ping-unsupported instead of paying ping_timeout on every visit
+                self._ping_misses[id_] = self._ping_misses.get(id_, 0) + 1
+                if act.get("ok") and self._ping_misses[id_] >= PING_MISSES_TO_GIVE_UP:
+                    self.ping_dead.add(id_)
+                    self.log.warn(f"{id_}: never answers _NET_WM_PING ({self._ping_misses[id_]} misses with a "
+                                  f"successful activate) - ping disabled for it (ping_ms stays None)")
+            else:
+                self._ping_misses[id_] = 0
         if res["launch_state"] != "FRONT":
             res["total_time_ms"] = int((res["launch_ms"] or 0) + (res["activate_ms"] or 0) + (res["ping_ms"] or 0))
         res["host_elapsed_ms"] = int((time.monotonic() - t0) * 1000)

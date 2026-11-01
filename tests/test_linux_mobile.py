@@ -274,3 +274,36 @@ def test_runner_prepare_substitutes_mobile_build_and_preflights_runtime(monkeypa
     assert exp4.apps == ["fake_office", "fake_dl"] and exp4.substitutions == []
     assert any("jianying" in w and "dropped" in w for w in exp4.log.warnings)
     exp4.close()
+
+
+def test_launch_stops_pinging_apps_that_never_answer(monkeypatch):
+    """微信 / 钉钉 / 中望 advertise _NET_WM_PING but never reply: after two misses with a working
+    activate the desktop marks them ping-dead and no longer waits ping_timeout on every visit."""
+    from cf.linux import x11
+    tree = FakeTree()
+    tree.members["wechat"] = [7001]
+    dev = D.LinuxDesktop(cat=A.with_overrides({}), tree=tree, notifications=False, mobile=None)
+    dev.ping_timeout = 0.01
+    win = {"wid": 0x300001, "pid": 7001, "wm_class": ["wechat", "wechat"], "name": "微信", "type": "", "state": []}
+    monkeypatch.setattr(dev, "window", lambda id_, infos=None, pids=None: win)
+    monkeypatch.setattr(x11, "active_window", lambda: 0)
+    monkeypatch.setattr(x11, "activate", lambda wid, timeout=10: {"ok": True, "activate_ms": 60})
+    pings = []
+
+    class DeadPinger:
+        available = True
+
+        def ping(self, wid, timeout):
+            pings.append(wid)
+            return None
+
+        def supports(self, wid):
+            return True
+    dev.pinger = DeadPinger()
+    r1 = dev.launch("wechat")
+    r2 = dev.launch("wechat")
+    assert r1["status"] == r2["status"] == "ping-timeout" and len(pings) == 2
+    assert "wechat" in dev.ping_dead
+    r3 = dev.launch("wechat")
+    assert r3["status"] == "ok" and r3["ping_ms"] is None and r3["ping_supported"] is False and len(pings) == 2
+    assert r3["total_time_ms"] == 60                     # activate only, no ping wait baked into the latency
