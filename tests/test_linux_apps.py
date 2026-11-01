@@ -126,6 +126,26 @@ def test_launch_cmd_falls_back_to_the_desktop_exec_of_the_installed_package(tmp_
     assert A.desktop_entry(A.LinuxApp("shimo", "x", "compute", "shimo", "x", "x", package="shimo"), info2) is None
 
 
+def test_installed_package_falls_back_to_a_dpkg_name_matching_the_app_regex(tmp_path, monkeypatch):
+    """The store builds rename themselves (cn.xunlei.thunder, com.tencent.wemeet ...): any installed
+    package whose name has a component matching the app's process regex and that ships a .desktop
+    counts - but not thunderbird for 迅雷, and not a library."""
+    monkeypatch.setattr(A.shutil, "which", lambda tok: None)
+    info = _fake_deb(tmp_path, "cn.xunlei.thunder", {"opt/apps/cn.xunlei.thunder/x.desktop": "[Desktop Entry]\nExec=/opt/apps/cn.xunlei.thunder/run\n"})
+    _fake_deb(tmp_path, "thunderbird", {"usr/share/applications/thunderbird.desktop": "[Desktop Entry]\nExec=thunderbird\n"})
+    (tmp_path / "dpkg" / "libxunlei0:arm64.list").write_text("/usr/lib/libxunlei.so\n")
+    a = A.CATALOG["xunlei"]
+    assert A.installed_package(a, info) == "cn.xunlei.thunder"
+    assert A.launch_cmd(a, info) == "/opt/apps/cn.xunlei.thunder/run"
+    # a package without .desktop (data / lib) never counts; nothing matching -> None
+    info2 = _fake_deb(tmp_path / "t2", "xunlei-data", {})
+    assert A.installed_package(a, info2) is None
+    assert A.installed_package(A.CATALOG["iqiyi"], info) is None
+    # 腾讯会议 under any of its known names
+    info3 = _fake_deb(tmp_path / "t3", "com.tencent.wemeet", {"opt/apps/com.tencent.wemeet/w.desktop": "[Desktop Entry]\nExec=/opt/apps/com.tencent.wemeet/run\n"})
+    assert A.installed_package(A.CATALOG["wemeet"], info3) == "com.tencent.wemeet"
+
+
 def test_parse_desktop_entry_handles_comments_quotes_and_missing_group():
     d = A.parse_desktop_entry("# comment\n[Desktop Entry]\nExec=\"/opt/a b/run\" --flag %f %u\nName=A\nName[zh_CN]=甲\n")
     assert d["exec"] == '"/opt/a b/run" --flag' and d["name"] == "A"
