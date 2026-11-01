@@ -302,7 +302,8 @@ scripts/ubuntu/install_mobile_apps.sh --list   # 按配置里的 apps 逐个列:
 
 这些包装在 `/opt/apps/<包名>/files/` 下, **什么都不放进 PATH**: 启动器只认包里的 `.desktop` 文件。程序会自动识别: `is_installed` 看
 `/var/lib/dpkg/info/<包名>.list` (目录条目的 `package` 或 `alt_packages` 任一命中), `launch_cmd` 在 `cmd` 不在 PATH 上时依次改用 `exe` 和该包
-`.desktop` 的 `Exec` 行 (去掉 `%U` 之类的占位, 保留 `cmd` 里的参数)。`install_cn_apps.sh --check` / `--catalog` 的 cmd 列显示
+`.desktop` 的 `Exec` 行 (去掉 `%U` 之类的占位, 保留 `cmd` 里的参数)。包名对不上 (商店版本改名, 如 `cn.xunlei.thunder`) 时还会在已装的 dpkg 包里找
+名字成分与该应用进程正则匹配、且带 `.desktop` 的包 (`thunderbird` 不会被当成迅雷)。`install_cn_apps.sh --check` / `--catalog` 的 cmd 列显示
 `thunder -> /opt/apps/com.xunlei.download/files/start.sh  [com.xunlei.download]` 就是识别成功; 窗口的 WM_CLASS 跟目录猜的不一样时
 (`--discover` 看), 写 `app_overrides.<id>.wm_class`。装好的全部应用集合有现成配置 `configs/ubuntu_arm64.json` (§5)。
 
@@ -479,7 +480,9 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 | `why` | 意思 | 怎么办 |
 |---|---|---|
 | `not running (TIMEOUT)` | 启动后没出窗口, 进程也不在了 (崩溃 / 启动命令不对) | 看 `results/app_logs/<id>.log`; `command not found` 说明启动名不在 PATH (现在会自动改用 `exe` 路径), 其他报错按日志; 手动能起来就用 `--discover` 核对 `cmd` 写进 `app_overrides` |
+| `running outside /cf (desktop icon / autostart)` | 应用在跑, 但进程在 `user.slice` 里 (从桌面图标点开的, 或钉钉这类开机自启动的), 普通用户不能把它移进 `/cf/<id>`, 限流对它无效 | 交互式 `cf_onboard.sh <id>` 会在启动时发现并提议 "退出它并由脚本重新启动" (回车即可); 钉钉还要关掉自启动 (`rm ~/.config/autostart/*dingtalk*`); 或配置 `sudo_adopt: true` |
 | `login timeout / skipped` | 等了 `--onboard-timeout` (默认 600 s) 没见到 ≥ `main` 的主窗口 | 登录完成后重跑 `cf_onboard.sh <id>`; 主窗口本来就小的在 `onboard_overrides` 里改 `main` |
+| `N non-normal (dialog / dock ...)` 出现在 `main_window` 列 | 找到的窗口都不是普通顶层窗口 (对话框 / 托盘). 旧版本把微信 / WPS / 中望的 Qt 无边框主窗口 (`_KDE_NET_WM_WINDOW_TYPE_OVERRIDE, _NET_WM_WINDOW_TYPE_NORMAL`) 也误判成这种, 现在按类型列表判断 | 更新代码; 仍出现就 `--discover` 看该窗口的 `_NET_WM_WINDOW_TYPE` |
 | `no main window now (...)` | 记录是就绪的, 但现在没有一个 ≥ `main` 的普通窗口; `main_window` 列写着实际找到的最大窗口 (`largest 640x400 < 700x500`) 或 `no window matched` | 窗口被最小化 / 关掉了就点开; 尺寸偏小就放大窗口或改 `main`; `no window matched` = WM_CLASS / 标题都对不上, `--discover` 看真实的 WM_CLASS 写进 `app_overrides.wm_class` |
 | `work not-active` | 脚本发键前核对 `_NET_ACTIVE_WINDOW` 不是它: 切前台失败 (GNOME 焦点保护 / 弹窗挡住) 或当时记的是已经消失的登录框 | 重跑 `cf_onboard.sh <id>` (现在会重新找当前窗口); 还不行看 §10 "activate 失败" |
 | `oracle clipboard: xclip: ...` | 没装 xclip | `sudo apt install xclip` |
@@ -824,6 +827,10 @@ sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubunt
 并放大 `tolerance`, 或 `kind: none` + `oracle: title` 只看窗口还在不在; 真正的上下文丢失通常伴随 `n_cold > 0` 或 `ping` 很长。
 
 **macOS 侧** — 跑矩阵时关闭 Spotlight 索引新建的结果目录 (如果是共享目录), 关闭 Time Machine; UTM 不要开 "Balloon" 内存气球。
+
+**微信 / 钉钉 / 中望 每次切到都报 `ping-timeout`, 每步多等 15 s** — 它们的 Qt 无边框窗口在 `WM_PROTOCOLS` 里声明了 `_NET_WM_PING`
+却从不回复。runner 在同一应用连续 2 次 activate 成功但 ping 无回应后把它记为 "不支持 ping" (日志 `never answers _NET_WM_PING`),
+之后不再等待, `ping_ms` 为空、`total_time_ms` 只含 activate; 这是每次运行自动学习的, 不用配置。想一开始就少等, 配置里把 `ping_timeout_s` 调到 3。
 
 ## 11. 测试
 
