@@ -199,8 +199,9 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
              install="https://work.weixin.qq.com/  -> 下载 -> Linux 桌面端 -> ARM deb  (官方; 包名 / 命令名以安装后 --discover 为准)",
              note="手机企业微信或微信扫码登录; 首次要创建一个企业 (免费)"),
     LinuxApp("wemeet", "腾讯会议", "push",
-             cmd="wemeetapp", match=r"/opt/wemeet/|wemeet", wm_class=r"(?i)wemeet", name_rx=r"腾讯会议|Tencent Meeting|WeMeet",
-             notify_names=("腾讯会议", "Tencent Meeting", "wemeet"), package="wemeet", exe="/opt/wemeet/wemeetapp.sh",
+             cmd="wemeetapp", match=r"(?i)/opt/wemeet/|wemeet|tencent.?meeting", wm_class=r"(?i)wemeet", name_rx=r"腾讯会议|Tencent Meeting|WeMeet",
+             notify_names=("腾讯会议", "Tencent Meeting", "wemeet"), package="wemeet",
+             alt_packages=("wemeetapp", "tencentmeeting", "tencent-meeting", "com.tencent.wemeet"), exe="/opt/wemeet/wemeetapp.sh",
              install="https://meeting.tencent.com/download/  -> Linux -> ARM64 / x86_64 deb  (官方, TencentMeeting_*_arm64_*.deb)",
              work={"kind": "none", "oracle": "title"},
              note="Linux 版扫码 / 短信登录常失败: 先在手机上给账号设密码, 用手机号 + 密码登录; 只作通知 / 常驻负载, 不进会议"),
@@ -336,11 +337,49 @@ DPKG_INFO = "/var/lib/dpkg/info"
 _DESKTOP_FIELD_CODES = re.compile(r"\s*%[a-zA-Z]")
 
 
+_PKG_SEPS = ".-_:+"
+
+
+def _matches_component(rx: "re.Pattern", name: str) -> bool:
+    """Does the regex match whole dotted / dashed components of a package name?  'xunlei' in
+    com.xunlei.download yes, 'thunder' in thunderbird no (the app regexes are written for
+    process command lines, so a bare substring match would be far too loose here)."""
+    for m in rx.finditer(name):
+        if m.end() == m.start():
+            continue
+        left_ok = m.start() == 0 or name[m.start() - 1] in _PKG_SEPS
+        right_ok = m.end() == len(name) or name[m.end()] in _PKG_SEPS
+        if left_ok and right_ok:
+            return True
+    return False
+
+
 def installed_package(a: LinuxApp, dpkg_info: str = DPKG_INFO) -> Optional[str]:
-    """The dpkg package this app is installed under (`package` or one of `alt_packages`), or None."""
+    """The dpkg package this app is installed under: `package`, one of `alt_packages`, or - as the
+    store builds keep renaming themselves (com.xunlei.download, cn.xunlei.thunder, ...) - any
+    installed package whose name matches the app's process regex and that ships a .desktop file."""
     for p in (a.package, *a.alt_packages):
         if p and os.path.exists(os.path.join(dpkg_info, f"{p}.list")):
             return p
+    if not a.match or a.kind != "desktop":
+        return None
+    try:
+        rx = re.compile(a.match, re.I)
+    except re.error:
+        return None
+    try:
+        names = sorted(f[:-5] for f in os.listdir(dpkg_info) if f.endswith(".list"))
+    except OSError:
+        return None
+    for name in names:
+        if name.startswith("lib") or not _matches_component(rx, name):
+            continue
+        try:
+            with open(os.path.join(dpkg_info, f"{name}.list"), encoding="utf-8", errors="replace") as f:
+                if any(ln.rstrip().endswith(".desktop") for ln in f):
+                    return name
+        except OSError:
+            continue
     return None
 
 

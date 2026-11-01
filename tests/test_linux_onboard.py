@@ -69,6 +69,12 @@ class _Dev:
     def pids(self, id_):
         return self._pids.get(id_, [])
 
+    def stray_pids(self, id_, known=None):
+        return getattr(self, "_stray", {}).get(id_, [])
+
+    def adopt(self, id_):
+        return {"moved": [], "failed": {}}
+
     def available(self, id_):
         return True
 
@@ -233,6 +239,62 @@ def test_check_table(tmp_path, monkeypatch):
     assert "qq              False" in text                                  # not installed: never counted as bad
     monkeypatch.setattr(OB, "main_window", lambda d, a, spec, infos=None, geom=None: {"wid": 5, "geometry": [9, 9]})
     assert OB.check(dev, ["wps", "wechat"], out=lambda s: None) == 0
+
+
+def test_check_flags_apps_running_outside_the_cgroup(monkeypatch):
+    """钉钉 autostarts with the session, Firefox was opened from the dock: their processes are in
+    user.slice, not /cf/<id>, so the limits would not apply - the table must say so instead of
+    'not running'."""
+    cat = A.CATALOG
+    dev = _WalkDev(cat, logged={"dingtalk"}, installed={"dingtalk"})
+    dev._stray = {"dingtalk": [4001, 4002]}
+    monkeypatch.setattr(OB, "main_window", lambda d, a, spec, infos=None, geom=None: {"wid": 5, "geometry": [1000, 700]})
+    monkeypatch.setattr(OB, "load_state", lambda path=None: {"dingtalk": {"ready": True, "launch": "HOT"}})
+    out = []
+    assert OB.check(dev, ["dingtalk"], out=out.append) == 1
+    text = "\n".join(out)
+    assert "dingtalk        True       outside /cf (2)" in text
+    assert "running outside /cf (desktop icon / autostart): quit it, then cf_onboard.sh dingtalk" in text
+    dev._pids = {"dingtalk": [4001]}                 # adopted -> fine even if a stray remains listed
+    dev._stray = {"dingtalk": [4002]}
+    assert OB.check(dev, ["dingtalk"], out=lambda s: None) == 0
+
+
+def test_onboard_offers_to_restart_an_app_running_outside_the_cgroup(monkeypatch):
+    cat = A.CATALOG
+    dev = _WalkDev(cat, logged={"dingtalk"}, installed={"dingtalk"})
+    dev._stray = {"dingtalk": [4001]}
+    killed = []
+    monkeypatch.setattr(OB, "terminate", lambda pids, grace=10.0: killed.extend(pids))
+    out = []
+    # non-interactive = "yes": the stray is terminated and the app launched again from here
+    r = OB.ensure_managed(dev, "dingtalk", interactive=False, out=out.append)
+    assert killed == [4001] and dev.launched == ["dingtalk"] and r["launch_state"] == "COLD"
+    assert "不在 /cf/dingtalk" in "\n".join(out)
+    # already inside the cgroup: nothing to do
+    dev._pids = {"dingtalk": [4001]}
+    assert OB.ensure_managed(dev, "dingtalk", interactive=False, out=lambda s: None) is None
+    # user answers 's': keep it running as is
+    dev._pids, dev.launched = {}, []
+    monkeypatch.setattr(OB, "ask", lambda prompt, interactive, out=print: False)
+    assert OB.ensure_managed(dev, "dingtalk", interactive=True, out=lambda s: None) is None and dev.launched == []
+
+
+def test_seen_windows_counts_qt_frameless_windows_as_normal():
+    """微信 / WPS / 中望 main windows carry '_KDE_NET_WM_WINDOW_TYPE_OVERRIDE, _NET_WM_WINDOW_TYPE_NORMAL':
+    they must qualify as the main window instead of being reported as non-normal."""
+    cat = A.CATALOG
+    dev = _Dev(cat, {"wps": [100]})
+    infos = [{"wid": 1, "pid": 100, "wm_class": ["wps", "Wps"], "name": "blank.docx - WPS",
+              "type": "_NET_WM_WINDOW_TYPE_NORMAL", "types": ["_KDE_NET_WM_WINDOW_TYPE_OVERRIDE", "_NET_WM_WINDOW_TYPE_NORMAL"],
+              "state": []},
+             {"wid": 2, "pid": 100, "wm_class": ["wps", "Wps"], "name": "", "type": "_KDE_NET_WM_WINDOW_TYPE_OVERRIDE",
+              "types": ["_KDE_NET_WM_WINDOW_TYPE_OVERRIDE"], "state": []}]
+    sizes = {1: (1200, 800), 2: (900, 600)}
+    spec = OB.login_spec(cat["wps"])
+    hit = OB.main_window(dev, "wps", spec, infos, geom=lambda w: sizes.get(w))
+    assert hit and hit["wid"] == 1
+    assert OB.main_window(dev, "wps", spec, [infos[1]], geom=lambda w: sizes.get(w))["wid"] == 2
 
 
 def test_check_explains_each_failure_mode(monkeypatch):
