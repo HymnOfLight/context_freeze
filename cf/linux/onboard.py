@@ -241,6 +241,18 @@ def _tty() -> bool:
     return sys.stdin.isatty()
 
 
+def _drop_typed_ahead() -> None:
+    """Discard keystrokes typed while the walk was busy (quitting + restarting an app takes
+    10-20 s): an 's' meant for the previous question must not answer the next one."""
+    if not _tty():
+        return
+    try:
+        import termios
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:   # noqa: BLE001 - not a real terminal
+        pass
+
+
 def wait_for(cond: Callable[[], Optional[dict]], timeout: float, prompt: str, interactive: bool,
              poll: float = 1.0, out=print) -> tuple[Optional[dict], str]:
     """Poll `cond` until it returns something, Enter is pressed ('confirmed'), 's' is typed
@@ -249,6 +261,7 @@ def wait_for(cond: Callable[[], Optional[dict]], timeout: float, prompt: str, in
     if hit:
         return hit, "detected"
     if interactive:
+        _drop_typed_ahead()
         out(f"    {prompt}  [回车 = 已完成, s = 跳过, 自动检测中...]")
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -271,6 +284,7 @@ def ask(prompt: str, interactive: bool, out=print) -> bool:
     """Enter = done, s = skip.  Non-interactive runs answer 'done' without waiting."""
     if not interactive:
         return True
+    _drop_typed_ahead()
     out(f"    {prompt}  [回车 = 已完成, s = 跳过]")
     line = sys.stdin.readline().strip().lower()
     return line not in ("s", "skip", "n")
@@ -337,7 +351,9 @@ def rehearse(work, dev, app_id: str, wid: Optional[int], seconds: float, pause: 
     spec = work.spec(a)
     rec: dict = {"kind": spec.get("kind", "none"), "oracle": spec.get("oracle", "none"), "ready": False}
     if not a.is_mobile and wid:
-        x11.activate(wid, timeout=10)
+        act = x11.activate(wid, timeout=10)
+        if not act.get("ok"):
+            rec["activate_error"] = act.get("error")
         time.sleep(0.3)
     w = work.work(app_id, wid, seconds, 0)
     rec["work_status"] = w.get("status")
@@ -346,6 +362,7 @@ def rehearse(work, dev, app_id: str, wid: Optional[int], seconds: float, pause: 
     o2 = work.oracle(app_id, wid)
     rec["oracle_value"] = (o1 or {}).get("value")
     rec["oracle_error"] = (o1 or {}).get("error") or (o2 or {}).get("error")
+    rec["focus"] = w.get("focus") or (o1 or {}).get("focus") or (o2 or {}).get("focus")
     same = work.compare(o1, o2, app_id)
     rec["stable"] = same
     worked = rec["work_status"] in ("ok", "skipped")
@@ -443,6 +460,8 @@ def onboard(dev, apps: list[str], work=None, cfg: Optional[dict] = None, interac
                 out(f"    !! 未就绪: work={rh.get('work_status')} oracle={rh.get('oracle')} "
                     f"value={str(rh.get('oracle_value'))[:30]} stable={rh.get('stable')} "
                     f"{('err=' + str(rh.get('oracle_error'))) if rh.get('oracle_error') else ''}")
+                if rh.get("focus"):
+                    out(f"       焦点在别的窗口上: {rh['focus']}  (弹窗 / 对话框? 关掉它, 让 {name} 的窗口在最前面)")
                 out(f"       常见原因: 输入框没有焦点 (再点一下) / 剪贴板为空 / 窗口被弹窗挡住; 修好后重跑 --onboard {app_id}")
         elif work is None:
             rec["ready"] = bool(rec["logged_in"]) and bool(rec["prep"])
@@ -525,10 +544,11 @@ def _why_not_ready(rec: dict, pids: list[int], win: Optional[dict], ap: LinuxApp
     rh = rec.get("rehearsal") or {}
     if rec.get("prep") is False:
         return "prep skipped"
+    focus = f" (focus was on {rh['focus']})" if rh.get("focus") else ""
     if rh and rh.get("work_status") not in ("ok", "skipped"):
-        return f"work {rh.get('work_status')}"
+        return f"work {rh.get('work_status')}{focus}"
     if rh and rh.get("oracle_error"):
-        return f"oracle {rh.get('oracle')}: {rh.get('oracle_error')}"
+        return f"oracle {rh.get('oracle')}: {rh.get('oracle_error')}{focus}"
     if rh and rh.get("stable") is None:
         return f"oracle {rh.get('oracle')} read nothing"
     if rh and rh.get("stable") is False:

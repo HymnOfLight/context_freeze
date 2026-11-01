@@ -34,6 +34,28 @@ def test_ensure_keeps_a_valid_file_and_reset_replaces_it(tmp_path):
     assert os.stat(p).st_mtime_ns > 1_000_000_000 and B.is_docx(p)
 
 
+def test_reset_leaves_a_document_an_editor_has_open(tmp_path):
+    """run_all resets blank.docx before the onboarding walk; WPS from the previous walk still has
+    it open and would answer the overwrite with a modal 'reload?' dialog -> not reset."""
+    import subprocess
+    import sys
+    p = str(tmp_path / "blank.docx")
+    B.ensure(p)
+    with open(p, "ab") as f:
+        f.write(b"\0" * 10)                        # a 'draft' that a reset would wipe
+    size = os.path.getsize(p)
+    editor = subprocess.Popen([sys.executable, "-c", "import sys, time; time.sleep(30)", p])
+    try:
+        assert editor.pid in B.opened_by(p)
+        r = B.reset(p)
+        assert r["in_use"] == [editor.pid] and os.path.getsize(p) == size
+    finally:
+        editor.kill()
+        editor.wait()
+    assert B.opened_by(p) == []
+    assert B.reset(p) == {"docx": p} and os.path.getsize(p) != size
+
+
 def test_wps_command_opens_the_blank_document_and_spawn_creates_it(tmp_path, monkeypatch):
     wps = A.CATALOG["wps"]
     assert B.BLANK_TOKEN in wps.cmd and A._first_token(wps.cmd) == "wps"

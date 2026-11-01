@@ -151,6 +151,22 @@ def test_wait_for_interactive_enter_and_skip(monkeypatch):
     assert OB.ask("x", interactive=True, out=lambda s: None) is False
 
 
+def test_ask_drops_keys_typed_while_the_walk_was_busy(monkeypatch):
+    """An 's' typed during the 15 s quit-and-restart of DingTalk must not answer the *next*
+    question (that is how a prep step ended up 'skipped' on the arm64 VM)."""
+    import pty
+    import threading
+    master, slave = pty.openpty()
+    monkeypatch.setattr(sys, "stdin", os.fdopen(slave, "r", buffering=1))
+    os.write(master, b"s\n")                                   # typed ahead, before the prompt
+    time.sleep(0.1)
+    threading.Timer(0.3, lambda: os.write(master, b"\n")).start()   # the real answer: Enter
+    prompts = []
+    assert OB.ask("准备", interactive=True, out=prompts.append) is True
+    assert prompts and "准备" in prompts[0]
+    os.close(master)
+
+
 # ------------------------------------------------------------------ the walk (fake desktop)
 class _WalkDev(_Dev):
     """Launch gives every app a window; `logged` says which ones show a main window."""
@@ -210,9 +226,15 @@ def test_rehearse_reports_unstable_or_failed_work(monkeypatch):
 
     class Dead(FakeWorkDriver):
         def work(self, app_id, wid, seconds, t):
-            return {"kind": "edit", "status": "not-active", "elapsed_ms": 0}
+            return {"kind": "edit", "status": "not-active", "elapsed_ms": 0, "focus": "0x9 '文档已被修改' [wps/Wps]"}
     r = OB.rehearse(Dead(dev), dev, "wps", 5, 0, pause=0)
     assert r["work_status"] == "not-active" and r["ready"] is False
+    assert r["focus"] == "0x9 '文档已被修改' [wps/Wps]" and "activate_error" not in r
+    # the activation itself failing (a modal dialog on top) is recorded as well
+    monkeypatch.setattr(x11, "activate", lambda wid, timeout=10: {"ok": False, "error": "not-active"})
+    r = OB.rehearse(Dead(dev), dev, "wps", 5, 0, pause=0)
+    assert r["activate_error"] == "not-active"
+    monkeypatch.setattr(x11, "activate", lambda wid, timeout=10: {"ok": True})
     # an app whose script is `none` with a `none` oracle is ready as soon as it is logged in
     cat2 = dict(cat)
     cat2["x"] = LinuxApp("x", "x", "compute", "true", "x", "x", work={"kind": "none", "oracle": "none"})
@@ -310,6 +332,9 @@ def test_check_explains_each_failure_mode(monkeypatch):
     assert why(rec, [1], {"wid": 1}, ap) == "work not-active"
     rec["rehearsal"] = {"oracle": "clipboard", "work_status": "ok", "stable": None, "oracle_error": "xclip: [Errno 2]"}
     assert why(rec, [1], {"wid": 1}, ap) == "oracle clipboard: xclip: [Errno 2]"
+    rec["rehearsal"] = {"oracle": "clipboard", "work_status": "ok", "stable": None, "oracle_error": "not-active",
+                        "focus": "0x9 '文档已被修改' [wps/Wps]"}
+    assert why(rec, [1], {"wid": 1}, ap) == "oracle clipboard: not-active (focus was on 0x9 '文档已被修改' [wps/Wps])"
     rec["rehearsal"] = {"oracle": "clipboard", "work_status": "ok", "stable": None}
     assert why(rec, [1], {"wid": 1}, ap) == "oracle clipboard read nothing"
     rec["rehearsal"] = {"oracle": "clipboard", "work_status": "ok", "stable": False}

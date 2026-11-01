@@ -55,6 +55,40 @@ def test_work_text_is_unique_per_step():
     assert W.work_text("wps", 3) != W.work_text("wps", 4) and "wps" in W.work_text("wps", 3)
 
 
+def test_x11_active_accepts_any_window_of_the_app(monkeypatch):
+    """QQ / DingTalk pop a conversation out, WPS re-creates its document window: the focus is on
+    another toplevel of the same app -> still 'active'.  A foreign window (a modal dialog of
+    another program, the desktop) is reported with its title and class."""
+    qq = A.CATALOG["qq"]
+
+    class Dev:
+        cat = {"qq": qq}
+        def pids(self, id_):
+            return [100]
+    infos = {7: {"wid": 7, "pid": 100, "wm_class": ["qq", "QQ"], "name": "QQ"},
+             8: {"wid": 8, "pid": 100, "wm_class": ["qq", "QQ"], "name": "cf-bench 的会话"},
+             9: {"wid": 9, "pid": 555, "wm_class": ["wps", "Wps"], "name": "文档已被修改"},
+             10: {"wid": 10, "pid": None, "wm_class": [], "name": ""}}
+    state = {"active": 7}
+    monkeypatch.setattr(x11, "active_window", lambda: state["active"])
+    monkeypatch.setattr(x11, "window_info", lambda wid: infos[wid])
+    drv = W.X11WorkDriver(Dev())
+    assert drv._active(qq, 7) is True and drv.focus is None
+    state["active"] = 8                          # the popped-out chat window: same pid
+    assert drv._active(qq, 7) is True
+    state["active"] = 9                          # someone else's dialog took the focus
+    assert drv._active(qq, 7) is False
+    assert drv.focus == "0x9 '文档已被修改' [wps/Wps]"
+    rec = drv.work(qq, 7, 0, 0, {"kind": "draft", "oracle": "clipboard"})
+    assert rec["status"] == "not-active" and rec["focus"] == "0x9 '文档已被修改' [wps/Wps]"
+    o = drv.oracle(qq, 7, {"kind": "draft", "oracle": "clipboard"})
+    assert o["error"] == "not-active" and o["focus"].startswith("0x9 ")
+    state["active"] = 10                         # bare root / desktop window: class unknown
+    assert drv._active(qq, 7) is False and drv.focus == "0xa '' [?]"
+    state["active"] = None
+    assert drv._active(qq, 7) is False and drv._active(qq, None) is False
+
+
 # ------------------------------------------------------------------ hashing / comparison
 def _img(w, h, fn):
     out = bytearray()
@@ -249,9 +283,12 @@ def test_x11_edit_and_clipboard_round_trip(xvfb, tmp_path):
         assert drv.compare(o1, drv.oracle("pad", wid), "pad") is True
         drv.work("pad", wid, 0.1, 8)
         assert drv.compare(o1, drv.oracle("pad", wid), "pad") is False
-        # not the active window -> no keystrokes are sent anywhere
-        root = x11.active_window()
-        assert drv.work("pad", (root or 0) + 1, 0.05, 9)["status"] == "not-active"
+        # another window of the same app would still count; an app that is not in front at all
+        # (here: one whose windows are not mousepad's) gets no keystrokes
+        other = LinuxApp("other", "x", "compute", cmd="true", match="zzz-no-such", wm_class="^zzz-no-such$", kind="oss")
+        Dev.cat["other"] = other
+        r = drv.work("other", wid + 1, 0.05, 9)
+        assert r["status"] == "not-active" and "mousepad" in (r.get("focus") or "").lower(), r
     finally:
         p.terminate()
         try:

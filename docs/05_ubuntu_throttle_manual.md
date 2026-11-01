@@ -493,7 +493,8 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 | `login timeout / skipped` | 等了 `--onboard-timeout` (默认 600 s) 没见到 ≥ `main` 的主窗口 | 登录完成后重跑 `cf_onboard.sh <id>`; 主窗口本来就小的在 `onboard_overrides` 里改 `main` |
 | `N non-normal (dialog / dock ...)` 出现在 `main_window` 列 | 找到的窗口都不是普通顶层窗口 (对话框 / 托盘). 旧版本把微信 / WPS / 中望的 Qt 无边框主窗口 (`_KDE_NET_WM_WINDOW_TYPE_OVERRIDE, _NET_WM_WINDOW_TYPE_NORMAL`) 也误判成这种, 现在按类型列表判断 | 更新代码; 仍出现就 `--discover` 看该窗口的 `_NET_WM_WINDOW_TYPE` |
 | `no main window now (...)` | 记录是就绪的, 但现在没有一个 ≥ `main` 的普通窗口; `main_window` 列写着实际找到的最大窗口 (`largest 640x400 < 700x500`) 或 `no window matched` | 窗口被最小化 / 关掉了就点开; 尺寸偏小就放大窗口或改 `main`; `no window matched` = WM_CLASS / 标题都对不上, `--discover` 看真实的 WM_CLASS 写进 `app_overrides.wm_class` |
-| `work not-active` | 脚本发键前核对 `_NET_ACTIVE_WINDOW` 不是它: 切前台失败 (GNOME 焦点保护 / 弹窗挡住) 或当时记的是已经消失的登录框 | 重跑 `cf_onboard.sh <id>` (现在会重新找当前窗口); 还不行看 §10 "activate 失败" |
+| `work not-active (focus was on 0x... 'xxx' [class])` / `oracle clipboard: not-active (...)` | 脚本发键前核对 `_NET_ACTIVE_WINDOW`: 焦点在**别的程序**的窗口上 (括号里是谁: 弹窗 / 对话框 / 桌面) - 切前台失败 (GNOME 焦点保护 / 模态对话框挡住) 或当时记的是已经消失的登录框。该应用自己的其他窗口 (QQ / 钉钉弹出的独立会话窗、WPS 重建的文档窗) 不算, 照常输入 | 关掉括号里那个窗口, 重跑 `cf_onboard.sh <id>` (会重新找当前窗口); 还不行看 §10 "activate 失败" |
+| `prep skipped` | 准备那一步回答了 `s` - 常常不是故意的: 上一问 (如 "退出并重新启动?") 回车后脚本忙了 10-20 s, 这期间敲的键被下一问吃掉了 | 重跑 `cf_onboard.sh <id>`, 等提示出现再敲键 (现在每个提示前会丢弃提前敲的键) |
 | `oracle clipboard: xclip: ...` | 没装 xclip | `sudo apt install xclip` |
 | `oracle clipboard read nothing` | ctrl+a / ctrl+c 后剪贴板没有文本: 输入框没焦点, 或该应用复制出来的不是文本 | 在输入框 / 正文里点一下再重跑; WPS 确认光标在 blank.docx 正文而不是 "新建" 页 |
 | `oracle ... unstable` | 两次读到的内容不同 (有东西在自动变: 动画标题、输入法候选) | 换 oracle (`work_overrides`: `"oracle": "title"` / `"screen"`) |
@@ -822,7 +823,8 @@ sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubunt
 
 **WPS 卡在 "新建" 首页转圈 / `edit` 脚本打不进字** — "新建" 页是内嵌网页, 要联网拉 docer 模板; 所以 `apps.py` 里 WPS 的启动命令直接打开
 `~/.cache/context_freeze/blank.docx` (启动前自动生成), 不经过那一页。手动 `wps` 启动的会停在首页: 关掉, 用 `scripts/ubuntu/cf_launch.sh wps`。
-文件损坏时 `python3 -m cf.linux.blankdoc --reset` 重建 (`run_all.sh ONBOARD=1` 每次都重建)。
+文件损坏时 `python3 -m cf.linux.blankdoc --reset` 重建 (`run_all.sh ONBOARD=1` 每次都重建 - 但 WPS 正开着它时**不动它**: WPS 监视着这个文件,
+被覆盖会弹出模态的 "文件已修改, 是否重新加载" 对话框抢走焦点, 演练就成了 `not-active`; 想要干净文档先退出 WPS 再 reset)。
 `apt` 走代理 `Could not connect to x.x.x.2:7897 Connection refused` — VMware NAT 的宿主是 `.1` 不是网关 `.2` (§2.5); 删掉 `/etc/apt/apt.conf.d/95proxy`。
 
 **`--work`: 所有 step 的 `work.status` 都是 `not-active`** — `xdotool` 发键前核对的是 `_NET_ACTIVE_WINDOW`, 它不是该应用的窗口:

@@ -223,6 +223,12 @@ def test_menu_entry_recognises_apps_dpkg_does_not_know(tmp_path, monkeypatch):
     table = A.catalog_table(cat, arch="aarch64")
     row = [ln for ln in table.splitlines() if ln.startswith("iqiyi ")][0]
     assert "yes" in row and "himirage run com.qiyi.video" in row and "[com.qiyi.video.desktop]" in row
+    # a copy of the same entry in a second menu dir (UOS keeps /opt/apps/*/entries + /usr/share) is listed once
+    d2 = tmp_path / "applications2"; d2.mkdir()
+    (d2 / "iqiyi.desktop").write_text(_ARM64_GRID["com.qiyi.video"], encoding="utf-8")
+    (d2 / "com.qiyi.video.desktop").write_text(_ARM64_GRID["com.qiyi.video"], encoding="utf-8")
+    both = A.menu_entries(dirs + [str(d2)])
+    assert [e["stem"] for e in both].count("com.qiyi.video") == 1 and any(e["stem"] == "iqiyi" for e in both)
     mt = A.menu_table(cat, ["iqiyi", "xunlei", "feishu"], dirs)
     assert "iqiyi" in mt and "com.qiyi.video.desktop" in mt and "(no menu entry)" in mt
     assert "unclaimed menu entries" in mt and "ceis.app.ai" in mt and "thunderbird" in mt
