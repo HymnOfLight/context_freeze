@@ -190,6 +190,7 @@ class X11WorkDriver:
         self._disp = None
         self.err = ""
         self.focus: Optional[str] = None      # who had the focus when the app was found not active
+        self.refocused: Optional[str] = None  # ... and from whom it was taken back (last call)
 
     # -- helpers
     def _display(self):
@@ -237,6 +238,28 @@ class X11WorkDriver:
                       f"[{'/'.join(info.get('wm_class') or []) or '?'}]")
         return False
 
+    def _ensure_active(self, a: LinuxApp, wid: Optional[int]) -> bool:
+        """`_active`, with one attempt to take the focus back when another program holds it (the
+        terminal the operator pressed Enter in, a notification bubble, a dialog that closed and
+        returned the focus to the previous window): the app *is* the foreground app of this dwell,
+        so re-activating it is the right thing - and it is logged, since a second program taking
+        the focus mid-dwell is worth knowing about.  `self.refocused` names the thief."""
+        self.refocused = None
+        if self._active(a, wid):
+            return True
+        thief = self.focus
+        if not wid or not x11.activate(wid, timeout=3).get("ok"):
+            self.focus = thief
+            return False
+        time.sleep(0.2)
+        if self._active(a, wid):
+            self.refocused = thief
+            if self.log:
+                self.log.warn(f"{a.id}: focus had moved to {thief}; taken back")
+            return True
+        self.focus = self.focus or thief
+        return False
+
     def window_hash(self, wid: int) -> Optional[str]:
         d = self._display()
         if d is None:
@@ -280,10 +303,12 @@ class X11WorkDriver:
         if kind == "none":
             rec["status"] = "skipped"
             return rec
-        if not self._active(a, wid):
+        if not self._ensure_active(a, wid):
             rec["status"] = "not-active"
             rec["focus"] = self.focus
             return rec
+        if self.refocused:
+            rec["refocused"] = self.refocused
         try:
             if kind in ("edit", "draft"):
                 self._type(spec.get("text") or work_text(a.id, t))
@@ -327,10 +352,12 @@ class X11WorkDriver:
             if out["value"] is None:
                 out["error"] = self.err[:80]
         elif o == "clipboard":
-            if not self._active(a, wid):
+            if not self._ensure_active(a, wid):
                 out["error"] = "not-active"
                 out["focus"] = self.focus
                 return out
+            if self.refocused:
+                out["refocused"] = self.refocused
             self._key("ctrl+a", "ctrl+c")
             time.sleep(0.3)
             out["value"] = self.clipboard_md5()

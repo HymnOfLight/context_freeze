@@ -72,7 +72,9 @@ def test_x11_active_accepts_any_window_of_the_app(monkeypatch):
     state = {"active": 7}
     monkeypatch.setattr(x11, "active_window", lambda: state["active"])
     monkeypatch.setattr(x11, "window_info", lambda wid: infos[wid])
+    monkeypatch.setattr(x11, "activate", lambda wid, timeout=10: {"ok": False, "error": "not-active"})
     drv = W.X11WorkDriver(Dev())
+    monkeypatch.setattr(drv, "_type", lambda text: None)
     assert drv._active(qq, 7) is True and drv.focus is None
     state["active"] = 8                          # the popped-out chat window: same pid
     assert drv._active(qq, 7) is True
@@ -83,6 +85,15 @@ def test_x11_active_accepts_any_window_of_the_app(monkeypatch):
     assert rec["status"] == "not-active" and rec["focus"] == "0x9 '文档已被修改' [wps/Wps]"
     o = drv.oracle(qq, 7, {"kind": "draft", "oracle": "clipboard"})
     assert o["error"] == "not-active" and o["focus"].startswith("0x9 ")
+    # one attempt to take the focus back: the operator's terminal held it (Enter for the prep step)
+    def activate(wid, timeout=10):
+        state["active"] = wid
+        return {"ok": True, "activate_ms": 5}
+    monkeypatch.setattr(x11, "activate", activate)
+    state["active"] = 9
+    rec = drv.work(qq, 7, 0, 0, {"kind": "draft", "oracle": "clipboard"})
+    assert rec["status"] == "ok" and rec["refocused"] == "0x9 '文档已被修改' [wps/Wps]"
+    monkeypatch.setattr(x11, "activate", lambda wid, timeout=10: {"ok": False, "error": "not-active"})
     state["active"] = 10                         # bare root / desktop window: class unknown
     assert drv._active(qq, 7) is False and drv.focus == "0xa '' [?]"
     state["active"] = None

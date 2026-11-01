@@ -363,6 +363,7 @@ def rehearse(work, dev, app_id: str, wid: Optional[int], seconds: float, pause: 
     rec["oracle_value"] = (o1 or {}).get("value")
     rec["oracle_error"] = (o1 or {}).get("error") or (o2 or {}).get("error")
     rec["focus"] = w.get("focus") or (o1 or {}).get("focus") or (o2 or {}).get("focus")
+    rec["refocused"] = w.get("refocused") or (o1 or {}).get("refocused") or (o2 or {}).get("refocused")
     same = work.compare(o1, o2, app_id)
     rec["stable"] = same
     worked = rec["work_status"] in ("ok", "skipped")
@@ -456,6 +457,8 @@ def onboard(dev, apps: list[str], work=None, cfg: Optional[dict] = None, interac
             rec["ready"] = bool(rh.get("ready"))
             if rh.get("ready"):
                 out(f"    ok  {rh.get('kind')} -> {rh.get('oracle')} 可读且稳定  (值 {str(rh.get('oracle_value'))[:40]})")
+                if rh.get("refocused"):
+                    out(f"       注: 中途焦点跑到了 {rh['refocused']}, 脚本把它夺了回来 (实验时不要点别的窗口)")
             else:
                 out(f"    !! 未就绪: work={rh.get('work_status')} oracle={rh.get('oracle')} "
                     f"value={str(rh.get('oracle_value'))[:30]} stable={rh.get('stable')} "
