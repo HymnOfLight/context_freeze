@@ -59,8 +59,31 @@ def ensure(docx: str = BLANK_DOCX) -> dict:
     return {"docx": docx}
 
 
+def opened_by(path: str) -> list[int]:
+    """Pids whose command line names `path` (WPS keeps the document path in argv)."""
+    hits = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{d}/cmdline", "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if any(path in a.decode(errors="replace") for a in argv):
+            hits.append(int(d))
+    return hits
+
+
 def reset(docx: str = BLANK_DOCX) -> dict:
-    """Overwrite with fresh blanks (between experiment runs, so the `edit` drafts do not pile up)."""
+    """Overwrite with fresh blanks (between experiment runs, so the `edit` drafts do not pile up).
+    Left alone while an editor has the file open: WPS watches it and answers an overwrite with a
+    modal "reload?" dialog that takes the focus from the document (the work script then types
+    into nothing and the onboarding sees `not-active`)."""
+    users = opened_by(docx)
+    if users:
+        ensure(docx)
+        return {"docx": docx, "in_use": users}
     write_docx(docx)
     return {"docx": docx}
 
@@ -69,4 +92,8 @@ if __name__ == "__main__":
     import sys
     paths = reset() if "--reset" in sys.argv else ensure()
     for k, v in paths.items():
+        if k == "in_use":
+            print(f"note: blank.docx is open in pid {v[0]} - not reset (quit WPS first if you want a fresh document)",
+                  file=sys.stderr)
+            continue
         print(f"{k} {v}")
