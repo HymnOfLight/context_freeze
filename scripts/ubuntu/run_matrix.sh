@@ -18,6 +18,7 @@
 #   PLACEHOLDERS=1 scripts/ubuntu/run_matrix.sh                               # apps not installed yet run as placeholders (same ids)
 #   WORK=1 WORK_S=3 scripts/ubuntu/run_matrix.sh                              # scripted work on the foreground app + work_state_ok oracle (--work)
 #   DRY=1 FULL=1 scripts/ubuntu/run_matrix.sh                                 # only list the cells / commands, run nothing
+#   FULL=1 SWAP_CAPS="" CPU_MODES="" scripts/ubuntu/run_matrix.sh              # inside a preset an explicitly empty variable drops that variant group
 #
 # `none` and `static` ignore eta and are run once per scenario / seed (eta=1.0 and 0.0 in the file name).
 # eta must stay above the shrunk floor: a shrunk app keeps memory.high = mem_frac x m_fg (>= mem_min_mb),
@@ -44,21 +45,21 @@ if [ "${NIGHT:-0}" = 1 ]; then
   POLICIES="${POLICIES:-none static lru landlord hybrid}"
   ETAS="${ETAS:-0.7 0.85}"
   SEEDS="${SEEDS:-1}"
-  PROFILES="${PROFILES:-1c:0.3 0.5c:0.5}"
-  CPU_MODES="${CPU_MODES:-cpuset}"
-  SWAP_CAPS="${SWAP_CAPS:-}"
-  MEM_HARD="${MEM_HARD:-0}"
+  PROFILES="${PROFILES-1c:0.3 0.5c:0.5}"
+  CPU_MODES="${CPU_MODES-cpuset}"
+  SWAP_CAPS="${SWAP_CAPS-}"
+  MEM_HARD="${MEM_HARD-0}"
 fi
 if [ "${FULL:-0}" = 1 ]; then
   SCENARIOS="${SCENARIOS:-office download chat design media day}"
   POLICIES="${POLICIES:-none static lru landlord hybrid markov}"
   ETAS="${ETAS:-0.55 0.7 0.85}"
   SEEDS="${SEEDS:-1 2}"
-  PROFILES="${PROFILES:-1c:0.5 1c:0.3 1c:0.7 0.5c:0.5 2c:0.5}"
-  CPU_MODES="${CPU_MODES:-quota cpuset}"
-  RESIDENT="${RESIDENT:-1 0}"
-  SWAP_CAPS="${SWAP_CAPS:-512 128}"
-  MEM_HARD="${MEM_HARD:-1}"
+  PROFILES="${PROFILES-1c:0.5 1c:0.3 1c:0.7 0.5c:0.5 2c:0.5}"
+  CPU_MODES="${CPU_MODES-quota cpuset}"
+  RESIDENT="${RESIDENT-1 0}"
+  SWAP_CAPS="${SWAP_CAPS-512 128}"
+  MEM_HARD="${MEM_HARD-1}"
 fi
 POLICIES="${POLICIES:-none static lru landlord hybrid}"
 ETAS="${ETAS:-0.6 0.8}"
