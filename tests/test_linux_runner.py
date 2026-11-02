@@ -180,9 +180,9 @@ def test_crash_then_resume_reapplies_tiers(tmp_path):
     reapplied = {}
     orig_set_tier = dev2.set_tier
 
-    def spy(id_, tier, m_fg_bytes=None):
+    def spy(id_, tier, m_fg_bytes=None, **kw):
         reapplied.setdefault(id_, tier)             # first call per app = the resume re-application
-        return orig_set_tier(id_, tier, m_fg_bytes)
+        return orig_set_tier(id_, tier, m_fg_bytes, **kw)
     dev2.set_tier = spy
     exp2 = ThrottleExperiment({"apps": APPS, "app_overrides": OVERRIDES, "out_dir": str(tmp_path),
                                "name": cfg["name"]}, dev2, log=lambda *a: None, resume=True)
@@ -417,3 +417,61 @@ def test_work_state_survives_checkpoint_resume(tmp_path):
     # resumed steps compare against the oracle saved before the crash -> checks happen and pass
     assert any(s["launch"].get("work_state_ok") is True for s in after)
     assert all(s["launch"].get("work_state_ok") is not False for s in after)
+
+
+def _thrashing_dev(seed):
+    dev = FakeLinuxDesktop(APPS, seed=seed)
+    # a "video player" whose background working set (whole m_fg) never fits mem_frac x m_fg: with the
+    # night run's iqiyi this produced ~50 memory.events high per second and 1.1M major faults per cell
+    dev.state["fake_browser"]["m"] = dev.state["fake_browser"]["resident"] = 400 * 1024
+    dev.bg_wss["fake_browser"] = 400 * 1024
+    return dev
+
+
+def test_thrash_guard_raises_memory_high_of_the_app_that_does_not_fit(tmp_path):
+    cfg = cfg_for(tmp_path, "static", dwell_s=0.05, throttle={"mem_min_mb": 32, "mem_frac": 0.5})
+    dev = _thrashing_dev(seed=11)
+    exp = ThrottleExperiment(cfg, dev, log=lambda *a: None)
+    path = exp.run()
+    steps = steps_of(path)
+    raised = [(s["t"], s["actions"]["backoff"]) for s in steps if s["actions"].get("backoff")]
+    assert raised and all(set(b) == {"fake_browser"} for _, b in raised), raised
+    highs = [b["fake_browser"] for _, b in raised]
+    assert highs == sorted(highs) and highs[0] > 200 and highs[-1] == 400      # 200 -> 300 -> 400 = m_fg: capped
+    assert exp.mem_high["fake_browser"] == 400 * 2 ** 20
+    # the raised limit was applied on the cgroup in the same step
+    last = raised[-1][0]
+    applied = [s["actions"]["limits"]["fake_browser"]["memory_high"] for s in steps if s["actions"].get("backoff")]
+    assert applied == [str(h * 2 ** 20) for h in highs]
+    # once memory.high covers the working set the kernel stops reclaiming it
+    tail = [s["bg"]["fake_browser"]["high_events"] for s in steps if s["t"] > last + 1
+            and "fake_browser" in s["bg"] and s["req"] != "fake_browser"]
+    assert tail and max(tail) == 0
+    row = summarize(load(path))
+    assert row["mem_high_backoffs"] == len(raised) and row["mem_high_backoff_apps"] == "fake_browser"
+    # the other apps were never touched
+    others = {a: dev.state[a]["high"] for a in APPS if a != "fake_browser" and dev.state[a]["high"]}
+    assert all(h == max(32 * 1024, dev.state[a]["m"] // 2) for a, h in others.items())
+
+
+def test_thrash_guard_can_be_disabled_and_survives_resume(tmp_path):
+    off = cfg_for(tmp_path, "static", dwell_s=0.05, throttle={"mem_min_mb": 32, "thrash_high_per_s": 0})
+    path = ThrottleExperiment(off, _thrashing_dev(seed=12), log=lambda *a: None).run()
+    assert all(not s["actions"].get("backoff") for s in steps_of(path))
+    assert summarize(load(path))["mem_high_backoffs"] == 0
+
+    cfg = cfg_for(tmp_path, "static", dwell_s=0.05, throttle={"mem_min_mb": 32}, name="thrash_resume")
+    dev = _thrashing_dev(seed=13)
+    dev.fail_at_launch = len(APPS) + 9
+    exp = ThrottleExperiment(cfg, dev, log=lambda *a: None)
+    with pytest.raises(OSError):
+        exp.run()
+    assert exp.mem_high.get("fake_browser")
+    dev2 = _thrashing_dev(seed=14)
+    for a in APPS:
+        dev2.state[a]["pid"] = dev.state[a]["pid"]
+        dev2.state[a]["window"] = dev.state[a]["window"]
+    exp2 = ThrottleExperiment({"apps": APPS, "app_overrides": OVERRIDES, "out_dir": str(tmp_path),
+                               "name": cfg["name"]}, dev2, log=lambda *a: None, resume=True)
+    exp2.run()
+    assert exp2.mem_high["fake_browser"] >= exp.mem_high["fake_browser"]      # restored, not re-learned from 200

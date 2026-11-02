@@ -54,6 +54,11 @@ class ThrottleProfile:
     swap_max_mb: Optional[int] = None    # memory.swap.max per shrunk app (None = unlimited)
     io_weight: Optional[int] = None      # io.weight while throttled (needs io controller; optional)
     proactive_reclaim: bool = True       # write memory.reclaim after lowering memory.high
+    # thrash guard: a shrunk app whose cgroup reports more than this many `memory.events high` per second
+    # during a dwell (the kernel reclaiming it again and again because its background working set is
+    # larger than memory.high) gets its memory.high multiplied by thrash_backoff, up to m_fg. 0 = off.
+    thrash_high_per_s: float = 5.0
+    thrash_backoff: float = 1.5
 
     @classmethod
     def from_cfg(cls, d: Optional[dict]) -> "ThrottleProfile":
@@ -70,7 +75,9 @@ class ThrottleProfile:
         return (f"cpu={cpu.get(self.cpu_mode, self.cpu_mode)} weight={self.cpu_weight} "
                 f"mem.high={int(self.mem_frac * 100)}% of m_fg (>= {self.mem_min_mb} MB)"
                 + (f" mem.max=x{self.mem_hard_factor}" if self.mem_hard else " no mem.max")
-                + (f" swap.max={self.swap_max_mb} MB" if self.swap_max_mb else " swap unlimited"))
+                + (f" swap.max={self.swap_max_mb} MB" if self.swap_max_mb else " swap unlimited")
+                + (f" thrash guard >{self.thrash_high_per_s:g} high/s -> x{self.thrash_backoff:g}"
+                   if self.thrash_high_per_s and self.thrash_high_per_s > 0 else " no thrash guard"))
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -304,8 +311,9 @@ class CgroupTree:
 
 
 def tier_limits(tree: CgroupTree, profile: ThrottleProfile, tier: str,
-                m_fg_bytes: Optional[float] = None) -> dict:
-    """The knob values for a tier (None = clear). Pure function of the profile, unit-testable."""
+                m_fg_bytes: Optional[float] = None, memory_high_bytes: Optional[int] = None) -> dict:
+    """The knob values for a tier (None = clear). Pure function of the profile, unit-testable.
+    `memory_high_bytes` overrides the profile's memory.high for `shrunk` (thrash guard back-off)."""
     if tier not in TIERS:
         raise ValueError(f"tier must be one of {TIERS}, got {tier!r}")
     if tier == "fg":
@@ -324,7 +332,7 @@ def tier_limits(tree: CgroupTree, profile: ThrottleProfile, tier: str,
     lim["cpu_weight"] = profile.cpu_weight if profile.cpu_weight else 100
     lim["io_weight"] = profile.io_weight
     if tier == "shrunk":
-        high = profile.mem_high_bytes(m_fg_bytes or 0)
+        high = int(memory_high_bytes) if memory_high_bytes else profile.mem_high_bytes(m_fg_bytes or 0)
         lim["memory_high"] = str(high)
         if profile.mem_hard:
             lim["memory_max"] = str(int(high * profile.mem_hard_factor))
@@ -334,10 +342,10 @@ def tier_limits(tree: CgroupTree, profile: ThrottleProfile, tier: str,
 
 
 def apply_tier(tree: CgroupTree, name: str, tier: str, profile: ThrottleProfile,
-               m_fg_bytes: Optional[float] = None) -> dict:
+               m_fg_bytes: Optional[float] = None, memory_high_bytes: Optional[int] = None) -> dict:
     """Apply a tier to cf/<name>. For `shrunk` also reclaims down to memory.high when supported.
     Returns {"tier", "limits": {...}, "reclaim": how, "reclaim_bytes": n}."""
-    lim = tier_limits(tree, profile, tier, m_fg_bytes)
+    lim = tier_limits(tree, profile, tier, m_fg_bytes, memory_high_bytes)
     # raising limits must happen before lowering others would fail (e.g. memory.max < memory.high is
     # legal but pointless); order: cpu first, then memory
     applied = tree.set_limits(name, **lim)

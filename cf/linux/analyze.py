@@ -33,7 +33,7 @@ MAIN_COLS = ["policy", "scenario", "eta", "seed", "cpu", "mem_frac", "T", "budge
              "bg_pss_peak_mb", "swap_write_mb", "lat_p50_ms", "lat_p95_ms", "ping_p95_ms", "n_cold",
              "bg_cores_avg", "bg_throttled_pct", "download_mbps", "notif_per_h", "compute_cpu_s",
              "state_lost_events", "oom_kills", "work_checks", "work_fail", "budget_violations", "n_resident_avg",
-             "eta_min"]
+             "mem_high_backoffs", "eta_min"]
 
 AGG_COLS_LINUX = AGG_MAIN_COLS + ["ping_p95_ms", "bg_cores_avg", "download_mbps", "notif_per_h",
                                   "compute_cpu_s", "state_lost_events"]
@@ -110,6 +110,10 @@ def summarize(run: dict) -> dict:
         "work_steps": sum(1 for s in steps if (s.get("work") or {}).get("status") == "ok"),
         "n_resident_avg": round(sum(len([a for a in s.get("resident", []) if a != s["req"]]) for s in steps)
                                 / len(steps), 2) if steps else None,
+        # thrash guard: how often a shrunk app's memory.high had to be raised (0 = the profile's limits held)
+        "mem_high_backoffs": sum(len((s.get("actions") or {}).get("backoff") or {}) for s in steps),
+        "mem_high_backoff_apps": ",".join(sorted({a for s in steps
+                                                  for a in ((s.get("actions") or {}).get("backoff") or {})})),
     })
     # a budgeted cell whose budget is below the shrunk floor is identical to static (nothing can be resident)
     em = row["eta_min"]
