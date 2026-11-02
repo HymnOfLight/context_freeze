@@ -496,7 +496,7 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 | `work not-active (focus was on 0x... 'xxx' [class])` / `oracle clipboard: not-active (...)` | 脚本发键前核对 `_NET_ACTIVE_WINDOW`: 焦点在**别的程序**的窗口上 (括号里是谁: 弹窗 / 对话框 / 桌面) - 切前台失败 (GNOME 焦点保护 / 模态对话框挡住) 或当时记的是已经消失的登录框。该应用自己的其他窗口 (QQ / 钉钉弹出的独立会话窗、WPS 重建的文档窗) 不算, 照常输入。发现焦点被抢时脚本会**夺回一次** (再 `activate` 该应用) 再输入 / 读 oracle, 日志记 `refocused`; 只有夺不回来才算 `not-active` | 关掉括号里那个窗口 (操作者的终端: 回车后别再点它), 重跑 `cf_onboard.sh <id>`; 还不行看 §10 "activate 失败" |
 | `prep skipped` | 准备那一步回答了 `s` - 常常不是故意的: 上一问 (如 "退出并重新启动?") 回车后脚本忙了 10-20 s, 这期间敲的键被下一问吃掉了 | 重跑 `cf_onboard.sh <id>`, 等提示出现再敲键 (现在每个提示前会丢弃提前敲的键) |
 | `oracle clipboard: xclip: ...` | 没装 xclip | `sudo apt install xclip` |
-| `oracle clipboard read nothing` | ctrl+a / ctrl+c 后剪贴板没有文本: 输入框没焦点, 或该应用复制出来的不是文本 | 在输入框 / 正文里点一下再重跑; WPS 确认光标在 blank.docx 正文而不是 "新建" 页 |
+| `oracle clipboard read nothing` / `clipboard-unchanged` | ctrl+a / ctrl+c 后剪贴板没有文本 (2 s 内应用没有交出选区): 输入框没焦点, 回到了登录页, 或该应用复制出来的不是文本 | 在输入框 / 正文里点一下再重跑; WPS 确认光标在 blank.docx 正文而不是 "新建" 页; 聊天软件确认还在登录状态 |
 | `oracle ... unstable` | 两次读到的内容不同 (有东西在自动变: 动画标题、输入法候选) | 换 oracle (`work_overrides`: `"oracle": "title"` / `"screen"`) |
 
 ## 5. 配置文件参考 (`configs/ubuntu_cn_desktop.json`)
@@ -612,8 +612,8 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --release
 
 | 应用 | 默认脚本 (`kind`) | 默认 oracle | 说明 |
 |---|---|---|---|
-| 微信 / QQ / 钉钉 | `draft`: 往焦点输入框键入 `cf-work <id> t<step> 草稿未保存 ` | `clipboard`: ctrl+a ctrl+c 后剪贴板文本的长度 + md5 | 需要先手动点开一个会话让输入框有焦点 (登录时顺手做) |
-| WPS | `edit`: 键入同样一行 + 回车 | `clipboard` | 文档不保存; 回来时 ctrl+a 全选再 End 取消选区 |
+| 微信 / QQ / 钉钉 | `draft`: ctrl+a 后键入 `cf-work <id> t<step> 草稿未保存 ` (**替换**上一步的草稿, 不追加) | `clipboard`: ctrl+a ctrl+c 后剪贴板文本的长度 + md5 | 需要先手动点开一个会话让输入框有焦点 (登录时顺手做) |
+| WPS | `edit`: ctrl+a 后键入同样一行 + 回车 (替换正文) | `clipboard` | 文档不保存; 回来时 ctrl+a 全选再 End 取消选区 |
 | 浏览器 / 腾讯视频 / 哔哩哔哩 | `browse`: 滚轮下翻 `scroll` 格再回退 1/4 | `title`: `_NET_WM_NAME` (页面标题) | 像素会随视频变化, 所以只认标题; 页面被重载会换标题 / 回到顶部 |
 | 百度网盘 / 小艺 / 腾讯会议 | `none` | `title` | 下载本身在后台进行 (`write_mb` 已经度量); 会议只做常驻 |
 | 迅雷 / 爱奇艺 / 网易云音乐 | `browse`: 滚动任务列表 / 剧集页 / 歌单 (`scroll` 4 / 6 / 6) | `title` | 下载 / 播放在后台继续; 标题 = 任务数 / 剧名 / 歌名, 被重载才会变 |
@@ -637,10 +637,10 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy s
 `run_all.sh` 的冒烟检查把 `work_fail = 0` 和 `state_lost / oom / COLD = 0` 一起当作继续跑矩阵的前提。
 
 注意事项: (a) `clipboard` oracle 会覆盖系统剪贴板, 实验期间不要指望剪贴板里的东西; 不想碰剪贴板就 `work_overrides` 改成
-`"oracle": "screen"` 或 `"title"`。(b) `draft` 文本会越积越长 (每步追加一段), 60 步 ≈ 3 KB, 对输入框无压力; 想清空就在下一次登录时删掉。
+`"oracle": "screen"` 或 `"title"`。(b) `draft` / `edit` 每步先 ctrl+a 再键入, 文本只有一段 (~28 字节), 不会越积越长: 早期版本是追加的, 两晚后 QQ 的草稿到了 22 KB, Electron 输入框慢到 ctrl+c 端出来的还是**上一步**的文本 (剪贴板过期 → 连续假 `work_fail`), 最后 QQ 崩掉回到登录页。读 oracle 前现在会先在剪贴板放一个哨兵, 等应用真的交出选区再读 (最多 2 s); 到时还是哨兵 = 没有可复制的内容 (空输入框 / 登录页) → 记为空摘要, 与之前的草稿不一致 → `work_fail`, 这才是 "会话丢了" 的正确判定。
 (c) 只支持 X11 (XTEST / `get_image`); Wayland 下 `--work` 会全部 `not-active` / `error`。(d) 手机版 `ui` oracle 依赖 `uiautomator dump`,
 Waydroid 上要 1–3 s; 列表页的推荐流本身会刷新 → 用 `tolerance` 更大的 `screen` 或 `kind: none`。(e) `work_s` 计入 dwell 的开头, 所以
-`dwell_s` 的下限至少要 ≥ 2 × `work_s`。(f) 微信 / QQ 在没有焦点输入框时 `draft` 的按键会被吞掉, 不影响实验, 只是 `clipboard` 读到的是空 → None。
+`dwell_s` 的下限至少要 ≥ 2 × `work_s`。(f) 微信 / QQ 在没有焦点输入框时 `draft` 的按键会被吞掉, 不影响实验, 只是 `clipboard` 读到的是空摘要 (`0:…`, 带 `clipboard-unchanged` 注记)。
 
 ### 6.7 日常使用: `focusd`
 

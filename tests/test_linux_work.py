@@ -293,7 +293,23 @@ def test_x11_edit_and_clipboard_round_trip(xvfb, tmp_path):
         # nothing happened in between -> same content; more typing -> different content
         assert drv.compare(o1, drv.oracle("pad", wid), "pad") is True
         drv.work("pad", wid, 0.1, 8)
-        assert drv.compare(o1, drv.oracle("pad", wid), "pad") is False
+        o2 = drv.oracle("pad", wid)
+        assert drv.compare(o1, o2, "pad") is False
+        # the work replaces the text (select-all first) instead of appending: the document does not
+        # grow step after step, so the step-7 marker is gone and the size stays that of one marker
+        clip = subprocess.run(["xclip", "-o", "-selection", "clipboard"], capture_output=True).stdout.decode()
+        assert W.work_text("pad", 8).strip() in clip and W.work_text("pad", 7).strip() not in clip
+        assert int(o2["value"].split(":")[0]) == int(o1["value"].split(":")[0])
+        # an app that does not answer the selection request must not hand back the previous oracle:
+        # with the keystrokes suppressed the parked sentinel stays and the result is the empty digest
+        real_key = drv.x11._key
+        drv.x11._key = lambda *keys: None
+        try:
+            o3 = drv.oracle("pad", wid)
+        finally:
+            drv.x11._key = real_key
+        assert o3["value"] == "0:d41d8cd98f00b204" and o3["error"].startswith("clipboard-unchanged")
+        assert drv.compare(o2, o3, "pad") is False
         # another window of the same app would still count; an app that is not in front at all
         # (here: one whose windows are not mousepad's) gets no keystrokes
         other = LinuxApp("other", "x", "compute", cmd="true", match="zzz-no-such", wm_class="^zzz-no-such$", kind="oss")

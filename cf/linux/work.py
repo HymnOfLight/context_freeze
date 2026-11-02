@@ -278,15 +278,51 @@ class X11WorkDriver:
             self.err = f"{type(e).__name__}: {e}"
             return None
 
-    def clipboard_md5(self) -> Optional[str]:
+    def _clip_read(self) -> Optional[bytes]:
         try:
             p = subprocess.run(["xclip", "-o", "-selection", "clipboard"], capture_output=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired) as e:
             self.err = f"xclip: {e}"
             return None
-        if p.returncode != 0:
+        return p.stdout if p.returncode == 0 else None
+
+    def _clip_set(self, text: str) -> bool:
+        """Own the clipboard with `text` (xclip forks and serves it until another client takes over)."""
+        try:
+            p = subprocess.Popen(["xclip", "-i", "-selection", "clipboard"], stdin=subprocess.PIPE,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            p.communicate(text.encode(), timeout=5)
+            return p.returncode == 0
+        except (OSError, subprocess.TimeoutExpired) as e:
+            self.err = f"xclip -i: {e}"
+            return False
+
+    @staticmethod
+    def _digest(data: bytes) -> str:
+        return f"{len(data)}:{hashlib.md5(data).hexdigest()[:16]}"
+
+    def _clip_wait(self, sentinel: Optional[str], timeout: float = 2.0) -> Optional[str]:
+        """Digest of the clipboard once it no longer holds `sentinel` (None = no sentinel parked).
+        Still the sentinel after `timeout`: the app had nothing to copy (empty input box, a login
+        page) - reported as the empty digest, so a vanished draft is still a mismatch."""
+        deadline = time.monotonic() + timeout
+        want = sentinel.encode() if sentinel else None
+        data = None
+        while True:
+            time.sleep(0.15)
+            data = self._clip_read()
+            if data is not None and data != want:
+                return self._digest(data)
+            if time.monotonic() >= deadline:
+                break
+        if data is None:
             return None
-        return f"{len(p.stdout)}:{hashlib.md5(p.stdout).hexdigest()[:16]}"
+        self.err = "clipboard-unchanged: nothing selected / app did not answer"
+        return self._digest(b"")
+
+    def clipboard_md5(self) -> Optional[str]:
+        data = self._clip_read()
+        return None if data is None else self._digest(data)
 
     @staticmethod
     def statefile_of(a: LinuxApp) -> str:
@@ -311,6 +347,10 @@ class X11WorkDriver:
             rec["refocused"] = self.refocused
         try:
             if kind in ("edit", "draft"):
+                # replace, do not append: an appended draft grew to 22 KB over two nights in QQ, the
+                # Electron input box got slow enough for ctrl+c to serve the *previous* text (stale
+                # clipboard -> false work_fail) and QQ finally fell over.  Still unique per step (t).
+                self._key("ctrl+a")
                 self._type(spec.get("text") or work_text(a.id, t))
                 if kind == "edit":
                     self._key("Return")
@@ -358,12 +398,19 @@ class X11WorkDriver:
                 return out
             if self.refocused:
                 out["refocused"] = self.refocused
+            # park a sentinel in the clipboard first: when the app is slow to answer the selection
+            # request (big input box, throttled event loop) xclip would otherwise hand back whatever
+            # was there before - the previous oracle - and the comparison on return would fail
+            sentinel = f"cf-oracle-sentinel {time.time_ns()}"
+            parked = self._clip_set(sentinel)
+            self.err = ""
             self._key("ctrl+a", "ctrl+c")
-            time.sleep(0.3)
-            out["value"] = self.clipboard_md5()
-            self._key("End")                      # drop the selection so the next typing appends
+            out["value"] = self._clip_wait(sentinel if parked else None, timeout=2.0)
+            self._key("End")                      # drop the selection
             if out["value"] is None:
                 out["error"] = self.err[:80] or "clipboard-unavailable"
+            elif self.err:
+                out["error"] = self.err[:80]
         else:
             out["error"] = f"unknown-oracle:{o}"
         return out
