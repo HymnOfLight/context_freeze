@@ -89,6 +89,7 @@ class ThrottleExperiment(Experiment):
         self.throttled: set[str] = set()     # tier bg or shrunk (CPU-limited)
         self.shrunk: set[str] = set()        # tier shrunk (memory.high)
         self.tiers: dict[str, str] = {}
+        self.mem_high: dict[str, int] = {}   # app -> memory.high bytes raised by the thrash guard (else profile)
         self.substitutions: list[tuple[str, str]] = []
         self.categories: dict[str, str] = {}
         self.kinds: dict[str, str] = {}      # app -> desktop | mobile | oss | placeholder
@@ -104,7 +105,7 @@ class ThrottleExperiment(Experiment):
             "version": LINUX_CKPT_VERSION, "name": self.cfg["name"], "cfg": self.cfg, "apps": self.apps,
             "m_fg": self.m_fg, "a_fg": self.a_fg, "l_cold": self.l_cold, "B_kb": self.B_kb,
             "trace": self.trace, "t_done": self.t_done, "policy": self.pol, "current": self.current,
-            "throttled": self.throttled, "shrunk": self.shrunk, "tiers": self.tiers,
+            "throttled": self.throttled, "shrunk": self.shrunk, "tiers": self.tiers, "mem_high": self.mem_high,
             "resume_hist": self.resume_hist, "prev_pids": self.prev_pids,
             "substitutions": self.substitutions, "categories": self.categories, "kinds": self.kinds,
             "placeholders": self.placeholders, "work_state": self.work_state, "saved_at": time.time(),
@@ -132,6 +133,7 @@ class ThrottleExperiment(Experiment):
         self.pol, self.current = state["policy"], set(state["current"])
         self.throttled, self.shrunk = set(state["throttled"]), set(state["shrunk"])
         self.tiers = dict(state["tiers"])
+        self.mem_high = dict(state.get("mem_high", {}))
         self.resume_hist, self.prev_pids = state["resume_hist"], state["prev_pids"]
         self.substitutions = state.get("substitutions", [])
         self.categories = state.get("categories", {})
@@ -154,7 +156,7 @@ class ThrottleExperiment(Experiment):
         for app in self.apps:
             tier = self.tiers.get(app, "fg") if app in alive else "fg"
             if tier != "fg":
-                dev.set_tier(app, tier, self.m_fg.get(app, 0) * 1024)
+                dev.set_tier(app, tier, self.m_fg.get(app, 0) * 1024, memory_high_bytes=self.mem_high.get(app))
             self.tiers[app] = tier
         self.log.info(f"resume: re-applied tiers - throttled {len(self.throttled)}, shrunk {len(self.shrunk)}, "
                       f"running {len(alive)}/{len(self.apps)}")
@@ -420,7 +422,7 @@ class ThrottleExperiment(Experiment):
             smp = sample["apps"][app]
             m = (smp.total("pss_kb") + smp.total("swap_pss_kb")) * 1024 if smp.alive else self.m_fg[app] * 1024
             m = max(m, 1.0)
-            high = self.profile.mem_high_bytes(self.m_fg[app] * 1024)
+            high = self._high_bytes(app)
             rho_i = min(1.0, high / m)
             hist = self.resume_hist.get(app, [])
             comp = [ms for c, ms in hist if c and ms]
@@ -431,6 +433,41 @@ class ThrottleExperiment(Experiment):
                 c_resume = 60.0 + max(0.0, m - high) / (1.2 * 2 ** 30) * 1000   # ms; ~1.2 GB/s page-in
             infos[app] = AppInfo(app, m, m, rho_i, c_resume, 0.0)
         return infos
+
+    def _high_bytes(self, app: str) -> int:
+        """memory.high a shrunk `app` gets: the profile's value unless the thrash guard raised it."""
+        return self.mem_high.get(app) or self.profile.mem_high_bytes(self.m_fg.get(app, 0) * 1024)
+
+    def _thrash_guard(self, req: str, bg: dict, actions: dict) -> dict:
+        """Shrunk apps the kernel kept reclaiming during the dwell (memory.events `high` rate above
+        thrash_high_per_s) get a bigger memory.high: their background working set does not fit, and a
+        limit that only produces swap traffic saves nothing. Returns {app: new memory.high MB}."""
+        rate_max = float(self.profile.thrash_high_per_s or 0)
+        if rate_max <= 0:
+            return {}
+        raised = {}
+        for app, b in bg.items():
+            wall = b.get("wall_s") or 0
+            if app == req or self.tiers.get(app) != "shrunk" or wall <= 0:
+                continue
+            rate = b.get("high_events", 0) / wall
+            if rate <= rate_max:
+                continue
+            cap = int(self.m_fg.get(app, 0) * 1024)
+            cur = self._high_bytes(app)
+            if cap <= 0 or cur >= cap:
+                continue
+            new = min(cap, int(cur * float(self.profile.thrash_backoff or 1.5)))
+            if new <= cur:
+                continue
+            self.mem_high[app] = new
+            r = self.dev.set_tier(app, "shrunk", cap, memory_high_bytes=new)
+            actions.setdefault("limits", {})[app] = r.get("limits")
+            raised[app] = new >> 20
+            self.log.warn(f"{display_name(app)}: memory.high thrash ({rate:.0f} high events/s, "
+                          f"{b.get('majflt', 0)} major faults in {wall:.0f}s) - raised memory.high "
+                          f"{cur >> 20} -> {new >> 20} MB" + (" (= m_fg, no memory limit left)" if new >= cap else ""))
+        return raised
 
     def _tier_for(self, app: str, resident: bool) -> str:
         if app in self.cfg["never_throttle"] or self.cfg["policy"] == "none":
@@ -448,7 +485,7 @@ class ThrottleExperiment(Experiment):
             tier = self._tier_for(app, app in S)
             cur = self.tiers.get(app, "fg")
             if tier != cur or (tier == "shrunk" and app not in self.shrunk):
-                r = dev.set_tier(app, tier, self.m_fg[app] * 1024)
+                r = dev.set_tier(app, tier, self.m_fg[app] * 1024, memory_high_bytes=self.mem_high.get(app))
                 actions["tiers"][app] = tier
                 actions["limits"][app] = r.get("limits")
                 if tier == "shrunk":
@@ -537,6 +574,7 @@ class ThrottleExperiment(Experiment):
                 state_lost[p] = lost
         if work_lost:
             state_lost.setdefault(req, {})["work_state"] = work_lost
+        actions["backoff"] = self._thrash_guard(req, bg, actions)
         pids_now = {p: set(d2[p]["pids"]) for p in self.apps}
         killed = [p for p in self.apps if self.prev_pids.get(p) and not pids_now[p]]
         self.prev_pids = pids_now
@@ -729,6 +767,11 @@ class ThrottleExperiment(Experiment):
         if r.get("work_checks"):
             self.log.ok(f"scripted work: {r['work_checks']} state checks after a background phase, "
                         f"{r['work_fail']} lost content (work_state_ok=False)")
+        if self.mem_high:
+            self.log.warn("thrash guard raised memory.high for "
+                          + ", ".join(f"{display_name(a)} -> {v >> 20} MB" for a, v in sorted(self.mem_high.items()))
+                          + f" ({r.get('mem_high_backoffs')} back-offs): their background working set does not fit "
+                          f"mem_frac x m_fg / mem_min_mb; raise those for a static comparison")
         if r["state_lost_events"]:
             self.log.warn("state_lost > 0: a process / window disappeared, the kernel OOM-killed something, or the "
                           "scripted work's state changed while throttled - inspect the step records "

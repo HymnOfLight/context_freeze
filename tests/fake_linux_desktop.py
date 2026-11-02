@@ -96,7 +96,10 @@ class FakeLinuxDesktop:
             m = self.rng.randint(150, 450) * 1024          # kB
             self.state[a] = {"pid": None, "m": m, "resident": m, "high": None, "cpu_ms": 0, "throttled_ms": 0,
                              "nr_throttled": 0, "write": 0, "window": None, "majflt": 0, "oom": 0,
-                             "notified": 0, "pid_age": 0.0}
+                             "notified": 0, "pid_age": 0.0, "high_events": 0}
+        # apps whose background working set (kB) is bigger than any memory.high the profile gives them:
+        # while shrunk below it they thrash (memory.events high / major faults keep growing)
+        self.bg_wss: dict[str, int] = {}
         self.launches = 0
         self.fail_at_launch: int | None = None
         self.crash_app: str | None = None       # this app's process vanishes after the next sample
@@ -167,9 +170,9 @@ class FakeLinuxDesktop:
     def minimize(self, id_):
         pass
 
-    def set_tier(self, id_, tier, m_fg_bytes=None):
+    def set_tier(self, id_, tier, m_fg_bytes=None, memory_high_bytes=None):
         s = self.state[id_]
-        lim = tier_limits(self.tree, self.profile, tier, m_fg_bytes)
+        lim = tier_limits(self.tree, self.profile, tier, m_fg_bytes, memory_high_bytes)
         self.tiers[id_] = tier
         res = {"tier": tier, "limits": lim, "reclaim": None, "reclaim_bytes": 0}
         if tier == "shrunk":
@@ -211,6 +214,11 @@ class FakeLinuxDesktop:
                 s["nr_throttled"] += int(dt * 10)
             if cat == "download":
                 s["write"] += int(2 * 2 ** 20 * dt * got / want)
+            wss = self.bg_wss.get(a)
+            if wss and tier == "shrunk" and s["high"] and s["high"] < wss:
+                s["high_events"] += dt * 40                  # the kernel reclaims it ~40x per second
+                s["majflt"] += int(dt * 2000)
+                self.vm["pswpout"] += int(dt * 2000); self.vm["pswpin"] += int(dt * 2000)
             if cat == "push" and self.rng.random() < min(1.0, 5 * dt):
                 s["notified"] += 1
                 self.notify.counts[self.cat[a].name] = self.notify.counts.get(self.cat[a].name, 0) + 1
@@ -237,7 +245,7 @@ class FakeLinuxDesktop:
                   "memory_high": str(s["high"] * 1024) if s["high"] else "max",
                   "cpu": {"usage_usec": s["cpu_ms"] * 1000, "throttled_usec": s["throttled_ms"] * 1000,
                           "nr_throttled": s["nr_throttled"]},
-                  "events": {"low": 0, "high": 0, "max": 0, "oom": s["oom"], "oom_kill": s["oom"]}}
+                  "events": {"low": 0, "high": int(s["high_events"]), "max": 0, "oom": s["oom"], "oom_kill": s["oom"]}}
             apps[a] = AppSampleL(app=a, procs=procs, cgroup=cg, window=s["window"] if procs else None,
                                  tier=self.tiers.get(a, "fg"))
         if self.crash_app and self.state[self.crash_app]["pid"]:

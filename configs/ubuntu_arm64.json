@@ -1,5 +1,5 @@
 {
-  "_comment": "arm64 虚拟机 (UTM / Apple Silicon) 上实际装好的真机应用集合, 全部真跑、带脚本操作 (work=true). 下载: 百度网盘 / 迅雷 / 爱奇艺 / 抖音 / 网易云音乐 / Firefox; 推送: 微信 / QQ / 钉钉 / 腾讯会议; 计算: WPS / 中望CAD / 石墨文档. 哔哩哔哩装了但在虚拟机里软解太卡, 故意不列 (场景里引用它的切换会被 restrict 丢掉); 百度网盘 / Chrome / Edge 没有 arm64 公开版, 剪映 / 小艺 没有 Linux 版, 腾讯视频 / 悟空图像 未装 -> 都不在列表里. 星火商店 / 统信构建的包装在 /opt/apps/<包名>/, 启动名不在 PATH: launch 会自动改用包的 .desktop Exec (install_cn_apps.sh --check 的 cmd 列显示实际命令); WM_CLASS 和目录猜的不一样时用 --discover 看到后写进 app_overrides.",
+  "_comment": "arm64 虚拟机 (UTM / Apple Silicon) 上实际装好的真机应用集合, 全部真跑、带脚本操作 (work=true). 下载: 百度网盘 / 迅雷 / 爱奇艺 / 哔哩哔哩 / 网易云音乐 / Firefox; 推送: 微信 / QQ / 钉钉 / 腾讯会议; 计算: WPS / 中望CAD / 石墨文档. 抖音的 arm64 包在星火的 ACE 容器里缺 libc_secshared.so, 启动即退出 (exited-0), 故用哔哩哔哩顶替 media 场景的短视频位; Chrome / Edge 没有 arm64 公开版, 剪映 / 小艺 没有 Linux 版, 腾讯视频 / 悟空图像 未装 -> 都不在列表里. 星火商店 / 统信构建的包装在 /opt/apps/<包名>/, 启动名不在 PATH: launch 会自动改用包的 .desktop Exec (install_cn_apps.sh --check 的 cmd 列显示实际命令); WM_CLASS 和目录猜的不一样时用 --discover 看到后写进 app_overrides.",
   "apps": [
     "wechat",
     "qq",
@@ -8,7 +8,7 @@
     "baidunetdisk",
     "xunlei",
     "iqiyi",
-    "douyin",
+    "bilibili",
     "netease_music",
     "firefox",
     "wps",
@@ -36,12 +36,14 @@
     "cpu_weight": 20,
     "mem_frac": 0.5,
     "mem_min_mb": 192,
+    "thrash_high_per_s": 5.0,
+    "thrash_backoff": 1.5,
     "mem_hard": false,
     "mem_hard_factor": 1.5,
     "swap_max_mb": null,
     "io_weight": null,
     "proactive_reclaim": true,
-    "_comment": "cpu_mode quota: 每个后台应用 cpu.max = cpu_cores 个核心的带宽 (默认 1 核); cpuset: 所有后台应用共享 cpuset_cpus 这 (几) 个核 (last = 编号最大的核); both 两者都用. mem_frac: 预算外 (shrunk) 应用的 memory.high = mem_frac x m_fg (不低于 mem_min_mb). mem_hard=false 时不设 memory.max, 内核只回收 / 节流, 不会 OOM kill -> 不丢状态. swap_max_mb 限制单个应用的 swap 用量 (null 不限); 注意 memory.high + 很小的 swap 上限 = 应用几乎不能分配内存, 只会慢, 仍不会死."
+    "_comment": "cpu_mode quota: 每个后台应用 cpu.max = cpu_cores 个核心的带宽 (默认 1 核); cpuset: 所有后台应用共享 cpuset_cpus 这 (几) 个核 (last = 编号最大的核); both 两者都用. mem_frac: 预算外 (shrunk) 应用的 memory.high = mem_frac x m_fg (不低于 mem_min_mb). mem_hard=false 时不设 memory.max, 内核只回收 / 节流, 不会 OOM kill -> 不丢状态. swap_max_mb 限制单个应用的 swap 用量 (null 不限); 注意 memory.high + 很小的 swap 上限 = 应用几乎不能分配内存, 只会慢, 仍不会死 (夜间跑 swap128 变体: 内存 PSI 每格 180~270 s, ping P95 到 559 ms, 不建议). thrash_high_per_s / thrash_backoff: 抖动保护 - 某个 shrunk 应用一次停留里 memory.events high 超过每秒这么多次 (爱奇艺后台播放时 ~50/s, 一格 7 min 写 swap 6 GB 却省不下内存), 就把它的 memory.high 乘 thrash_backoff, 最高到 m_fg; 0 关闭."
   },
   "cpu_throttle_resident": true,
   "_comment_tiers": "cpu_throttle_resident=true: 预算内的后台应用 (S_t) 也限 CPU (tier bg), 只有预算外的才额外限内存 (tier shrunk) -> 所有切走的窗口都受 CPU 限制, 策略只决定内存分层; false: 预算内的后台应用完全不受限.",
@@ -66,14 +68,16 @@
   "_comment_onboard": "scripts/ubuntu/cf_onboard.sh (= --onboard): 统一账号 (configs/accounts.json, 从 accounts.example.json 复制) 登录向导, 逐个应用: 启动进 cgroup -> 提示登录方式并等主窗口出现 (登录框小, 主窗口 >= main) -> 提示准备动作 (聊天: 点开会话让输入框有焦点; WPS: 新建空白文档) -> 演练一轮 work 脚本 + 读两次 oracle -> ready. onboard_overrides 按 id 覆盖 {main: [宽, 高], method, needs, prep}.",
   "onboard_overrides": {},
   "settle_s": 2.0,
-  "warmup_dwell_s": 10.0,
+  "warmup_dwell_s": 8.0,
   "minimize_background": false,
   "default_rho": null,
   "notifications": true,
   "adopt_strays": true,
-  "sudo_adopt": false,
+  "sudo_adopt": true,
+  "_comment_sudo_adopt": "星火 apm run 启动的应用会留 1~3 个属于别的 uid 的辅助进程 (容器 helper), 普通用户移不进 /cf/<app> (EACCES, 夜间跑 6 个应用都有); true = 失败时经 sudo scripts/ubuntu/cf_adopt.sh 移 (setup_cgroups.sh 装好 sudoers 行), 否则这几个进程不受限.",
   "launch_timeout_s": 90,
-  "ping_timeout_s": 15,
+  "ping_timeout_s": 3,
+  "_comment_ping_timeout": "微信 / 钉钉 / 腾讯会议 / 中望 从不回 _NET_WM_PING, 两次超时后 runner 自动停用它们的 ping; 3 s 让这两次只浪费 6 s 而不是 30 s.",
   "min_ram_mb": 6144,
   "out_dir": "results"
 }

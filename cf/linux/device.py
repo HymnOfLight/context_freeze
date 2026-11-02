@@ -361,10 +361,11 @@ class LinuxDesktop:
             x11.minimize(w["wid"])
 
     # ---------------------------------------------------------------- tiers
-    def set_tier(self, id_: str, tier: str, m_fg_bytes: Optional[float] = None) -> dict:
+    def set_tier(self, id_: str, tier: str, m_fg_bytes: Optional[float] = None,
+                 memory_high_bytes: Optional[int] = None) -> dict:
         if not self.tree.exists(id_):
             return {"tier": tier, "limits": {}, "reclaim": "no-cgroup"}
-        res = apply_tier(self.tree, id_, tier, self.profile, m_fg_bytes)
+        res = apply_tier(self.tree, id_, tier, self.profile, m_fg_bytes, memory_high_bytes)
         self.tiers[id_] = tier
         return res
 

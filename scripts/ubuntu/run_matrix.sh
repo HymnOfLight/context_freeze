@@ -12,7 +12,7 @@
 #   SWAP_CAPS="512 128" scripts/ubuntu/run_matrix.sh                          # memory.swap.max per shrunk app (static policy)
 #   MEM_HARD=1 scripts/ubuntu/run_matrix.sh                                   # contrast cell: memory.max on (expect oom / state_lost > 0)
 #   MEM_FRAC=0.3 ETAS="0.4 0.6" scripts/ubuntu/run_matrix.sh                  # whole matrix with a smaller memory.high (lower feasible eta)
-#   NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40    # one night (~50 cells, ~10 h): 4 scenarios, 5 policies, 2 etas + variants
+#   NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40    # one night (~50 cells, ~7-10 h): 5 scenarios, 5 policies, eta 0.7/0.85 + cpu variants
 #   FULL=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60     # everything above with full lists (~350 cells, several days; resumable)
 #   QUICK=1 scripts/ubuntu/run_matrix.sh                                      # smoke test: office, none + static, T=15
 #   PLACEHOLDERS=1 scripts/ubuntu/run_matrix.sh                               # apps not installed yet run as placeholders (same ids)
@@ -34,14 +34,20 @@ if [ "${QUICK:-0}" = 1 ]; then
   SCENARIOS="${SCENARIOS:-office}"; POLICIES="${POLICIES:-none static}"; ETAS="${ETAS:-0.7}"; SEEDS="${SEEDS:-1}"; T=15
 fi
 if [ "${NIGHT:-0}" = 1 ]; then
+  # one unattended night (~50 cells x ~8 min with T=40).  Lessons from the first arm64 night
+  # (results/arm64_night): eta 0.6 sits right on the shrunk floor (eta_min 0.51 with mem_frac 0.5 /
+  # 192 MB) and keeps ~1 app resident = static, so the etas are the upper two of the FULL grid; the
+  # swap128 variant only measures "memory.high + a tiny swap cap thrashes" (memory PSI 180-270 s per
+  # cell, ping P95 up to 559 ms) and memory.max can OOM-kill a logged-in app with nobody there to log
+  # back in -> both off by default here (FULL keeps them; SWAP_CAPS=128 MEM_HARD=1 re-enables).
   SCENARIOS="${SCENARIOS:-office download chat design media}"
   POLICIES="${POLICIES:-none static lru landlord hybrid}"
-  ETAS="${ETAS:-0.6 0.8}"
+  ETAS="${ETAS:-0.7 0.85}"
   SEEDS="${SEEDS:-1}"
   PROFILES="${PROFILES:-1c:0.3 0.5c:0.5}"
   CPU_MODES="${CPU_MODES:-cpuset}"
-  SWAP_CAPS="${SWAP_CAPS:-128}"
-  MEM_HARD="${MEM_HARD:-1}"
+  SWAP_CAPS="${SWAP_CAPS:-}"
+  MEM_HARD="${MEM_HARD:-0}"
 fi
 if [ "${FULL:-0}" = 1 ]; then
   SCENARIOS="${SCENARIOS:-office download chat design media day}"
