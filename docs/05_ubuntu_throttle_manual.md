@@ -502,8 +502,8 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 ## 5. 配置文件参考 (`configs/ubuntu_cn_desktop.json`)
 
 现成的配置: `ubuntu_cn_desktop.json` (手册默认的 13 个应用, x86 / 齐全时用), `ubuntu_arm64.json` (arm64 虚拟机实际装好的 13 个:
-微信 / QQ / 钉钉 / 腾讯会议 / 百度网盘 / 迅雷 / 爱奇艺 / 抖音 / 网易云音乐 / Firefox / WPS / 中望CAD / 石墨文档, 全部真跑 + `work`; 哔哩哔哩在
-虚拟机里软解太卡故意不列), `ubuntu_no_login.json` (§4.7), `ubuntu_placeholders.json` (冒烟)。
+微信 / QQ / 钉钉 / 腾讯会议 / 百度网盘 / 迅雷 / 爱奇艺 / 哔哩哔哩 / 网易云音乐 / Firefox / WPS / 中望CAD / 石墨文档, 全部真跑 + `work`; 抖音的
+arm64 包在 ACE 容器里缺 `libc_secshared.so` 启动即退, 由哔哩哔哩顶替), `ubuntu_no_login.json` (§4.7), `ubuntu_placeholders.json` (冒烟)。
 
 | 键 | 默认 | 含义 |
 |---|---|---|
@@ -518,6 +518,7 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 | `throttle.cpu_weight` | 20 | 后台与前台争同一核时的权重 (前台 100) |
 | `throttle.mem_frac` | 0.5 | `shrunk` 应用 `memory.high` = mem_frac × m_fg (m_fg = warmup 时前台 PSS+Swap) |
 | `throttle.mem_min_mb` | 192 | `memory.high` 下限; 低于它 Electron 应用会抖动 (每次切回都要重新读几百 MB) |
+| `throttle.thrash_high_per_s` / `thrash_backoff` | 5.0 / 1.5 | 抖动保护: 某个 `shrunk` 应用在一次停留里 `memory.events high` 超过每秒这么多次 (内核在反复回收它, 后台工作集装不进 `memory.high`), 就把它的 `memory.high` 乘 `thrash_backoff`, 最高到 m_fg; 记到 `step.actions.backoff`, 汇总列 `mem_high_backoffs`。0 关闭 (纯静态上限, 用于对照) |
 | `throttle.mem_hard` | false | true 时再设 `memory.max = mem_hard_factor × memory.high` → **有 OOM kill 风险**, 仅用于对照 |
 | `throttle.swap_max_mb` | null | 单个 `shrunk` 应用的 `memory.swap.max`; `memory.high` + 很小的 swap 上限 = 应用几乎不能再分配内存, 只会变慢, 仍不会死 |
 | `throttle.io_weight` | null | 后台 `io.weight` (需要 io 控制器, 对下载类应用有用) |
@@ -565,7 +566,7 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario design --policy s
 
 # 6.3 矩阵: 场景 x 策略 x η x 种子 (+ 限流档位变体), 同一目录, 同一预算分母 (第一格的 m_fg 复用到所有格)
 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60       # 默认: 5 场景 (office download chat design media) x (none static lru landlord hybrid) x η 0.6/0.8, ~40 格 ~10 h
-NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40   # 过夜档: + 1c:0.3 / 0.5c:0.5 / cpuset / swap128 / memhard 对照, ~50 格 ~10 h
+NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40   # 过夜档: η 0.7/0.85 + 1c:0.3 / 0.5c:0.5 / cpuset 对照, ~50 格 ~7-10 h (swap128 / memhard 默认关, SWAP_CAPS=128 MEM_HARD=1 打开)
 FULL=1  scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 60   # 全量: 6 场景 (含 day) x 6 策略 x η 0.55/0.7/0.85 x 2 seed x 全部变体, ~350 格, 数天 (可中断续跑)
 PROFILES="1c:0.5 1c:0.3 0.5c:0.5" POLICIES="none static" scripts/ubuntu/run_matrix.sh     # 只比限流强度
 CPU_MODES="quota cpuset" RESIDENT="1 0" SWAP_CAPS="512 128" MEM_HARD=1 scripts/ubuntu/run_matrix.sh   # 单独点名变体
@@ -682,6 +683,12 @@ mem_bg_avg_mb mem_shrunk_avg_mb t_fg_s t_bg_s t_shrunk_s cores_bg_avg throttled_
 被 `memory.high` 压到 shrunk 时这些缓存页先被丢掉) — 用来回答 "微信在 shrunk 里待了多久、
 切回来平均多慢、这期间推了几条通知"、"百度网盘在后台 1 核下写了多少 MB" 这类按应用的问题。
 
+**`mem_saving_pct` / `achieved_eta` (summary_agg, pareto.png) 的分母是 Σ m_fg = warmup 时各应用前台的 PSS+SwapPss, 分子 `bg_pss_avg_mb`
+只算驻留的 PSS。** 内存紧张的机器上 (8 GB 跑 13 个应用) 内核本来就把一半冷页压进 zram, 所以 `none` 基线也会显示 ~50% "节省" —
+这一列只能看策略之间的差, 不能当绝对节省; 比内存请看 `bg_pss_avg_mb` 的绝对值、`bg_tradeoff.png` (相对 `none` 基线的 %)、
+`zram_phys_avg_mb` 和 `swap_write_mb`。一格 7 分钟写了几个 GB swap 而 `bg_pss_avg_mb` 不比 `none` 低, 就是 `memory.high` 在空转
+(见 §10 "`memory.high` 太低")。
+
 | 列 | 含义 | 希望 |
 |---|---|---|
 | `lat_p50/p95/p99_ms` | 切换总时延 = activate + ping (COLD 再加启动); 手机版应用 = activate + Android `am start -W` 的 TotalTime | 低 |
@@ -698,7 +705,8 @@ mem_bg_avg_mb mem_shrunk_avg_mb t_fg_s t_bg_s t_shrunk_s cores_bg_avg throttled_
 | `swap_write_mb` / `swap_read_mb` / `refaults` | zram 换出 / 换入 | 换入 = WARM 切换的代价 |
 | `psi_cpu_some_ms` | 全系统 CPU 压力 | 前台卡顿的旁证 |
 | `cpu` / `mem_frac` / `cpu_throttle_resident` / `substitutions` | 本格的限流档位与替代关系 (桌面版缺失时用了谁的手机版) | 用来分组 |
-| `eta_min` / `eta_feasible` / `n_resident_avg` | 该格 η 的可达下限 (shrunk floor / Σ m_fg) / 本格 η 是否高于它 / 平均留在预算内的后台应用数 | `eta_feasible = False` 的格等价于 static, 不要拿来比较策略 |
+| `eta_min` / `eta_feasible` / `n_resident_avg` | 该格 η 的可达下限 (shrunk floor / Σ m_fg) / 本格 η 是否高于它 / 平均留在预算内的后台应用数 | `eta_feasible = False` 的格等价于 static, 不要拿来比较策略; η 只比 `eta_min` 高一点 (如 0.6 vs 0.51) 时 `n_resident_avg ≈ 1`, 也几乎等于 static |
+| `mem_high_backoffs` | 抖动保护抬高 `memory.high` 的次数 (哪些应用见 `--all-cols` 的 `mem_high_backoff_apps`) | 0 = 配置的 `mem_frac` / `mem_min_mb` 对所有应用都成立; > 0 说明这些应用的后台工作集比上限大, 静态上限只会制造 swap 流量 |
 | `n_mobile` / `n_placeholders` | 本格里有几个应用跑的是手机版 / 占位程序 | 占位格只用于把流程跑通, 不进论文 |
 
 ## 8. 验证 "不丢状态和上下文"
@@ -742,7 +750,13 @@ ppa:xtradeb/apps); (b) 通过 D-Bus 激活或桌面图标启动的应用在 `use
 (allocation throttling): 应用更慢、`notify-send` 之类的子进程启动也可能被卡住几秒, 但依旧不会被杀。做 `sudo scripts/ubuntu/setup_zram.sh 4096`。
 
 **`memory.high` 太低, 应用抖动 (ping 几秒, `refaults` 很大)** — 提高 `mem_min_mb` (Electron 应用 ≥ 256) 或 `mem_frac`。
-观察 `bg[*].high_events` (memory.events high 计数) 与 `cg_psi_mem_full_us`。
+观察 `bg[*].high_events` (memory.events high 计数) 与 `cg_psi_mem_full_us`。典型例子: 爱奇艺在后台继续播放 / 缓冲, 192 MB 的
+`memory.high` 下一格 7 分钟 19,600 次 high 事件、116 万次 major fault、6 GB swap 写入, 而 PSS 一点没省下来 (页被换出又马上换回)。
+默认开着的抖动保护 (`thrash_high_per_s` = 5) 会在一次停留里发现这种情况后把该应用的 `memory.high` ×1.5 (最高到 m_fg) 并 WARN,
+`summary.csv` 的 `mem_high_backoffs` > 0 就是它动过手; 要做纯静态上限的对照把它设成 0。
+
+**`swap_max_mb` 很小 (如 128) 时前台也卡** — 该应用换不出去, `memory.high` 的回收只能反复丢文件页: 夜间对照里 swap128 变体每格内存 PSI
+180~270 s、ping P95 到 559 ms, 而 none 基线不到 1 s。这个变体只说明 "swap 上限不能和 memory.high 一起压得太死", 不要拿它比策略。
 
 **`thr 0.0s` / `bg_throttled_pct = 0`** — 后台应用本来就用不到 1 个核 (空闲的聊天软件), 配额没有绑定, 是正常现象; 用
 `--cpu-cores 0.5` 或在 design 场景 (CAD / 视频剪辑渲染) 里看。占位程序用 `--workers 3` 才能超过 1 核 (GIL)。
@@ -881,6 +895,6 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |
 | `python3 -m cf.linux.placeholder_app --app ID --title T [--cpu f --mem MB --io-mbps n --notify-every s --workers k]` | 冒烟 / 占位 | 内置 X11 占位程序: 可控的 CPU / 内存 / 写盘 / 通知负载, 状态写到 `/tmp/cf_placeholder_<id>.json` |
 | `configs/ubuntu_cn_desktop.json` | 主配置 | 13 个应用、`substitute_kinds` / `mobile`、限流档位、轨迹、`dwell_s` 范围、`sample_every_s`、`placeholder_fill`、`work` / `work_s` / `work_overrides` |
-| `configs/ubuntu_arm64.json` | arm64 真机集合 | UTM 虚拟机实际装好的 13 个应用 (含星火商店的 迅雷 / 爱奇艺 / 抖音 / 网易云音乐 / 石墨文档 和 UOS 百度网盘), `work=true`, 五场景 (含 `media`) |
+| `configs/ubuntu_arm64.json` | arm64 真机集合 | UTM 虚拟机实际装好的 13 个应用 (含星火商店的 迅雷 / 爱奇艺 / 哔哩哔哩 / 网易云音乐 / 石墨文档 和 UOS 百度网盘), `work=true`, 五场景 (含 `media`), `sudo_adopt=true` (apm 容器 helper 属别的 uid) |
 | `configs/ubuntu_placeholders.json` | 冒烟 | 4 个占位程序的最小配置 (任何 X11 会话可跑, 含 Xvfb) |
 | `results/<matrix>/{summary,summary_agg,per_app,pareto}.csv`, `plots/*.png`, `report.md`, `matrix.env`, `*.console.log` | 产物 | 表 / 图 / 报告 / 本次矩阵的参数与机器信息 / 每格控制台输出 |
