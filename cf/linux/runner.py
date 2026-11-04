@@ -41,6 +41,11 @@ DEFAULTS = {
     "settle_s": 2.0,
     "warmup_dwell_s": 10.0,
     "sample_every_s": 0.0,             # > 0: lightweight samples during the dwell -> step["timeline"] (time series)
+    # per-process accounting (experimental): every step record and timeline sample carries the PSS /
+    # swap of each process of each app, so the fg -> bg squeeze can be read per process; the quiet
+    # window of a dwell (after quiet_after_s) is where the analyzer measures the steady swap-out rate
+    "per_process": False,
+    "quiet_after_s": 30.0,
     # apps that are not installed (desktop, nor an allowed substitute) run as the bundled placeholder
     # program under their own id, so the whole matrix can be run before the vendor apps are in place
     "placeholder_fill": False,
@@ -361,7 +366,7 @@ class ThrottleExperiment(Experiment):
                 self.m_fg[app] = int(fixed[app])
                 self.a_fg[app] = int((self.cfg.get("fixed_a_fg_kb") or {}).get(app, self.m_fg[app]))
             self.l_cold[app] = res.get("total_time_ms") if res.get("launch_state") == "COLD" else None
-            self.emit({"type": "warmup", "pkg": app, "launch": res, "app": smp.to_dict(), "system": s["system"],
+            self.emit({"type": "warmup", "pkg": app, "launch": res, "app": self._app_dict(smp), "system": s["system"],
                        "work": work})
             eta = (time.time() - t0) / (i + 1) * (len(self.apps) - i - 1)
             self.log.info(f"[warmup {i + 1:2d}/{len(self.apps)} ETA {fmt_dur(eta):>6}] {display_name(app):<14} "
@@ -516,6 +521,10 @@ class ThrottleExperiment(Experiment):
              "majflt": max(0, b["majflt"] - a["majflt"]),
              "high_events": max(0, (b["cg_events"].get("high", 0) - a["cg_events"].get("high", 0))),
              "mem_mb": b["cg_mem_mb"], "swap_mb": b["cg_swap_mb"], "wall_s": round(wall_s, 2),
+             # pages the kernel reclaimed from this cgroup during the dwell (anon -> swap, file dropped)
+             "reclaim_mb": round(max(0, (b.get("cg_pgsteal") or 0) - (a.get("cg_pgsteal") or 0)) * 4 / 1024, 1)
+             if b.get("cg_pgsteal") is not None else None,
+             "swap_delta_mb": round(b["cg_swap_mb"] - a["cg_swap_mb"], 1),
              # memory.current charges the page cache the app wrote (downloads!); PSS is what the process maps
              "pss_mb": round((b.get("pss_kb", 0) + b.get("swap_pss_kb", 0)) / 1024, 1)}
         d["cores"] = round(d["cg_cpu_ms"] / 1000 / wall_s, 3) if wall_s > 0 else None
@@ -554,12 +563,12 @@ class ThrottleExperiment(Experiment):
         t_dwell = time.time()
         dwell = self._dwell_for(t)
         work = self._work_do(req, launch, t, dwell)
-        timeline = self._dwell_sampling(max(0.0, dwell - (time.time() - t_dwell)), t_dwell)
+        timeline = self._dwell_sampling(max(0.0, dwell - (time.time() - t_dwell)), t_dwell, req)
         s2 = self.dev.sample(self.apps)
         wall = time.time() - t_dwell
         self._work_remember(req, launch)
-        d1 = {p: s1["apps"][p].to_dict() for p in self.apps}
-        d2 = {p: s2["apps"][p].to_dict() for p in self.apps}
+        d1 = {p: self._app_dict(s1["apps"][p]) for p in self.apps}
+        d2 = {p: self._app_dict(s2["apps"][p]) for p in self.apps}
         bg, state_lost, notif = {}, {}, {}
         for p in self.apps:
             if d1[p]["alive"]:
@@ -667,37 +676,64 @@ class ThrottleExperiment(Experiment):
 
     TIMELINE_SYS_KEYS = ("psi", "psi_cpu", "psi_io", "zram", "loadavg")
 
-    def _dwell_sampling(self, dwell: float, t0: float) -> list[dict]:
+    def _app_dict(self, smp) -> dict:
+        d = smp.to_dict()
+        if self.cfg.get("per_process") and hasattr(smp, "procs_dict"):
+            d["procs"] = smp.procs_dict()
+        return d
+
+    def _dwell_sampling(self, dwell: float, t0: float, req: Optional[str] = None) -> list[dict]:
         """Sleep `dwell` seconds; with sample_every_s > 0 take lightweight samples on the way (cgroup
-        counters + io + system pressure) so the step record carries a time series, not just two points."""
+        counters + io + system pressure) so the step record carries a time series, not just two points.
+        With profile.squeeze_every_s > 0 the shrunk apps are squeezed again at that interval (the
+        squeeze is logged in the sample that follows it)."""
         every = float(self.cfg.get("sample_every_s") or 0)
+        sq_every = float(getattr(self.profile, "squeeze_every_s", 0) or 0)
+        if sq_every > 0 and (every <= 0 or every > sq_every):
+            every = sq_every
         if every <= 0 or every >= dwell:
             time.sleep(dwell)
             return []
         out = []
         end = t0 + dwell
+        last_sq = t0
         while True:
             nxt = t0 + (len(out) + 1) * every
             if nxt >= end - min(0.2, every / 2):
                 break
             time.sleep(max(0.0, nxt - time.time()))
+            squeezed = {}
+            if sq_every > 0 and time.time() - last_sq >= sq_every - 0.01:
+                for app in sorted(self.shrunk):
+                    if app != req and hasattr(self.dev, "squeeze"):
+                        r = self.dev.squeeze(app)
+                        squeezed[app] = {"how": r.get("how"), "before_mb": round((r.get("before_bytes") or 0) / 2 ** 20, 1),
+                                         "after_mb": round((r.get("after_bytes") or 0) / 2 ** 20, 1)}
+                last_sq = time.time()
             s = self.dev.sample(self.apps, with_windows=False)
             sysd = s["system"]
             mi = sysd.get("meminfo") or {}
             vm = sysd.get("vmstat") or {}
-            out.append({"dt": round(time.time() - t0, 2),
-                        "system": {**{k: sysd.get(k) for k in self.TIMELINE_SYS_KEYS if k in sysd},
-                                   "mem_available_kb": mi.get("MemAvailable"), "swap_free_kb": mi.get("SwapFree"),
-                                   "pswpin": vm.get("pswpin"), "pswpout": vm.get("pswpout"),
-                                   "pgmajfault": vm.get("pgmajfault")},
-                        "apps": {p: self._timeline_app(a.to_dict()) for p, a in s["apps"].items()}})
+            rec = {"dt": round(time.time() - t0, 2),
+                   "system": {**{k: sysd.get(k) for k in self.TIMELINE_SYS_KEYS if k in sysd},
+                              "mem_available_kb": mi.get("MemAvailable"), "swap_free_kb": mi.get("SwapFree"),
+                              "pswpin": vm.get("pswpin"), "pswpout": vm.get("pswpout"),
+                              "pgmajfault": vm.get("pgmajfault")},
+                   "apps": {p: self._timeline_app(a) for p, a in s["apps"].items()}}
+            if squeezed:
+                rec["squeeze"] = squeezed
+            out.append(rec)
         time.sleep(max(0.0, end - time.time()))
         return out
 
-    @staticmethod
-    def _timeline_app(d: dict) -> dict:
-        return {k: d.get(k) for k in ("pss_kb", "swap_pss_kb", "cpu_ms", "write_bytes", "read_bytes", "majflt",
-                                      "cg_mem_mb", "cg_swap_mb", "cg_usage_ms", "cg_throttled_ms", "tier")}
+    def _timeline_app(self, smp) -> dict:
+        d = smp.to_dict() if hasattr(smp, "to_dict") else dict(smp)
+        out = {k: d.get(k) for k in ("pss_kb", "swap_pss_kb", "cpu_ms", "write_bytes", "read_bytes", "majflt",
+                                     "cg_mem_mb", "cg_swap_mb", "cg_usage_ms", "cg_throttled_ms", "cg_pgsteal",
+                                     "cg_pswpout", "tier")}
+        if self.cfg.get("per_process") and hasattr(smp, "procs"):
+            out["procs"] = {p.pid: [p.pss_kb, p.swap_pss_kb, p.name] for p in smp.procs}
+        return out
 
     def _log_step(self, rec: dict, t_step: float) -> None:
         T = len(self.trace)

@@ -27,7 +27,7 @@ from . import apps as A
 from . import blankdoc
 from . import procs as PR
 from . import x11
-from .cgroup import CgroupTree, ThrottleProfile, HOST_LEAF, apply_tier
+from .cgroup import CgroupTree, ThrottleProfile, HOST_LEAF, apply_tier, squeeze
 from .mobile import MobileRuntime
 from .notify import NotifyCounter
 
@@ -72,10 +72,18 @@ class AppSampleL:
                 "cg_nr_throttled": cpu.get("nr_throttled") or 0,
                 "cg_events": cg.get("events") or {},
                 "cg_pgmajfault": cg.get("pgmajfault"),
+                "cg_pgsteal": cg.get("pgsteal"), "cg_pgscan": cg.get("pgscan"),
+                "cg_pswpout": cg.get("pswpout") if cg.get("pswpout") is not None else cg.get("zswpout"),
                 "cg_limits": {k: cg.get(k) for k in ("cpu_max", "cpuset", "cpu_weight", "memory_high",
                                                      "memory_max", "swap_max")},
                 "cg_psi_mem_full_us": (cg.get("psi_mem") or {}).get("full_total"),
                 "cg_psi_cpu_some_us": (cg.get("psi_cpu") or {}).get("some_total")}
+
+    def procs_dict(self) -> list[dict]:
+        """Per-process memory (kB) for the per-process accounting (cfg per_process)."""
+        return [{"pid": p.pid, "name": p.name, "pss_kb": p.pss_kb, "pss_anon_kb": p.pss_anon_kb,
+                 "pss_file_kb": p.pss_file_kb, "swap_pss_kb": p.swap_pss_kb, "rss_kb": p.rss_kb,
+                 "cpu_ms": p.cpu_ms, "majflt": p.majflt} for p in self.procs]
 
 
 PING_MISSES_TO_GIVE_UP = 2
@@ -368,6 +376,12 @@ class LinuxDesktop:
         res = apply_tier(self.tree, id_, tier, self.profile, m_fg_bytes, memory_high_bytes)
         self.tiers[id_] = tier
         return res
+
+    def squeeze(self, id_: str, rounds: Optional[int] = None) -> dict:
+        """Re-run the aggressive reclaim on an app that is already shrunk (profile.squeeze_every_s)."""
+        if not self.tree.exists(id_):
+            return {"how": "no-cgroup", "rounds": 0, "asked_bytes": 0, "before_bytes": 0, "after_bytes": 0}
+        return squeeze(self.tree, id_, rounds if rounds is not None else self.profile.squeeze_rounds)
 
     def release_all(self) -> int:
         n = 0

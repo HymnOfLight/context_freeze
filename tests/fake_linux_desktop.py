@@ -96,7 +96,9 @@ class FakeLinuxDesktop:
             m = self.rng.randint(150, 450) * 1024          # kB
             self.state[a] = {"pid": None, "m": m, "resident": m, "high": None, "cpu_ms": 0, "throttled_ms": 0,
                              "nr_throttled": 0, "write": 0, "window": None, "majflt": 0, "oom": 0,
-                             "notified": 0, "pid_age": 0.0, "high_events": 0}
+                             "notified": 0, "pid_age": 0.0, "high_events": 0, "pgsteal": 0,
+                             # what memory.reclaim can never take away (pinned / hot pages): 15 % of m
+                             "floor": m * 15 // 100}
         # apps whose background working set (kB) is bigger than any memory.high the profile gives them:
         # while shrunk below it they thrash (memory.events high / major faults keep growing)
         self.bg_wss: dict[str, int] = {}
@@ -178,16 +180,37 @@ class FakeLinuxDesktop:
         if tier == "shrunk":
             high_kb = int(lim["memory_high"]) // 1024
             s["high"] = high_kb
-            if s["resident"] > high_kb:
+            if self.profile.squeeze_rounds > 0:
+                sq = self.squeeze(id_)
+                res["reclaim"], res["reclaim_bytes"], res["squeeze"] = sq["how"], sq["asked_bytes"], sq
+            elif s["resident"] > high_kb:
                 moved = s["resident"] - high_kb
-                self.vm["pswpout"] += moved // 4
-                s["resident"] = high_kb
+                self._reclaimed(s, moved)
                 res["reclaim"], res["reclaim_bytes"] = "memory.reclaim", moved * 1024
             else:
                 res["reclaim"] = "nothing"
         else:
             s["high"] = None
         return res
+
+    def _reclaimed(self, s, moved_kb):
+        self.vm["pswpout"] += moved_kb // 4
+        s["pgsteal"] += moved_kb // 4
+        s["resident"] -= moved_kb
+
+    def squeeze(self, id_, rounds=None):
+        """memory.reclaim of the whole cgroup: everything above the pinned floor goes to swap."""
+        s = self.state[id_]
+        rounds = self.profile.squeeze_rounds if rounds is None else rounds
+        before = s["resident"] * 1024
+        asked = 0
+        for _ in range(rounds):
+            asked += s["resident"] * 1024
+            moved = max(0, s["resident"] - s["floor"])
+            self._reclaimed(s, moved)
+        self.squeezes = getattr(self, "squeezes", 0) + 1
+        return {"how": f"memory.reclaim x{rounds}", "rounds": rounds, "asked_bytes": asked,
+                "before_bytes": before, "after_bytes": s["resident"] * 1024}
 
     def release_all(self):
         n = 0
@@ -236,16 +259,20 @@ class FakeLinuxDesktop:
             procs = []
             if s["pid"] is not None:
                 swap = s["m"] - s["resident"]
-                procs.append(ProcInfo(pid=s["pid"], name=a, cmdline=self.cat[a].cmd, pss_kb=s["resident"],
-                                      pss_anon_kb=int(s["resident"] * 0.8), pss_file_kb=int(s["resident"] * 0.2),
-                                      swap_pss_kb=swap, rss_kb=s["resident"] + 4000, majflt=s["majflt"],
-                                      cpu_ms=s["cpu_ms"], write_bytes=s["write"], state="S", threads=8,
-                                      age_s=s["pid_age"]))
+                # a main process holding 90 % and a helper (renderer / utility) holding 10 %, both swapping alike
+                for pid, name, share in ((s["pid"], a, 0.9), (s["pid"] + 1, a + "-helper", 0.1)):
+                    res_kb, swap_kb = int(s["resident"] * share), int(swap * share)
+                    procs.append(ProcInfo(pid=pid, name=name, cmdline=self.cat[a].cmd, pss_kb=res_kb,
+                                          pss_anon_kb=int(res_kb * 0.8), pss_file_kb=int(res_kb * 0.2),
+                                          swap_pss_kb=swap_kb, rss_kb=res_kb + 4000, majflt=int(s["majflt"] * share),
+                                          cpu_ms=int(s["cpu_ms"] * share), write_bytes=int(s["write"] * share),
+                                          state="S", threads=8, age_s=s["pid_age"]))
             cg = {"memory_current": s["resident"] * 1024, "swap_current": (s["m"] - s["resident"]) * 1024,
                   "memory_high": str(s["high"] * 1024) if s["high"] else "max",
                   "cpu": {"usage_usec": s["cpu_ms"] * 1000, "throttled_usec": s["throttled_ms"] * 1000,
                           "nr_throttled": s["nr_throttled"]},
-                  "events": {"low": 0, "high": int(s["high_events"]), "max": 0, "oom": s["oom"], "oom_kill": s["oom"]}}
+                  "events": {"low": 0, "high": int(s["high_events"]), "max": 0, "oom": s["oom"], "oom_kill": s["oom"]},
+                  "pgsteal": s["pgsteal"], "pgscan": s["pgsteal"]}
             apps[a] = AppSampleL(app=a, procs=procs, cgroup=cg, window=s["window"] if procs else None,
                                  tier=self.tiers.get(a, "fg"))
         if self.crash_app and self.state[self.crash_app]["pid"]:

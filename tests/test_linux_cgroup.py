@@ -154,3 +154,25 @@ def test_real_cgroup_tier_round_trip():
         assert REAL.read(name, "cpu.max") == f"max {PERIOD_US}" and REAL.read(name, "memory.high") == "max"
     finally:
         assert REAL.remove(name)
+
+
+def test_squeeze_profile_asks_for_the_whole_cgroup_several_times(tmp_path):
+    from cf.linux.cgroup import squeeze
+    tree = _fake_cgroupfs(tmp_path)
+    tree.ensure("qq")
+    leaf = tmp_path / "cf" / "qq"
+    (leaf / "memory.current").write_text(str(900 * MB))
+    (leaf / "memory.reclaim").write_text("")
+    prof = ThrottleProfile(cpu_mode="both", cpu_cores=0.1, cpu_weight=1, mem_frac=0.1, mem_min_mb=64, squeeze_rounds=3)
+    assert "squeeze x3" in prof.describe()
+    res = apply_tier(tree, "qq", "shrunk", prof, 800 * MB)
+    assert (leaf / "cpu.max").read_text() == f"{PERIOD_US // 10} {PERIOD_US}"
+    assert (leaf / "cpu.weight").read_text() == "1"
+    assert (leaf / "memory.high").read_text() == str(80 * MB)
+    # the fake fs never lowers memory.current, so every round asks for all 900 MB again
+    assert res["squeeze"]["rounds"] == 3 and res["reclaim_bytes"] == 3 * 900 * MB
+    assert res["reclaim"] == "memory.reclaim x3" and (leaf / "memory.reclaim").read_text() == str(900 * MB)
+    (leaf / "memory.current").write_text("0")
+    assert squeeze(tree, "qq", 3) == {"how": "nothing", "rounds": 0, "asked_bytes": 0, "before_bytes": 0, "after_bytes": 0}
+    st = tree.stats("qq")
+    assert "pgsteal" in st and "pgscan" in st
