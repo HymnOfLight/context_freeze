@@ -8,7 +8,13 @@
 #   T=20 DWELL=240 scripts/ubuntu/run_squeeze.sh        # longer quiet windows
 #   SEEDS="1 2" scripts/ubuntu/run_squeeze.sh           # replicates
 #   ONBOARD=1 scripts/ubuntu/run_squeeze.sh             # walk the 5 apps through login / prep first
+#   SWAPPINESS=60 scripts/ubuntu/run_squeeze.sh         # leave vm.swappiness alone (default: 200 for the run, restored at exit)
+#   STRICT=0 scripts/ubuntu/run_squeeze.sh              # go on even when apps outside the experiment are still running
 #   DRY=1 scripts/ubuntu/run_squeeze.sh                 # print the commands only
+#
+# Before it starts it checks that nothing but the 5 experiment apps is running under /cf (the other
+# apps of the night runs - iqiyi, netease_music, xunlei ... - would use RAM / CPU and pollute the
+# system-wide swap-out rate; quit them, or STRICT=0) and that the zram store is not already full.
 #
 # cells (configs/ubuntu_arm64_squeeze.json):
 #   none     policy none: nothing limited - what the apps hold on their own
@@ -48,6 +54,34 @@ if [ "$DRY" != 1 ]; then
   python3 run_linux.py "$CONFIG" --scenario list > "$OUT/apps_resolved.txt" || true
   if grep -q '^missing:' "$OUT/apps_resolved.txt"; then
     echo "!! not installed: $(grep '^missing:' "$OUT/apps_resolved.txt" | tr '\n' ' ')"; fi
+  # apps outside the experiment still running under /cf (from a previous matrix) distort every system-wide number
+  want=$(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['apps']))" "$CONFIG")
+  others=""
+  for leaf in /sys/fs/cgroup/cf/*/; do
+    id=$(basename "$leaf"); [ "$id" = host ] && continue
+    n=$(wc -l < "$leaf/cgroup.procs" 2>/dev/null || echo 0); [ "$n" -gt 0 ] || continue
+    case " $want " in *" $id "*) continue;; esac
+    others+=" $id($n procs, $(( $(cat "$leaf/memory.current") / 1048576 )) MB)"
+  done
+  if [ -n "$others" ]; then
+    echo "!! running but not part of this experiment:$others"
+    echo "   quit them (they take RAM / CPU and add to the system swap-out rate), or STRICT=0 to run anyway"
+    [ "${STRICT:-1}" = 1 ] && exit 2
+  fi
+  zu=$(awk '/zram/ {u+=$4; t+=$3} END {printf "%d %d", u/1024, t/1024}' /proc/swaps); zused=${zu% *}; ztot=${zu#* }
+  echo "  zram: ${zused} / ${ztot} MB in use  swappiness=$(cat /proc/sys/vm/swappiness)"
+  if [ "${ztot:-0}" -gt 0 ] && [ "$zused" -gt $((ztot / 2)) ]; then
+    echo "  note: zram is more than half full before the run - leftovers of the previous matrix; for a clean"
+    echo "        baseline quit the other apps and reset it:  sudo scripts/ubuntu/setup_zram.sh --off && sudo scripts/ubuntu/setup_zram.sh ${ZRAM_MB:-4096}"
+  fi
+  # vm.swappiness 200 = prefer swapping anonymous pages over dropping file cache (the zram recommendation);
+  # restored when the script exits
+  SWAPPINESS="${SWAPPINESS:-200}"
+  old_swappiness=$(cat /proc/sys/vm/swappiness)
+  if [ "$SWAPPINESS" != "$old_swappiness" ]; then
+    sudo sysctl -q -w vm.swappiness="$SWAPPINESS" && trap 'sudo sysctl -q -w vm.swappiness='"$old_swappiness"' || true' EXIT
+    echo "  vm.swappiness $old_swappiness -> $(cat /proc/sys/vm/swappiness) for the run"
+  fi
   if [ "${ONBOARD:-0}" = 1 ]; then
     python3 -m cf.linux.blankdoc --reset >/dev/null
     CONFIG="$CONFIG" scripts/ubuntu/cf_onboard.sh || true

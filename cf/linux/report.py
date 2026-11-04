@@ -67,6 +67,14 @@ def write_markdown(path: str, rows: list[dict], agg: list[dict], per_app: list[d
         out += ["\n## Per app\n", md_table(per_app, PER_APP_COLS)]
     if per_proc:
         out += ["\n## Per process (foreground vs background PSS)\n", md_table(per_proc, PER_PROC_COLS)]
+        miss = [r for r in per_proc if (r.get("pss_fg_mb") or 0) >= 20 and r.get("squeeze_pct") is not None
+                and r["squeeze_pct"] < 90 and not str(r.get("run", "")).startswith("none")]
+        if miss:
+            out.append("\n> processes still above **10 % of their foreground PSS** in the background "
+                       "(`squeeze_pct` < 90, fg >= 20 MB): "
+                       + ", ".join(f"{r['run']}/{r['app']}/{r['proc']} {100 - r['squeeze_pct']:.0f} %" for r in miss)
+                       + " - what is left is what `memory.reclaim` cannot take (pinned, GPU / shared buffers, pages "
+                       "the app keeps touching); compare `swap_growth_mb_per_min` to see whether it is still fighting.\n")
     if plots_dir and os.path.isdir(plots_dir):
         rel = os.path.relpath(plots_dir, os.path.dirname(os.path.abspath(path)) or ".")
         pngs = sorted(f for f in os.listdir(plots_dir) if f.endswith(".png"))

@@ -649,8 +649,9 @@ Waydroid 上要 1–3 s; 列表页的推荐流本身会刷新 → 用 `tolerance
 
 另一种统计口径: 不看 "后台总 PSS 占 Σm_fg 的比例", 而是**每个进程**切到后台前 (自己那一步停留结束时的 PSS, 没被请求过的用 warmup 样本)
 与切到后台后 (后台停留结束时) 各占多少、被挤掉了多少, 以及后台**稳定静默期间每分钟换出多少** (磁盘 / zram 写入速率)。后台用最激进的档位:
-`cpuset` 最后一个核 + 该核 10 % 的 `cpu.max` + `cpu.weight 1`; `memory.high = 0.1 × m_fg` (≥ 64 MB) 且切走时连写 3 次 `memory.reclaim = memory.current`、
-停留期间每 30 s 再挤一次; 关掉抖动保护。只跑 office 一个场景、5 个应用 (微信 / QQ / 钉钉 / WPS / Firefox), 固定 150 s 的长停留
+`cpuset` 最后一个核 + 该核 10 % 的 `cpu.max` + `cpu.weight 1`; **目标是后台只留活跃时的 10 %**: `memory.high = 0.1 × m_fg` (≥ 32 MB), 切走时连写 3 次
+`memory.reclaim = memory.current` (带 `swappiness=200`, 优先换匿名页; 内核 < 6.9 不认这个参数时自动退回普通写法), 停留期间每 10 s 再挤一次,
+脚本把全局 `vm.swappiness` 设为 200 (结束时恢复); 关掉抖动保护。没有 `memory.max`, 所以仍不会 OOM kill —— 10 % 装不下时进程只是被节流 (分配内存时睡眠), 不会死。只跑 office 一个场景、5 个应用 (微信 / QQ / 钉钉 / WPS / Firefox), 固定 150 s 的长停留
 (前 3 s 脚本操作, 30 s 后算静默期, 每 10 s 采一次), T=12 → 一格约 32 min, 三格约 1.6 h, **不是全量矩阵**:
 
 ```bash
@@ -668,10 +669,22 @@ CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # 只跑两格;  T=20 DWELL=
 | `quiet_swap_out_mb_per_min` | 静默期内全系统 `pswpout` 折算的每分钟换出量 (zram 写入速率) |
 | `quiet_bg_reclaim_mb_per_min` | 静默期内后台 cgroup `memory.stat pgsteal` 增量: 内核每分钟从它们回收了多少页 (匿名页换出 + 文件页丢弃) |
 | `quiet_bg_swap_growth_mb_per_min` | 静默期内后台 cgroup `memory.swap.current` 的增量: 稳定状态下还在持续换出 = 后台应用还在醒着碰内存 |
+| `quiet_zram_growth_mb_per_min` / `zram_phys_avg_mb` | 静默期 zram 压缩存储的增长 / 水位: 被挤出去的页仍以压缩形式占着内存, **真正省下的 = PSS 减少 − zram 增长** (zstd 对 Electron 堆通常 3–4 : 1) |
 | `quiet_s` | 本格累计的静默秒数 (分母) |
 | per_process.csv: `pss_fg_mb` / `pss_bg_mb` / `pss_bg_quiet_mb` / `swap_bg_quiet_mb` / `squeeze_pct` / `swap_growth_mb_per_min` | 每个 (应用, 进程名) 的: 前台 PSS / 刚切走时 / 后台停留结束时 / 那时在 swap 里的量 / 被挤掉的比例 / 静默期 SwapPss 每分钟增长; 同名多进程 (Electron 的 renderer / utility) 合并, `n_pids` 给个数 |
 
 每步记录里 `bg.<app>.reclaim_mb` / `swap_delta_mb` 是这一步停留里从该 cgroup 回收 / 换出的量; `actions.limits.<app>.squeeze` 是切走时那次挤压的前后 `memory.current`。
+`report.md` 的 Per process 一节下面会列出后台仍高于前台 10 % 的进程 (`squeeze_pct` < 90, 前台 ≥ 20 MB): 剩下的就是 `memory.reclaim` 拿不走的 —— 钉住的页 (GPU / 共享缓冲、mlock、内核侧)、应用在后台一直碰的工作集; 看它的 `swap_growth_mb_per_min` 是否一直 > 0 就知道是 "拿不走" 还是 "拿走又被碰回来"。
+
+**跑之前 (不用重启虚拟机, 不用关这 5 个应用):**
+
+1. 这 5 个应用 (微信 / QQ / 钉钉 / WPS / Firefox) **保持登录并开着**, 它们已在 `/cf/<id>` 里的话 runner 直接复用 (不在的话会重新启动, 需要重新登录); `python3 run_linux.py configs/ubuntu_arm64_squeeze.json --onboard-check` 五个都 ready 即可。WPS 里是 onboarding 的空白文档 / Firefox 固定几个轻页面, 两格之间不要改 (Firefox 的 PSS 随标签页变)。
+2. **其它应用全部退出** (腾讯会议 / 网盘 / 迅雷 / 爱奇艺 / 哔哩哔哩 / 网易云 / 中望 / 石墨): 它们不在本配置里, runner 不会碰它们, 但会占内存和 CPU (爱奇艺后台播放), 还会写 swap —— `quiet_swap_out_mb_per_min` 是全系统的 `pswpout`, 会被污染。脚本启动时检查 `/cf/*` 里还有进程的叶子, 发现不在实验里的就停下 (`STRICT=0` 可以硬跑)。退出前若它们还带着上一轮的限制, 先 `python3 run_linux.py configs/ubuntu_arm64.json --release`。
+3. **zram**: 上一轮矩阵跑完 zram 里常常还压着 1–2 GB; 退出其它应用后看 `cat /proc/swaps`, 用量 > 一半就重置: `sudo scripts/ubuntu/setup_zram.sh --off && sudo scripts/ubuntu/setup_zram.sh 4096` (swapoff 要把压着的页读回内存, 所以先退应用)。5 个应用被挤到底时 zram 要装下它们几乎全部的匿名页 (压缩后约 1–1.5 GB), 4 GB 够; 要跑 `SEEDS="1 2"` 或 `DWELL=240` 也不需要加大。
+4. 之前的矩阵 (tmux 里的 `run_all.sh`) **不能同时在跑**; 本脚本自己的 `OUT=results/arm64_squeeze` 与矩阵互不影响, 中断后同一命令续跑。
+5. 跑的 1.5 h 里**不要碰虚拟机**: 剪贴板会被 oracle 覆盖, 点别的窗口会抢焦点让 `work` 失败; Mac 侧 `caffeinate -dims` 防休眠, 之前花屏重启过的话按 §10 关掉 UTM 的 GPU 加速。
+6. 会看到什么: 激进格里后台应用被切回时要几秒 (`lat_p95` / `ping_p95` 几千 ms 是正常的), 微信 / 钉钉可能短暂显示 "连接中"; `swap_write_mb` 每格几 GB。**要盯的是** `state_lost` / `work_fail` / `n_cold` 必须仍为 0 —— 如果 QQ / 钉钉在 10 % + 10 % 单核下心跳超时掉线、回到登录页, 那就是这个档位的真实代价, 会以 `work_fail` (剪贴板只剩哨兵 → 空摘要) 和 `processes_gone` 记下来, 不要重跑掩盖它; 想找到不掉线的最低档位, 下一轮再把 `mem_frac` 抬到 0.15 / 0.2 或 `cpu_cores` 抬到 0.2 对比。
+7. 不能靠 `memory.max` 再逼: 它能把驻留压死在 10 %, 但 10 % 装不下时内核只能 OOM kill —— 丢状态, 与实验的不变量冲突; `memory.high` + 反复 `memory.reclaim` 已经是不杀进程前提下最激进的组合。
 预期: 激进档下后台应用很慢 (切回时 `lat_p95` / `ping_p95` 明显变大, 可能几秒), `swap_write_mb` 大, 但 `state_lost` / `work_fail` 仍应为 0 (没有 `memory.max`, 不会被杀); 如果 `quiet_bg_swap_growth_mb_per_min` 长期 > 0, 说明这个应用在后台一直在碰工作集, 静态上限只是在反复换入换出 (对比 `mild` 格的数字)。
 
 ### 6.7 日常使用: `focusd`

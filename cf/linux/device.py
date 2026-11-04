@@ -381,7 +381,8 @@ class LinuxDesktop:
         """Re-run the aggressive reclaim on an app that is already shrunk (profile.squeeze_every_s)."""
         if not self.tree.exists(id_):
             return {"how": "no-cgroup", "rounds": 0, "asked_bytes": 0, "before_bytes": 0, "after_bytes": 0}
-        return squeeze(self.tree, id_, rounds if rounds is not None else self.profile.squeeze_rounds)
+        return squeeze(self.tree, id_, rounds if rounds is not None else self.profile.squeeze_rounds,
+                       self.profile.reclaim_swappiness)
 
     def release_all(self) -> int:
         n = 0

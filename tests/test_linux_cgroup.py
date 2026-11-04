@@ -176,3 +176,27 @@ def test_squeeze_profile_asks_for_the_whole_cgroup_several_times(tmp_path):
     assert squeeze(tree, "qq", 3) == {"how": "nothing", "rounds": 0, "asked_bytes": 0, "before_bytes": 0, "after_bytes": 0}
     st = tree.stats("qq")
     assert "pgsteal" in st and "pgscan" in st
+
+
+def test_reclaim_swappiness_argument_falls_back_once_on_old_kernels(tmp_path):
+    tree = _fake_cgroupfs(tmp_path)
+    tree.ensure("wps")
+    leaf = tmp_path / "cf" / "wps"
+    (leaf / "memory.reclaim").write_text("")
+    assert tree.reclaim("wps", 10 * MB, swappiness=200) == "memory.reclaim"
+    assert (leaf / "memory.reclaim").read_text() == f"{10 * MB} swappiness=200"
+    # a kernel < 6.9 rejects the argument with EINVAL: plain reclaim, and no second attempt
+    real = tree.write
+    tries = []
+    def write(name, file, value):
+        tries.append(value)
+        if "swappiness" in value:
+            tree.errors.append("EINVAL"); return "EINVAL"
+        return real(name, file, value)
+    tree.write = write
+    assert tree.reclaim("wps", 20 * MB, swappiness=200) == "memory.reclaim"
+    assert tree.reclaim("wps", 30 * MB, swappiness=200) == "memory.reclaim"
+    assert tries == [f"{20 * MB} swappiness=200", str(20 * MB), str(30 * MB)] and tree.errors == []
+    assert (leaf / "memory.reclaim").read_text() == str(30 * MB)
+    prof = ThrottleProfile(squeeze_rounds=2, reclaim_swappiness=200)
+    assert prof.describe().endswith("squeeze x2 swappiness=200")

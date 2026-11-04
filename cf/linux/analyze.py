@@ -15,6 +15,8 @@ keys - plus the throttling-specific metrics:
   quiet_swap_out_mb_per_min                 steady-state swap-out rate (system pswpout) while the background
                                             apps sit quiet (dwell samples after cfg quiet_after_s)
   quiet_bg_reclaim_mb_per_min               pages the kernel reclaimed from the background cgroups per minute
+  quiet_zram_growth_mb_per_min              growth of the compressed zram store in that window (the RAM the
+                                            squeezed pages still cost; zram_phys_avg_mb = its level)
   bg_squeeze_pct                            1 - PSS of the background apps at the end of the quiet window /
                                             their PSS when they were last in the foreground (per-process cfg)
   --per-proc                                per-process table: PSS in the foreground vs in the background
@@ -35,7 +37,7 @@ EXTRA_AGG_COLS = ["activate_p50_ms", "ping_p50_ms", "ping_p95_ms", "ping_p99_ms"
                   "notif_total", "notif_per_h", "compute_cpu_s", "state_lost_events", "oom_kills",
                   "psi_cpu_some_ms", "n_ping_timeout", "n_resident_avg", "work_checks", "work_fail",
                   "quiet_swap_out_mb_per_min", "quiet_bg_reclaim_mb_per_min", "quiet_bg_swap_growth_mb_per_min",
-                  "bg_squeeze_pct", "bg_pss_quiet_avg_mb"]
+                  "quiet_zram_growth_mb_per_min", "bg_squeeze_pct", "bg_pss_quiet_avg_mb"]
 
 MAIN_COLS = ["policy", "scenario", "eta", "seed", "cpu", "mem_frac", "T", "budget_mb", "bg_pss_avg_mb",
              "bg_pss_peak_mb", "swap_write_mb", "lat_p50_ms", "lat_p95_ms", "ping_p95_ms", "n_cold",
@@ -46,7 +48,8 @@ MAIN_COLS = ["policy", "scenario", "eta", "seed", "cpu", "mem_frac", "T", "budge
 # shown instead of MAIN_COLS when the run was recorded with cfg per_process (the squeeze experiment)
 SQUEEZE_COLS = ["policy", "scenario", "eta", "seed", "cpu", "mem_frac", "T", "fg_pss_avg_mb", "bg_pss_quiet_avg_mb",
                 "bg_squeeze_pct", "quiet_swap_out_mb_per_min", "quiet_bg_reclaim_mb_per_min",
-                "quiet_bg_swap_growth_mb_per_min", "quiet_s", "swap_write_mb", "lat_p50_ms", "lat_p95_ms",
+                "quiet_bg_swap_growth_mb_per_min", "quiet_zram_growth_mb_per_min", "zram_phys_avg_mb", "quiet_s",
+                "swap_write_mb", "lat_p50_ms", "lat_p95_ms",
                 "ping_p95_ms", "n_cold", "bg_cores_avg", "bg_throttled_pct", "state_lost_events", "oom_kills",
                 "work_checks", "work_fail", "mem_high_backoffs"]
 
@@ -220,7 +223,7 @@ def quiet_metrics(run: dict) -> dict:
     cfg = meta.get("config", {})
     quiet_after = float(cfg.get("quiet_after_s") or 30.0)
     never = set(cfg.get("never_throttle") or [])
-    sw_pages = rc_pages = sw_growth = quiet_s = 0.0
+    sw_pages = rc_pages = sw_growth = zr_growth = quiet_s = 0.0
     # foreground reference = PSS at the end of the app's own dwell; until it has been requested once,
     # the warmup sample (every app launched and left in front of the others) stands in
     fg_last_pss: dict[str, float] = {w["pkg"]: w["app"]["pss_kb"] for w in run.get("warmup") or []
@@ -235,6 +238,9 @@ def quiet_metrics(run: dict) -> dict:
             if dt > 0 and (a.get("system") or {}).get("pswpout") is not None and (b.get("system") or {}).get("pswpout") is not None:
                 quiet_s += dt
                 sw_pages += max(0, b["system"]["pswpout"] - a["system"]["pswpout"])
+                za, zb = (a["system"].get("zram") or {}).get("mem_used_total"), (b["system"].get("zram") or {}).get("mem_used_total")
+                if za is not None and zb is not None:
+                    zr_growth += (zb - za) / 2 ** 20       # compressed RAM the swapped pages still occupy
                 for app, bb in (b.get("apps") or {}).items():
                     aa = (a.get("apps") or {}).get(app) or {}
                     if app == req or app in never:
@@ -258,6 +264,7 @@ def quiet_metrics(run: dict) -> dict:
             "quiet_swap_out_mb_per_min": round(sw_pages * 4 / 1024 / mins, 2) if mins else None,
             "quiet_bg_reclaim_mb_per_min": round(rc_pages * 4 / 1024 / mins, 2) if mins else None,
             "quiet_bg_swap_growth_mb_per_min": round(sw_growth / mins, 2) if mins else None,
+            "quiet_zram_growth_mb_per_min": round(zr_growth / mins, 2) if mins else None,
             "fg_pss_avg_mb": round(sum(fg_pss) / len(fg_pss)) if fg_pss else None,
             "bg_pss_quiet_avg_mb": round(sum(bg_quiet) / len(bg_quiet)) if bg_quiet else None,
             "bg_squeeze_pct": round(100 * sum(squeeze) / len(squeeze), 1) if squeeze else None}
