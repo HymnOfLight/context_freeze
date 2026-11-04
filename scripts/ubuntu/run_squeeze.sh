@@ -7,6 +7,9 @@
 #   CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # subset: none | squeeze | mild
 #   T=20 DWELL=240 scripts/ubuntu/run_squeeze.sh        # longer quiet windows
 #   SEEDS="1 2" scripts/ubuntu/run_squeeze.sh           # replicates
+#   CELLS="none squeeze1" SAMPLE=2 scripts/ubuntu/run_squeeze.sh
+#                                                       # fine-grained swap-flow curves: squeeze only on the switch-away
+#                                                       # (no periodic re-squeeze) and a sample every 2 s
 #   ONBOARD=1 scripts/ubuntu/run_squeeze.sh             # walk the 5 apps through login / prep first
 #   SWAPPINESS=60 scripts/ubuntu/run_squeeze.sh         # leave vm.swappiness alone (default: 200 for the run, restored at exit)
 #   STRICT=0 scripts/ubuntu/run_squeeze.sh              # go on even when apps outside the experiment are still running
@@ -21,11 +24,15 @@
 #   squeeze  static + the aggressive profile of the config: cpuset last core + cpu.max 10 % of it + cpu.weight 1,
 #            memory.high = 0.1 x m_fg (>= 64 MB), memory.reclaim x3 on switch-away and every 30 s, no thrash guard
 #   mild     static with the night-run profile for reference: 1 core quota, memory.high = 0.5 x m_fg, one reclaim
+#   squeeze1 the squeeze profile without the periodic re-squeeze (squeeze_every_s 0): memory.high alone keeps the
+#            app down after the switch-away, so plots/<run>_swapflow.png shows the real transient -> steady state
+#            convergence of reclaimed vs paged-back MB instead of a sawtooth (use with SAMPLE=1..2)
 #
 # Output: $OUT/*.jsonl (+ .ckpt while running; re-run the same command to resume), summary.csv,
 # per_app.csv, per_process.csv, squeeze_apps.csv (per app: m_fg, background resident, CPU % of a core,
 # swap traffic per minute, switch-back latency), squeeze_tables.xlsx (the same tables with Chinese headers,
-# needs openpyxl), plots/ (incl. squeeze_apps.png), report.md.  Run it inside the Xorg session (or with DISPLAY
+# needs openpyxl), plots/ (incl. squeeze_apps.png and <run>_swapflow.png: per app, reclaimed vs paged-back MB per
+# sample interval and cumulative since the switch-away), report.md.  Run it inside the Xorg session (or with DISPLAY
 # exported, manual §2.4) after setup_cgroups.sh.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -35,12 +42,13 @@ T="${T:-12}"
 DWELL="${DWELL:-150}"
 SEEDS="${SEEDS:-1}"
 CELLS="${CELLS:-none squeeze mild}"
+SAMPLE="${SAMPLE:-}"       # sample_every_s override (the config says 10; 1-2 for the swap-flow curves)
 EXTRA="${EXTRA:-}"
 DRY="${DRY:-0}"
 mkdir -p "$OUT"
 LOG="$OUT/run_squeeze.log"
 exec > >(tee -a "$LOG") 2>&1
-echo "== run_squeeze $(date -Is): config=$CONFIG T=$T dwell=${DWELL}s seeds=$SEEDS cells=$CELLS out=$OUT"
+echo "== run_squeeze $(date -Is): config=$CONFIG T=$T dwell=${DWELL}s seeds=$SEEDS cells=$CELLS sample=${SAMPLE:-config} out=$OUT"
 
 if [ "$DRY" != 1 ]; then
   if [ -z "${DISPLAY:-}" ]; then
@@ -102,6 +110,7 @@ run_one() { # name policy seed [extra flags...]
   local cmd=(python3 -u run_linux.py "$CONFIG" --policy "$pol" --eta 0.0 --T "$T" --seed "$seed" --scenario office
              --name "$name" --out-dir "$OUT" --dwell "$DWELL" --per-process --work)
   [ -n "$M_FG_FROM" ] && cmd+=(--m-fg-from "$M_FG_FROM")
+  [ -n "$SAMPLE" ] && cmd+=(--sample-every "$SAMPLE")
   # shellcheck disable=SC2206
   [ -n "$EXTRA" ] && cmd+=($EXTRA)
   [ $# -gt 0 ] && cmd+=("$@")
@@ -125,6 +134,7 @@ for seed in $SEEDS; do
   has "$CELLS" squeeze && run_one "squeeze_office_s${seed}" static "$seed"
   has "$CELLS" mild    && run_one "mild_office_s${seed}" static "$seed" \
                             --cpu-mode quota --cpu-cores 1 --cpu-weight 20 --mem-frac 0.5 --squeeze 0 --squeeze-every 0
+  has "$CELLS" squeeze1 && run_one "squeeze1_office_s${seed}" static "$seed" --squeeze-every 0
 done
 
 [ "$DRY" = 1 ] && exit 0
@@ -134,4 +144,4 @@ python3 -m cf.linux.analyze "$OUT"/*.jsonl --csv "$OUT/summary.csv" --per-app "$
   --xlsx "$OUT/squeeze_tables.xlsx" || true
 python3 -m cf.linux.analyze "$OUT"/*.jsonl --squeeze-apps --per-proc 2>/dev/null | sed -n '/^per app (squeeze/,$p' || true
 [ "$FAILED" = 1 ] && echo "== some cells are incomplete; finish them with:  OUT=$OUT $0"
-echo "== results in $OUT  (report.md, squeeze_tables.xlsx, summary.csv, per_app.csv, per_process.csv, squeeze_apps.csv, plots/squeeze_apps.png)"
+echo "== results in $OUT  (report.md, squeeze_tables.xlsx, summary.csv, per_app.csv, per_process.csv, squeeze_apps.csv, plots/squeeze_apps.png, plots/<run>_swapflow.png)"

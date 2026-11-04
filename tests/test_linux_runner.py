@@ -562,6 +562,13 @@ def test_squeeze_profile_reclaims_below_memory_high_and_repeats_during_the_dwell
         from cf.linux.plots import plot_squeeze_apps
         assert plot_squeeze_apps([load(path), load(pn)], str(tmp_path / "sa.png")) and (tmp_path / "sa.png").stat().st_size > 1000
         assert not plot_squeeze_apps([load(pn)] if False else [], str(tmp_path / "none.png"))
+        from cf.linux.plots import plot_swap_flow, swap_flow_episodes
+        eps = swap_flow_episodes(load(path), APPS[0])
+        assert eps and all(len(e["pts"]) >= 2 for e in eps) and eps[0]["pts"][0][0] == 0
+        for e in eps:                                   # cumulative, non-decreasing, time strictly forward
+            ts = [p[0] for p in e["pts"]]
+            assert ts == sorted(ts) and all(p[1] >= 0 and p[2] >= 0 for p in e["pts"])
+        assert plot_swap_flow(load(path), str(tmp_path / "sf.png")) and (tmp_path / "sf.png").stat().st_size > 1000
 
 
 def test_squeeze_off_keeps_the_single_reclaim_and_no_per_process_payload(tmp_path):

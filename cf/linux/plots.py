@@ -7,6 +7,10 @@
                        PSI, swap)
   latency_cdf.png      CDF of switch latency per policy (all runs), split resident / shrunk
   bg_tradeoff.png      per run: background PSS saving vs P95 latency, marker = policy, colour = scenario
+  <run>_swapflow.png   per app, from the moment it was switched away: memory the kernel reclaimed from its
+                       cgroup (out) vs memory it paged back (in), per sample interval and cumulative, every
+                       background episode overlaid + mean - shows the transient after the switch and whether
+                       the two flows converge (steady state)
   squeeze_apps.png     runs recorded with per_process: per app, grouped by run - active footprint vs
                        background resident PSS, CPU in the background (% of a core), swap traffic per
                        minute (reclaimed / paged back), switch-back latency
@@ -211,6 +215,136 @@ def plot_tradeoff(rows: list[dict], path: str) -> bool:
     return True
 
 
+def swap_flow_episodes(run: dict, app: str) -> list[dict]:
+    """Background episodes of `app`: consecutive steps in which it was not the requested app, starting
+    right after a step in which it was (from_start=False) or at the beginning of the run (True).
+    Each episode is {"from_start", "pts": [(t_s since the switch-away, reclaimed_mb, paged_back_mb,
+    swap_delta_mb)]} cumulative from the episode start, taken from after_launch (t=0), the dwell
+    samples and after_dwell of every step."""
+    steps = run["steps"]
+    out: list[dict] = []
+    cur: list[tuple[float, float, float, float]] = []
+    base = None
+    t_off = 0.0
+    from_start = True
+
+    def pt(d: dict, t: float):
+        nonlocal base
+        ps, mf, sw = d.get("cg_pgsteal"), d.get("majflt"), d.get("cg_swap_mb")
+        if ps is None or mf is None:
+            return None
+        if base is None:
+            base = (ps, mf, sw or 0.0)
+        return (round(t, 2), max(0.0, (ps - base[0]) * 4 / 1024), max(0.0, (mf - base[1]) * 4 / 1024),
+                (sw or 0.0) - base[2])
+
+    for s in steps:
+        if s["req"] == app:
+            if cur:
+                out.append({"from_start": from_start, "pts": cur})
+            cur, base, t_off, from_start = [], None, 0.0, False
+            continue
+        d1 = (s.get("after_launch") or {}).get("apps", {}).get(app)
+        if not d1 or d1.get("cg_pgsteal") is None:
+            continue
+        if not cur:
+            p0 = pt(d1, 0.0)
+            if p0:
+                cur.append(p0)
+        for x in s.get("timeline") or []:
+            d = (x.get("apps") or {}).get(app)
+            if d:
+                p = pt(d, t_off + (x.get("dt") or 0))
+                if p:
+                    cur.append(p)
+        d2 = (s.get("after_dwell") or {}).get("apps", {}).get(app)
+        if d2:
+            p = pt(d2, t_off + (s.get("dwell_s") or 0))
+            if p:
+                cur.append(p)
+        t_off += (s.get("dwell_s") or 0) + 3.0          # ~switch overhead between steps
+    if cur:
+        out.append({"from_start": from_start, "pts": cur})
+    return out
+
+
+def _slope_mb_per_min(pts, idx: int, frac: float = 0.5):
+    """Slope of column idx over the last `frac` of the episode (MB/min)."""
+    if len(pts) < 3:
+        return None
+    t_end = pts[-1][0]
+    tail = [p for p in pts if p[0] >= t_end * (1 - frac)]
+    if len(tail) < 2 or tail[-1][0] <= tail[0][0]:
+        return None
+    return 60 * (tail[-1][idx] - tail[0][idx]) / (tail[-1][0] - tail[0][0])
+
+
+def plot_swap_flow(run: dict, path: str) -> bool:
+    """Per app: reclaimed (out) vs paged back (in) MB per sample interval and cumulative, from the
+    switch-away, all background episodes overlaid (dotted = the one that starts with the run, i.e.
+    after the warmup rather than after a real switch-away), mean of the real episodes in bold, and
+    the steady-state slopes of the longest episode."""
+    apps = list(run["meta"].get("apps") or [])
+    eps = {a: swap_flow_episodes(run, a) for a in apps}
+    eps = {a: e for a, e in eps.items() if any(len(x["pts"]) >= 3 for x in e)}
+    if not eps:
+        return False
+    plt = _plt()
+    every = float(run["meta"].get("config", {}).get("sample_every_s") or 0) or 10.0
+    fig, axes = plt.subplots(len(eps), 2, figsize=(13, 2.7 * len(eps)), squeeze=False)
+    for i, (a, episodes) in enumerate(eps.items()):
+        ax_f, ax_c = axes[i]
+        real = [e for e in episodes if not e["from_start"]] or episodes
+        n_ep = len(real)
+        longest = max(real, key=lambda e: e["pts"][-1][0])["pts"]
+        nb = int(longest[-1][0] // every) + 1
+        sum_out = [0.0] * nb; sum_in = [0.0] * nb; cnt = [0] * nb
+        for e in episodes:
+            pts = e["pts"]
+            ts = [p[0] for p in pts]
+            d_out = [pts[k][1] - pts[k - 1][1] for k in range(1, len(pts))]
+            d_in = [pts[k][2] - pts[k - 1][2] for k in range(1, len(pts))]
+            mid = [(ts[k] + ts[k - 1]) / 2 for k in range(1, len(pts))]
+            ls = ":" if e["from_start"] and e not in real else "-"
+            al = 0.9 if n_ep == 1 and e in real else 0.3
+            ax_f.plot(mid, d_out, color="#d62728", alpha=al, linewidth=0.8, linestyle=ls)
+            ax_f.plot(mid, d_in, color="#1f77b4", alpha=al, linewidth=0.8, linestyle=ls)
+            ax_c.plot(ts, [p[1] for p in pts], color="#d62728", alpha=al, linewidth=0.8, linestyle=ls)
+            ax_c.plot(ts, [p[2] for p in pts], color="#1f77b4", alpha=al, linewidth=0.8, linestyle=ls)
+            if e in real:
+                for m, o, v in zip(mid, d_out, d_in):
+                    b = min(nb - 1, int(m // every))
+                    sum_out[b] += o; sum_in[b] += v; cnt[b] += 1
+        if n_ep > 1:
+            xs = [(b + 0.5) * every for b in range(nb) if cnt[b]]
+            ax_f.plot(xs, [sum_out[b] / cnt[b] for b in range(nb) if cnt[b]], color="#d62728", linewidth=2,
+                      label=f"reclaimed from the cgroup (out), mean of {n_ep}")
+            ax_f.plot(xs, [sum_in[b] / cnt[b] for b in range(nb) if cnt[b]], color="#1f77b4", linewidth=2,
+                      label=f"paged back = major faults x 4 KB (in), mean of {n_ep}")
+        else:
+            ax_f.plot([], [], color="#d62728", linewidth=2, label="reclaimed from the cgroup (out)")
+            ax_f.plot([], [], color="#1f77b4", linewidth=2, label="paged back = major faults x 4 KB (in)")
+        if any(e["from_start"] for e in episodes) and len(episodes) > n_ep:
+            ax_f.plot([], [], color="#7f7f7f", linestyle=":", label="dotted: episode after the warmup (not a switch-away)")
+        ax_c.plot([p[0] for p in longest], [p[3] for p in longest], color="#7f7f7f", linestyle="--", linewidth=1,
+                  label="swap of the cgroup (delta)")
+        so, si = _slope_mb_per_min(longest, 1), _slope_mb_per_min(longest, 2)
+        if so is not None and si is not None:
+            ax_c.text(0.98, 0.05, f"last half of the longest episode: out {so:.0f}, in {si:.0f} MB/min",
+                      transform=ax_c.transAxes, ha="right", va="bottom", fontsize=8,
+                      bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="#cccccc"))
+        ax_f.set_title(f"{a}: MB per {every:g} s interval since the switch-away ({n_ep} episode{'s' if n_ep > 1 else ''})", fontsize=9.5)
+        ax_c.set_title(f"{a}: cumulative MB since the switch-away (parallel lines = steady state)", fontsize=9.5)
+        for ax in (ax_f, ax_c):
+            ax.grid(alpha=0.3); ax.set_xlim(left=0); ax.set_ylabel("MB")
+        ax_f.legend(fontsize=7.5, loc="upper right"); ax_c.legend(fontsize=7.5, loc="upper left")
+        if i == len(eps) - 1:
+            ax_f.set_xlabel("s since the app left the foreground"); ax_c.set_xlabel("s since the app left the foreground")
+    fig.suptitle(f"{_name(run)}: swap flow of the background apps (out = pgsteal, in = major faults x 4 KB)", fontsize=11)
+    fig.tight_layout(); fig.savefig(path, dpi=110); plt.close(fig)
+    return True
+
+
 def plot_squeeze_apps(runs: list[dict], path: str) -> bool:
     """Five panels, one bar group per app, one bar per run (none / squeeze / mild ...)."""
     from .analyze import squeeze_app_rows
@@ -287,6 +421,9 @@ def plot_all(runs: list[dict], out_dir: str) -> list[str]:
             made.append(p)
         p = os.path.join(out_dir, _name(r) + "_timeline.png")
         if plot_timeline(r, p):
+            made.append(p)
+        p = os.path.join(out_dir, _name(r) + "_swapflow.png")
+        if plot_swap_flow(r, p):
             made.append(p)
     p = os.path.join(out_dir, "latency_cdf.png")
     if plot_latency_cdf(runs, p):
