@@ -523,9 +523,12 @@ arm64 包在 ACE 容器里缺 `libc_secshared.so` 启动即退, 由哔哩哔哩�
 | `throttle.swap_max_mb` | null | 单个 `shrunk` 应用的 `memory.swap.max`; `memory.high` + 很小的 swap 上限 = 应用几乎不能再分配内存, 只会变慢, 仍不会死 |
 | `throttle.io_weight` | null | 后台 `io.weight` (需要 io 控制器, 对下载类应用有用) |
 | `throttle.proactive_reclaim` | true | 降档时立即写 `memory.reclaim` (内核 ≥ 5.19) |
+| `throttle.squeeze_rounds` / `squeeze_every_s` | 0 / 0 | **实验性 "挤压"** (§6.8): 降到 `shrunk` 时连写 `squeeze_rounds` 次 `memory.reclaim = memory.current` (把整个 cgroup 能换出的都换到 zram、能丢的页缓存都丢掉, 不只是压到 `memory.high`), 停留期间每 `squeeze_every_s` 秒对所有 `shrunk` 应用再挤一次 (记到 `timeline[].squeeze`); 0 关闭。CLI `--squeeze N --squeeze-every S`。与 `thrash_high_per_s=0` 搭配时内核会一直回收它们 → swap 写入大, 后台应用很慢 |
+| `throttle.cpu_weight` | 20 | 后台应用的 `cpu.weight` (1–10000, 前台 100); `cpu_mode both` + `cpu_cores 0.1` + `cpu_weight 1` = 所有后台应用挤在最后一个核上、每个只有该核 10 % 的带宽、前台要用时几乎抢不到 (CLI `--cpu-weight`) |
 | `cpu_throttle_resident` | true | 预算内的后台应用也限 CPU (`bg`); false 则预算内的完全不受限, 策略只决定内存 |
 | `trace` | scenario office T=60 | `kind`: `scenario` (`office` 办公 / `design` 设计 / `download` 下载 / `chat` 消息 / `media` 娱乐: 抖音 / 爱奇艺 / 网易云 / B站) / `day` (五场景按 15/35/15/20/15 % 依次经历) / `zipf` / `markov`; 也可内联 `{"apps":{id:权重},"hub":id,"flows":[[...]]}`。场景里本机没装 (不在 `apps`) 的应用自动剔除, 只要剩 ≥ 2 个就能跑 |
 | `dwell_s` / `settle_s` / `warmup_dwell_s` | [5, 12] / 2 / 10 | 每步停留 / 切换后等待 / warmup 每应用停留 (秒)。`dwell_s` 给一个数 = 固定; 给 `[lo, hi]` = 每步按 seed 均匀抽样 (同一 seed 下各策略的每一步停留相同, 可直接对比); 每条 `step` 记录带 `dwell_s` |
+| `per_process` / `quiet_after_s` | false / 30 | **按进程统计** (§6.8): true (或 `--per-process`) 时 warmup / 每步 `after_launch` / `after_dwell` 的每个应用带 `procs` (每个进程的 pid / 名字 / PSS / 匿名 / 文件 / SwapPss / RSS), timeline 采样带 `procs: {pid: [pss_kb, swap_pss_kb, name]}`; `quiet_after_s`: 一次停留里从第几秒起算 "后台稳定静默期" (前台的脚本操作已做完, 后台应用只是待着), analyze 的 `quiet_*` 列只用这一段的采样 |
 | `sample_every_s` | 2.0 | > 0 时停留期间每隔这么多秒做一次轻量采样 (PSI cpu/mem/io、zram、MemAvailable、swap in/out、每应用 PSS / swap / cpu / 写盘 / 节流时间 / tier) → `step.timeline`, 画时间序列 (`--plots-dir` 的 `*_timeline.png`); 0 关闭 |
 | `placeholder_fill` | false | true (或 `--placeholders`): 没装上的应用用内置占位程序顶替, **id 不变**, 场景 / 轨迹不变 (`meta.placeholders` 列出); 在真实应用装齐之前就能跑完整矩阵, 之后同一命令重跑即用真实应用 |
 | `placeholder_apps` | `[]` | 这些 id 即使装了也用占位程序顶替 (没有账号的应用; §4.7); CLI `--placeholder-apps a,b` 追加 |
@@ -641,6 +644,35 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy s
 (c) 只支持 X11 (XTEST / `get_image`); Wayland 下 `--work` 会全部 `not-active` / `error`。(d) 手机版 `ui` oracle 依赖 `uiautomator dump`,
 Waydroid 上要 1–3 s; 列表页的推荐流本身会刷新 → 用 `tolerance` 更大的 `screen` 或 `kind: none`。(e) `work_s` 计入 dwell 的开头, 所以
 `dwell_s` 的下限至少要 ≥ 2 × `work_s`。(f) 微信 / QQ 在没有焦点输入框时 `draft` 的按键会被吞掉, 不影响实验, 只是 `clipboard` 读到的是空摘要 (`0:…`, 带 `clipboard-unchanged` 注记)。
+
+### 6.8 实验性: 按进程统计前 / 后台占用 + 激进挤压 (`scripts/ubuntu/run_squeeze.sh`)
+
+另一种统计口径: 不看 "后台总 PSS 占 Σm_fg 的比例", 而是**每个进程**切到后台前 (自己那一步停留结束时的 PSS, 没被请求过的用 warmup 样本)
+与切到后台后 (后台停留结束时) 各占多少、被挤掉了多少, 以及后台**稳定静默期间每分钟换出多少** (磁盘 / zram 写入速率)。后台用最激进的档位:
+`cpuset` 最后一个核 + 该核 10 % 的 `cpu.max` + `cpu.weight 1`; `memory.high = 0.1 × m_fg` (≥ 64 MB) 且切走时连写 3 次 `memory.reclaim = memory.current`、
+停留期间每 30 s 再挤一次; 关掉抖动保护。只跑 office 一个场景、5 个应用 (微信 / QQ / 钉钉 / WPS / Firefox), 固定 150 s 的长停留
+(前 3 s 脚本操作, 30 s 后算静默期, 每 10 s 采一次), T=12 → 一格约 32 min, 三格约 1.6 h, **不是全量矩阵**:
+
+```bash
+scripts/ubuntu/run_squeeze.sh                      # none 基线 + squeeze 激进 + mild 对照 (夜间跑的 1 核 / 0.5 档位), 结果在 results/arm64_squeeze
+CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # 只跑两格;  T=20 DWELL=240 更长的静默窗;  SEEDS="1 2" 复本;  ONBOARD=1 先过登录向导;  DRY=1 只打印命令
+```
+
+配置 `configs/ubuntu_arm64_squeeze.json`; 输出除常规文件外多一个 `per_process.csv`, `report.md` 多一节 "Per process"。新指标 (都只看 `per_process` 的跑法, `--all-cols` 可见):
+
+| 列 | 含义 |
+|---|---|
+| `fg_pss_avg_mb` | 前台应用在自己那步停留结束时的 PSS (各步平均) |
+| `bg_pss_quiet_avg_mb` | 停留结束时其它应用的 PSS 之和 (各步平均): 挤完后后台实际还驻留多少 |
+| `bg_squeeze_pct` | 1 − 后台应用现在的 PSS / 它们各自上一次在前台时的 PSS → 被挤掉的比例; `none` 应接近 0 |
+| `quiet_swap_out_mb_per_min` | 静默期内全系统 `pswpout` 折算的每分钟换出量 (zram 写入速率) |
+| `quiet_bg_reclaim_mb_per_min` | 静默期内后台 cgroup `memory.stat pgsteal` 增量: 内核每分钟从它们回收了多少页 (匿名页换出 + 文件页丢弃) |
+| `quiet_bg_swap_growth_mb_per_min` | 静默期内后台 cgroup `memory.swap.current` 的增量: 稳定状态下还在持续换出 = 后台应用还在醒着碰内存 |
+| `quiet_s` | 本格累计的静默秒数 (分母) |
+| per_process.csv: `pss_fg_mb` / `pss_bg_mb` / `pss_bg_quiet_mb` / `swap_bg_quiet_mb` / `squeeze_pct` / `swap_growth_mb_per_min` | 每个 (应用, 进程名) 的: 前台 PSS / 刚切走时 / 后台停留结束时 / 那时在 swap 里的量 / 被挤掉的比例 / 静默期 SwapPss 每分钟增长; 同名多进程 (Electron 的 renderer / utility) 合并, `n_pids` 给个数 |
+
+每步记录里 `bg.<app>.reclaim_mb` / `swap_delta_mb` 是这一步停留里从该 cgroup 回收 / 换出的量; `actions.limits.<app>.squeeze` 是切走时那次挤压的前后 `memory.current`。
+预期: 激进档下后台应用很慢 (切回时 `lat_p95` / `ping_p95` 明显变大, 可能几秒), `swap_write_mb` 大, 但 `state_lost` / `work_fail` 仍应为 0 (没有 `memory.max`, 不会被杀); 如果 `quiet_bg_swap_growth_mb_per_min` 长期 > 0, 说明这个应用在后台一直在碰工作集, 静态上限只是在反复换入换出 (对比 `mild` 格的数字)。
 
 ### 6.7 日常使用: `focusd`
 
@@ -890,11 +922,13 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `python3 run_linux.py CONFIG --policy … --eta … --T … --scenario … [--work] [--resume FILE]` | 单格实验 | 一次实验 → `results/<name>.jsonl` (+ `.log`, `.ckpt`); Ctrl+C 安全, `--resume` 续跑 |
 | `cf/linux/work.py` (`WorkDriver`: `X11WorkDriver` + `AdbWorkDriver`) | `--work` 内部 | 每类应用的默认脚本 (打草稿 / 滚动 / 缩放 / 上滑) 与内容 oracle (clipboard / title / screen / statefile / ui), 比较规则; `work_overrides` 按 id 覆盖 |
 | `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / WORK (+ WORK_S) / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
+| `scripts/ubuntu/run_squeeze.sh` + `CELLS= T= DWELL= SEEDS= ONBOARD= DRY= OUT=` | 实验性 | §6.8: office 5 应用, none / squeeze (激进: cpuset+10 % 带宽+weight 1, memory.high 10 %, memory.reclaim 整个 cgroup ×3 并每 30 s 重复) / mild 三格, 长停留, 按进程统计 + 静默期换出速率; 出 `per_process.csv` |
 | `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= ONBOARD= PLACEHOLDERS= WORK= WORK_S= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → (`ONBOARD=1`: 登录向导 + `--check`, 不全就绪即停) → probe / catalog / mobile (/ work_plan) 快照 → 冒烟 (检查 state_lost / oom / COLD / work_fail = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
-| `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / Pareto 点 / 图 / Markdown 报告 |
+| `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--per-proc] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / 每进程表 (`per_process` 的跑法) / Pareto 点 / 图 / Markdown 报告 |
 | `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |
 | `python3 -m cf.linux.placeholder_app --app ID --title T [--cpu f --mem MB --io-mbps n --notify-every s --workers k]` | 冒烟 / 占位 | 内置 X11 占位程序: 可控的 CPU / 内存 / 写盘 / 通知负载, 状态写到 `/tmp/cf_placeholder_<id>.json` |
 | `configs/ubuntu_cn_desktop.json` | 主配置 | 13 个应用、`substitute_kinds` / `mobile`、限流档位、轨迹、`dwell_s` 范围、`sample_every_s`、`placeholder_fill`、`work` / `work_s` / `work_overrides` |
 | `configs/ubuntu_arm64.json` | arm64 真机集合 | UTM 虚拟机实际装好的 13 个应用 (含星火商店的 迅雷 / 爱奇艺 / 哔哩哔哩 / 网易云音乐 / 石墨文档 和 UOS 百度网盘), `work=true`, 五场景 (含 `media`), `sudo_adopt=true` (apm 容器 helper 属别的 uid) |
+| `configs/ubuntu_arm64_squeeze.json` | 实验性 (§6.8) | office 5 应用、激进档位 (`cpu_mode both` 0.1 核 weight 1, `mem_frac 0.1`, `squeeze_rounds 3` / `squeeze_every_s 30`, 无抖动保护)、`dwell_s 150`、`per_process`、`quiet_after_s 30` |
 | `configs/ubuntu_placeholders.json` | 冒烟 | 4 个占位程序的最小配置 (任何 X11 会话可跑, 含 Xvfb) |
 | `results/<matrix>/{summary,summary_agg,per_app,pareto}.csv`, `plots/*.png`, `report.md`, `matrix.env`, `*.console.log` | 产物 | 表 / 图 / 报告 / 本次矩阵的参数与机器信息 / 每格控制台输出 |
