@@ -475,3 +475,75 @@ def test_thrash_guard_can_be_disabled_and_survives_resume(tmp_path):
                                "name": cfg["name"]}, dev2, log=lambda *a: None, resume=True)
     exp2.run()
     assert exp2.mem_high["fake_browser"] >= exp.mem_high["fake_browser"]      # restored, not re-learned from 200
+
+
+def test_squeeze_profile_reclaims_below_memory_high_and_repeats_during_the_dwell(tmp_path):
+    from cf.linux.analyze import per_process_rows, PER_PROC_COLS, SQUEEZE_COLS, main as analyze_main
+    thr = {"cpu_mode": "both", "cpu_cores": 0.1, "cpu_weight": 1, "mem_frac": 0.1, "mem_min_mb": 16,
+           "thrash_high_per_s": 0, "squeeze_rounds": 3, "squeeze_every_s": 0.06}
+    cfg = cfg_for(tmp_path, "static", dwell_s=0.3, sample_every_s=0.03, per_process=True, quiet_after_s=0.1,
+                  throttle=thr, name="squeeze", trace={"kind": "zipf", "T": 8, "seed": 3})
+    dev = FakeLinuxDesktop(APPS, seed=21)
+    exp = ThrottleExperiment(cfg, dev, log=lambda *a: None)
+    assert "squeeze x3 every 0.06s" in exp.profile.describe()
+    path = exp.run()
+    steps = steps_of(path)
+    # switch-away: memory.reclaim of the whole cgroup, resident ends at the pinned floor (15 % of m), far below memory.high
+    for s in steps:
+        for app, lim in s["actions"]["limits"].items():
+            if lim.get("tier") == "shrunk" and lim.get("squeeze"):
+                assert lim["squeeze"]["rounds"] == 3 and lim["squeeze"]["after_bytes"] <= dev.state[app]["m"] * 1024 * 0.15 + 1024
+                assert int(lim["memory_high"]) == max(16 * 2 ** 20, int(0.1 * dev.state[app]["m"] * 1024))
+            assert lim.get("cpu_max", "").startswith("10000 ") if lim.get("tier") in ("bg", "shrunk") else True
+            assert lim.get("cpu_weight") == 1 if lim.get("tier") in ("bg", "shrunk") else True
+    # periodic squeeze during the dwell, logged in the timeline, never on the requested app
+    sq = [(s["req"], x["squeeze"]) for s in steps for x in s["timeline"] if x.get("squeeze")]
+    assert sq and all(req not in d for req, d in sq)
+    assert dev.squeezes > sum(1 for s in steps for l in s["actions"]["limits"].values() if l.get("squeeze"))
+    # per-process records: main + helper of every app, kB fields, cgroup reclaim counters
+    d2 = steps[-1]["after_dwell"]["apps"]
+    assert all(len(d2[a]["procs"]) == 2 and {p["name"] for p in d2[a]["procs"]} == {a, a + "-helper"} for a in APPS)
+    assert all(set(p) >= {"pid", "pss_kb", "swap_pss_kb", "pss_anon_kb"} for a in APPS for p in d2[a]["procs"])
+    tl = steps[-1]["timeline"][-1]["apps"][APPS[0]]
+    assert "procs" in tl and "cg_pgsteal" in tl and all(len(v) == 3 for v in tl["procs"].values())
+    bg = [b for s in steps for a, b in s["bg"].items() if b.get("tier") == "shrunk"]
+    assert bg and all(b["reclaim_mb"] is not None for b in bg)
+    # quiet-window metrics
+    row = summarize(load(path))
+    assert row["quiet_s"] > 0 and row["quiet_swap_out_mb_per_min"] is not None and row["quiet_bg_reclaim_mb_per_min"] >= 0
+    assert row["fg_pss_avg_mb"] > row["bg_pss_quiet_avg_mb"] / (len(APPS) - 1)
+    assert 70 <= row["bg_squeeze_pct"] <= 90          # 15 % floor -> ~85 % squeezed
+    rows = per_process_rows(load(path))
+    assert {(r["app"], r["proc"]) for r in rows} == {(a, n) for a in APPS for n in (a, a + "-helper")}
+    assert all(set(PER_PROC_COLS) <= set(r) for r in rows)
+    main = next(r for r in rows if r["proc"] == APPS[0])
+    helper = next(r for r in rows if r["proc"] == APPS[0] + "-helper")
+    assert main["pss_fg_mb"] > main["pss_bg_quiet_mb"] and main["squeeze_pct"] > 70
+    assert abs(main["pss_fg_mb"] / 9 - helper["pss_fg_mb"]) < 1.0           # 90 / 10 split
+    assert main["n_pids"] == 1 and main["swap_growth_mb_per_min"] is not None
+    # the mild reference and the none baseline: no squeeze, little or no fg -> bg drop
+    none = cfg_for(tmp_path, "none", eta=1.0, dwell_s=0.3, sample_every_s=0.03, per_process=True, quiet_after_s=0.1,
+                   name="none_sq", trace={"kind": "zipf", "T": 8, "seed": 3})
+    pn = ThrottleExperiment(none, FakeLinuxDesktop(APPS, seed=21), log=lambda *a: None).run()
+    rn = summarize(load(pn))
+    assert rn["bg_squeeze_pct"] is not None and rn["bg_squeeze_pct"] < 5 and rn["quiet_bg_reclaim_mb_per_min"] == 0
+    assert all(r["squeeze_pct"] is None or r["squeeze_pct"] < 5 for r in per_process_rows(load(pn)))
+    # CLI: squeeze columns, per-process CSV, Markdown section
+    analyze_main([path, pn, "--per-proc", str(tmp_path / "pp.csv"), "--md", str(tmp_path / "sq.md")])
+    assert (tmp_path / "pp.csv").read_text().splitlines()[0] == ",".join(PER_PROC_COLS)
+    md = (tmp_path / "sq.md").read_text()
+    assert "## Per process" in md and "bg_squeeze_pct" in md and all(c in md for c in SQUEEZE_COLS[:3])
+
+
+def test_squeeze_off_keeps_the_single_reclaim_and_no_per_process_payload(tmp_path):
+    cfg = cfg_for(tmp_path, "static", dwell_s=0.05, sample_every_s=0.02, trace={"kind": "zipf", "T": 4, "seed": 3})
+    dev = FakeLinuxDesktop(APPS, seed=22)
+    path = ThrottleExperiment(cfg, dev, log=lambda *a: None).run()
+    steps = steps_of(path)
+    assert getattr(dev, "squeezes", 0) == 0
+    assert all("procs" not in d for s in steps for d in s["after_dwell"]["apps"].values())
+    assert all("procs" not in x["apps"][APPS[0]] for s in steps for x in s["timeline"])
+    assert all(not x.get("squeeze") for s in steps for x in s["timeline"])
+    assert all(not l.get("squeeze") for s in steps for l in s["actions"]["limits"].values())
+    row = summarize(load(path))
+    assert "bg_squeeze_pct" in row            # the quiet metrics exist (may be None without a quiet window)
