@@ -24,7 +24,8 @@
 #
 # Output: $OUT/*.jsonl (+ .ckpt while running; re-run the same command to resume), summary.csv,
 # per_app.csv, per_process.csv, squeeze_apps.csv (per app: m_fg, background resident, CPU % of a core,
-# swap traffic per minute, switch-back latency), plots/ (incl. squeeze_apps.png), report.md.  Run it inside the Xorg session (or with DISPLAY
+# swap traffic per minute, switch-back latency), squeeze_tables.xlsx (the same tables with Chinese headers,
+# needs openpyxl), plots/ (incl. squeeze_apps.png), report.md.  Run it inside the Xorg session (or with DISPLAY
 # exported, manual §2.4) after setup_cgroups.sh.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -129,7 +130,8 @@ done
 [ "$DRY" = 1 ] && exit 0
 if ! ls "$OUT"/*.jsonl >/dev/null 2>&1; then echo "!! no result files in $OUT"; exit 1; fi
 python3 -m cf.linux.analyze "$OUT"/*.jsonl --csv "$OUT/summary.csv" --per-app "$OUT/per_app.csv" \
-  --per-proc "$OUT/per_process.csv" --squeeze-apps "$OUT/squeeze_apps.csv" --plots-dir "$OUT/plots" --md "$OUT/report.md" || true
+  --per-proc "$OUT/per_process.csv" --squeeze-apps "$OUT/squeeze_apps.csv" --plots-dir "$OUT/plots" --md "$OUT/report.md" \
+  --xlsx "$OUT/squeeze_tables.xlsx" || true
 python3 -m cf.linux.analyze "$OUT"/*.jsonl --squeeze-apps --per-proc 2>/dev/null | sed -n '/^per app (squeeze/,$p' || true
 [ "$FAILED" = 1 ] && echo "== some cells are incomplete; finish them with:  OUT=$OUT $0"
-echo "== results in $OUT  (report.md, summary.csv, per_app.csv, per_process.csv, squeeze_apps.csv, plots/squeeze_apps.png)"
+echo "== results in $OUT  (report.md, squeeze_tables.xlsx, summary.csv, per_app.csv, per_process.csv, squeeze_apps.csv, plots/squeeze_apps.png)"

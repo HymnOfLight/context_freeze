@@ -546,6 +546,18 @@ def test_squeeze_profile_reclaims_below_memory_high_and_repeats_during_the_dwell
     md = (tmp_path / "sq.md").read_text()
     assert "## Per process" in md and "## Per app: active footprint" in md and "bg_squeeze_pct" in md
     assert all(c in md for c in SQUEEZE_COLS[:3])
+    if pytest.importorskip("openpyxl", reason="no openpyxl"):
+        from openpyxl import load_workbook
+        analyze_main([path, pn, "--xlsx", str(tmp_path / "sq.xlsx")])
+        wb = load_workbook(tmp_path / "sq.xlsx")
+        assert wb.sheetnames == ["统计表", "各格对照", "每格汇总", "每进程"]
+        ws = wb["统计表"]
+        hdr = [c.value for c in ws[1]]
+        assert hdr[0] == "应用" and "squeeze 后台驻留 (MB)" in hdr and "none_sq 后台驻留 (MB)" in hdr
+        first = {h: v for h, v in zip(hdr, [c.value for c in ws[2]])}
+        assert first["squeeze 后台驻留 (MB)"] < first["none_sq 后台驻留 (MB)"] <= first["活跃足迹 m_fg (MB)"]
+        assert ws.cell(len(APPS) + 2, 1).value == "合计 / 均值"
+        assert wb["各格对照"].max_row == 1 + 2 * len(APPS) and wb["每格汇总"].max_row == 3
     if pytest.importorskip("matplotlib", reason="no matplotlib"):
         from cf.linux.plots import plot_squeeze_apps
         assert plot_squeeze_apps([load(path), load(pn)], str(tmp_path / "sa.png")) and (tmp_path / "sa.png").stat().st_size > 1000

@@ -419,6 +419,7 @@ def main(argv=None) -> int:
                          "switch-back latency (print, or write CSV)")
     ap.add_argument("--plots-dir", metavar="DIR", help="per-run timelines + latency CDFs as PNG (needs matplotlib)")
     ap.add_argument("--md", metavar="FILE", help="also write the tables as a Markdown report")
+    ap.add_argument("--xlsx", metavar="FILE", help="Excel workbook of the squeeze tables (per_process runs; needs openpyxl)")
     args = ap.parse_args(argv)
     runs = [load(f) for f in args.files]
     rows = [summarize(r) for r in runs]
@@ -469,6 +470,16 @@ def main(argv=None) -> int:
                        per_proc=per_proc if squeeze_mode else None,
                        main_cols=SQUEEZE_COLS if squeeze_mode else MAIN_COLS, squeeze_apps=sq_apps or None)
         print(f"wrote {args.md}")
+    if args.xlsx:
+        if not squeeze_mode:
+            print("--xlsx: only for runs recorded with per_process (run_squeeze.sh)")
+        else:
+            try:
+                from .xlsx import write_xlsx
+                write_xlsx(runs, args.xlsx)
+                print(f"wrote {args.xlsx}")
+            except ImportError:
+                print("--xlsx needs openpyxl (pip install openpyxl)")
     agg = aggregate(rows, EXTRA_AGG_COLS)
     if any(a["n_runs"] > 1 for a in agg):
         print("\naggregated over replicates (mean ± sd):")
