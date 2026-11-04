@@ -55,6 +55,9 @@ SQUEEZE_COLS = ["policy", "scenario", "eta", "seed", "cpu", "mem_frac", "T", "fg
                 "ping_p95_ms", "n_cold", "bg_cores_avg", "bg_throttled_pct", "state_lost_events", "oom_kills",
                 "work_checks", "work_fail", "mem_high_backoffs"]
 
+SQUEEZE_APP_COLS = ["run", "app", "m_fg_mb", "bg_resid_mb", "bg_pct_of_m_fg", "bg_cpu_pct_core", "bg_throttled_pct",
+                    "bg_reclaim_mb_per_min", "bg_swapin_mb_per_min", "n_req", "lat_p50_ms", "lat_p95_ms", "ping_p50_ms"]
+
 PER_PROC_COLS = ["run", "app", "proc", "n_pids", "pss_fg_mb", "pss_bg_mb", "pss_bg_quiet_mb", "swap_bg_quiet_mb",
                  "squeeze_pct", "swap_growth_mb_per_min"]
 
@@ -352,6 +355,53 @@ def per_process_rows(run: dict) -> list[dict]:
     return rows
 
 
+def squeeze_app_rows(run: dict) -> list[dict]:
+    """One row per app of a run with the five squeeze figures: active footprint (m_fg = warmup
+    PSS+Swap), resident PSS while in the background (end of the dwells), CPU it got there as % of one
+    core, memory the kernel took from it per minute (pgsteal) and paged back (major faults), and how
+    fast it came back to the foreground."""
+    meta, steps = run["meta"], run["steps"]
+    cfg = meta.get("config", {})
+    name = cfg.get("name") or run.get("path", "")
+    m_fg = (run.get("budget") or {}).get("m_fg_kb") or {}
+    out = []
+    for app in meta.get("apps") or []:
+        resid, cores, thr_num, thr_den, rc, swin, wall = [], [], 0.0, 0.0, 0.0, 0.0, 0.0
+        has_rc = False
+        for s in steps:
+            if s["req"] == app:
+                continue
+            d = (s.get("after_dwell") or {}).get("apps", {}).get(app)
+            if d and d.get("pss_kb") is not None:
+                resid.append(d["pss_kb"] / 1024)
+            b = (s.get("bg") or {}).get(app)
+            if not b:
+                continue
+            w = b.get("wall_s") or 0
+            wall += w
+            if b.get("cores") is not None:
+                cores.append(b["cores"])
+            thr_num += b.get("throttled_ms", 0) / 1000; thr_den += w
+            if b.get("reclaim_mb") is not None:
+                rc += b["reclaim_mb"]; has_rc = True
+            swin += b.get("majflt", 0) * 4 / 1024
+        req = [s for s in steps if s["req"] == app and s["launch"].get("total_time_ms")]
+        lat = [s["launch"]["total_time_ms"] for s in req]
+        ping = [s["launch"]["ping_ms"] for s in req if s["launch"].get("ping_ms") is not None]
+        mfg = (m_fg.get(app) or 0) / 1024
+        br = sum(resid) / len(resid) if resid else None
+        out.append({"run": name, "app": app, "m_fg_mb": round(mfg) if mfg else None,
+                    "bg_resid_mb": round(br) if br is not None else None,
+                    "bg_pct_of_m_fg": round(100 * br / mfg, 1) if br is not None and mfg else None,
+                    "bg_cpu_pct_core": round(100 * sum(cores) / len(cores), 1) if cores else None,
+                    "bg_throttled_pct": round(100 * thr_num / thr_den, 1) if thr_den else None,
+                    "bg_reclaim_mb_per_min": round(rc / (wall / 60), 1) if wall and has_rc else None,
+                    "bg_swapin_mb_per_min": round(swin / (wall / 60), 1) if wall else None,
+                    "n_req": len(req), "lat_p50_ms": pct(lat, 0.5), "lat_p95_ms": pct(lat, 0.95),
+                    "ping_p50_ms": pct(ping, 0.5)})
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="+")
@@ -364,6 +414,9 @@ def main(argv=None) -> int:
     ap.add_argument("--per-app", metavar="CSV", nargs="?", const="-", help="per-app table (print, or write CSV)")
     ap.add_argument("--per-proc", metavar="CSV", nargs="?", const="-",
                     help="per-process fg/bg PSS table (runs recorded with per_process; print, or write CSV)")
+    ap.add_argument("--squeeze-apps", metavar="CSV", nargs="?", const="-",
+                    help="per-app squeeze table: m_fg, background resident, CPU %% of a core, reclaim / swap-in per minute, "
+                         "switch-back latency (print, or write CSV)")
     ap.add_argument("--plots-dir", metavar="DIR", help="per-run timelines + latency CDFs as PNG (needs matplotlib)")
     ap.add_argument("--md", metavar="FILE", help="also write the tables as a Markdown report")
     args = ap.parse_args(argv)
@@ -396,6 +449,16 @@ def main(argv=None) -> int:
                 w = csv.DictWriter(f, fieldnames=PER_PROC_COLS)
                 w.writeheader(); w.writerows(per_proc)
             print(f"wrote {args.per_proc}")
+    sq_apps = [x for r in runs for x in squeeze_app_rows(r)] if squeeze_mode else []
+    if args.squeeze_apps is not None and sq_apps:
+        if args.squeeze_apps == "-":
+            print("\nper app (squeeze figures):")
+            print_table(sq_apps, SQUEEZE_APP_COLS)
+        else:
+            with open(args.squeeze_apps, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=SQUEEZE_APP_COLS)
+                w.writeheader(); w.writerows(sq_apps)
+            print(f"wrote {args.squeeze_apps}")
     if args.plots_dir:
         from .plots import plot_all
         made = plot_all(runs, args.plots_dir)
@@ -404,7 +467,7 @@ def main(argv=None) -> int:
         from .report import write_markdown
         write_markdown(args.md, rows, aggregate(rows, EXTRA_AGG_COLS), per_app, seg, plots_dir=args.plots_dir,
                        per_proc=per_proc if squeeze_mode else None,
-                       main_cols=SQUEEZE_COLS if squeeze_mode else MAIN_COLS)
+                       main_cols=SQUEEZE_COLS if squeeze_mode else MAIN_COLS, squeeze_apps=sq_apps or None)
         print(f"wrote {args.md}")
     agg = aggregate(rows, EXTRA_AGG_COLS)
     if any(a["n_runs"] > 1 for a in agg):

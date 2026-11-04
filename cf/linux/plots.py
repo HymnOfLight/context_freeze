@@ -7,6 +7,9 @@
                        PSI, swap)
   latency_cdf.png      CDF of switch latency per policy (all runs), split resident / shrunk
   bg_tradeoff.png      per run: background PSS saving vs P95 latency, marker = policy, colour = scenario
+  squeeze_apps.png     runs recorded with per_process: per app, grouped by run - active footprint vs
+                       background resident PSS, CPU in the background (% of a core), swap traffic per
+                       minute (reclaimed / paged back), switch-back latency
 
     python3 -m cf.linux.analyze results/matrix/*.jsonl --plots-dir results/matrix/plots
 """
@@ -208,6 +211,72 @@ def plot_tradeoff(rows: list[dict], path: str) -> bool:
     return True
 
 
+def plot_squeeze_apps(runs: list[dict], path: str) -> bool:
+    """Five panels, one bar group per app, one bar per run (none / squeeze / mild ...)."""
+    from .analyze import squeeze_app_rows
+    runs = [r for r in runs if r["meta"].get("config", {}).get("per_process")]
+    if not runs:
+        return False
+    plt = _plt()
+    rows = {_name(r): squeeze_app_rows(r) for r in runs}
+    apps = list(runs[0]["meta"].get("apps") or [])
+    names = list(rows)
+    cmap = plt.get_cmap("tab10")
+    panels = [("bg_resid_mb", "resident PSS in the background (MB); hatched frame = active footprint m_fg", True),
+              ("bg_pct_of_m_fg", "background resident as % of m_fg", False),
+              ("bg_cpu_pct_core", "CPU obtained in the background (% of one core)", False),
+              ("bg_reclaim_mb_per_min", "swap traffic per minute in the background (MB): solid = reclaimed from the cgroup, "
+                                        "hatched = paged back (major faults)", False),
+              ("lat_p95_ms", "switch-back latency when requested (ms): bar = P95, mark = P50; n/a = never requested", False)]
+    fig, axes = plt.subplots(len(panels), 1, figsize=(max(8, 1.9 * len(apps) + 3), 3.1 * len(panels)))
+    width = 0.8 / max(1, len(names))
+    xs = list(range(len(apps)))
+    for ax, (col, title, with_mfg) in zip(axes, panels):
+        top = 0.0
+        for j, name in enumerate(names):
+            byapp = {r["app"]: r for r in rows[name]}
+            x = [i + (j - (len(names) - 1) / 2) * width for i in xs]
+            vals = [byapp.get(a, {}).get(col) for a in apps]
+            if col == "bg_reclaim_mb_per_min":
+                swin = [byapp.get(a, {}).get("bg_swapin_mb_per_min") or 0 for a in apps]
+                ax.bar([xi - width / 4 for xi in x], [v or 0 for v in vals], width * 0.45, color=cmap(j % 10), label=name)
+                ax.bar([xi + width / 4 for xi in x], swin, width * 0.45, color=cmap(j % 10), alpha=0.45, hatch="..")
+                for xi, v, w in zip(x, vals, swin):
+                    ax.text(xi - width / 4, v or 0, f"{v or 0:g}", ha="center", va="bottom", fontsize=6.5)
+                    ax.text(xi + width / 4, w, f"{w:g}", ha="center", va="bottom", fontsize=6.5, color="#444444")
+                top = max(top, max((v or 0) for v in vals), max(swin))
+                continue
+            ax.bar(x, [v or 0 for v in vals], width * 0.9, color=cmap(j % 10), label=name)
+            if with_mfg and j == 0:
+                mfg = [byapp.get(a, {}).get("m_fg_mb") or 0 for a in apps]
+                ax.bar(xs, mfg, 0.8, fill=False, edgecolor="#555555", hatch="//", linewidth=0.8, label="m_fg")
+                top = max(top, max(mfg))
+            if col == "lat_p95_ms":
+                p50 = [byapp.get(a, {}).get("lat_p50_ms") for a in apps]
+                ax.plot([xi for xi, v in zip(x, p50) if v], [v for v in p50 if v], "k_", markersize=12, markeredgewidth=2)
+                for xi, a in zip(x, apps):
+                    if not byapp.get(a, {}).get("n_req"):
+                        ax.text(xi, 0, "n/a", ha="center", va="bottom", fontsize=7, color="#777777")
+            for xi, v in zip(x, vals):
+                if v is not None:
+                    ax.text(xi, v, f"{v:g}", ha="center", va="bottom", fontsize=7)
+            top = max(top, max((v or 0) for v in vals))
+        ax.set_xticks(xs); ax.set_xticklabels(apps)
+        ax.set_title(title, fontsize=9.5); ax.grid(axis="y", alpha=0.3)
+        if col == "bg_pct_of_m_fg":
+            ax.axhline(10, color="#d62728", linestyle="--", linewidth=0.8)
+            ax.text(-0.45, 10.5, "10 % target", color="#d62728", fontsize=8, va="bottom")
+        if col == "bg_reclaim_mb_per_min" and top > 50:
+            ax.set_yscale("symlog", linthresh=10); ax.set_ylim(0, top * 3)
+        elif top > 0:
+            ax.set_ylim(0, top * 1.18)
+    h, l = axes[0].get_legend_handles_labels()
+    fig.legend(h, l, loc="upper center", ncol=len(l), fontsize=8, bbox_to_anchor=(0.5, 0.985), frameon=False)
+    fig.suptitle(f"per-app squeeze figures ({len(apps)} apps)", fontsize=11, y=0.998)
+    fig.tight_layout(rect=(0, 0, 1, 0.975)); fig.savefig(path, dpi=110); plt.close(fig)
+    return True
+
+
 def plot_all(runs: list[dict], out_dir: str) -> list[str]:
     from .analyze import summarize
     os.makedirs(out_dir, exist_ok=True)
@@ -224,5 +293,8 @@ def plot_all(runs: list[dict], out_dir: str) -> list[str]:
         made.append(p)
     p = os.path.join(out_dir, "bg_tradeoff.png")
     if plot_tradeoff([summarize(r) for r in runs], p):
+        made.append(p)
+    p = os.path.join(out_dir, "squeeze_apps.png")
+    if plot_squeeze_apps(runs, p):
         made.append(p)
     return made

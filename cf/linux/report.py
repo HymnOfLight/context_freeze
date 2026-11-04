@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import time
 
-from .analyze import MAIN_COLS, PER_APP_COLS, PER_PROC_COLS, AGG_COLS_LINUX
+from .analyze import MAIN_COLS, PER_APP_COLS, PER_PROC_COLS, SQUEEZE_APP_COLS, AGG_COLS_LINUX
 
 
 def _fmt(v) -> str:
@@ -29,7 +29,7 @@ def md_table(rows: list[dict], cols: list[str]) -> str:
 
 def write_markdown(path: str, rows: list[dict], agg: list[dict], per_app: list[dict], segments: list[dict],
                    plots_dir: str | None = None, per_proc: list[dict] | None = None,
-                   main_cols: list[str] | None = None) -> None:
+                   main_cols: list[str] | None = None, squeeze_apps: list[dict] | None = None) -> None:
     n_lost = sum(r.get("state_lost_events") or 0 for r in rows)
     n_oom = sum(r.get("oom_kills") or 0 for r in rows)
     n_cold = sum(r.get("n_cold") or 0 for r in rows)
@@ -65,6 +65,13 @@ def write_markdown(path: str, rows: list[dict], agg: list[dict], per_app: list[d
         out += ["\n## Day traces: per-scenario segments\n", md_table(segments, list(segments[0].keys()))]
     if per_app:
         out += ["\n## Per app\n", md_table(per_app, PER_APP_COLS)]
+    if squeeze_apps:
+        out += ["\n## Per app: active footprint, background resident, CPU, swap traffic, switch-back\n",
+                md_table(squeeze_apps, SQUEEZE_APP_COLS),
+                "\n_m_fg = warmup PSS+Swap (active footprint); bg_resid = resident PSS at the end of the dwells spent "
+                "in the background; bg_cpu_pct_core = CPU it got there as % of one core (cap = 100 x cpu_cores); "
+                "bg_reclaim = pages the kernel took from its cgroup per minute (pgsteal), bg_swapin = major faults "
+                "x 4 KB per minute; lat = switch-back time when it was requested (n_req)._\n"]
     if per_proc:
         out += ["\n## Per process (foreground vs background PSS)\n", md_table(per_proc, PER_PROC_COLS)]
         miss = [r for r in per_proc if (r.get("pss_fg_mb") or 0) >= 20 and r.get("squeeze_pct") is not None
@@ -80,12 +87,12 @@ def write_markdown(path: str, rows: list[dict], agg: list[dict], per_app: list[d
         pngs = sorted(f for f in os.listdir(plots_dir) if f.endswith(".png"))
         if pngs:
             out.append("\n## Figures\n")
-            for f in ("bg_tradeoff.png", "latency_cdf.png", "pareto.png"):
+            for f in ("squeeze_apps.png", "bg_tradeoff.png", "latency_cdf.png", "pareto.png"):
                 if f in pngs:
                     out.append(f"![{f}]({rel}/{f})\n")
             out.append("\nper run:\n")
             for f in pngs:
-                if f not in ("bg_tradeoff.png", "latency_cdf.png", "pareto.png"):
+                if f not in ("squeeze_apps.png", "bg_tradeoff.png", "latency_cdf.png", "pareto.png"):
                     out.append(f"- [{f}]({rel}/{f})\n")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(out))

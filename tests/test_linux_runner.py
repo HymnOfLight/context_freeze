@@ -528,11 +528,28 @@ def test_squeeze_profile_reclaims_below_memory_high_and_repeats_during_the_dwell
     rn = summarize(load(pn))
     assert rn["bg_squeeze_pct"] is not None and rn["bg_squeeze_pct"] < 5 and rn["quiet_bg_reclaim_mb_per_min"] == 0
     assert all(r["squeeze_pct"] is None or r["squeeze_pct"] < 5 for r in per_process_rows(load(pn)))
-    # CLI: squeeze columns, per-process CSV, Markdown section
-    analyze_main([path, pn, "--per-proc", str(tmp_path / "pp.csv"), "--md", str(tmp_path / "sq.md")])
+    # per-app squeeze figures: active footprint, background resident, CPU % of a core, swap traffic, latency
+    from cf.linux.analyze import squeeze_app_rows, SQUEEZE_APP_COLS
+    sa = squeeze_app_rows(load(path))
+    assert [r["app"] for r in sa] == APPS and all(set(SQUEEZE_APP_COLS) <= set(r) for r in sa)
+    assert all(5 <= r["bg_pct_of_m_fg"] <= 30 and r["bg_resid_mb"] < r["m_fg_mb"] for r in sa)
+    assert all(r["bg_cpu_pct_core"] is not None and r["bg_cpu_pct_core"] <= 10.5 for r in sa)   # cpu_cores 0.1
+    assert all(r["bg_reclaim_mb_per_min"] > 0 and r["bg_swapin_mb_per_min"] >= 0 for r in sa)
+    assert any(r["n_req"] and r["lat_p95_ms"] for r in sa)
+    san = squeeze_app_rows(load(pn))
+    assert all(r["bg_pct_of_m_fg"] > 60 and r["bg_reclaim_mb_per_min"] == 0 for r in san)
+    # CLI: squeeze columns, per-process + per-app CSVs, Markdown sections, figure
+    analyze_main([path, pn, "--per-proc", str(tmp_path / "pp.csv"), "--squeeze-apps", str(tmp_path / "sa.csv"),
+                  "--md", str(tmp_path / "sq.md")])
     assert (tmp_path / "pp.csv").read_text().splitlines()[0] == ",".join(PER_PROC_COLS)
+    assert (tmp_path / "sa.csv").read_text().splitlines()[0] == ",".join(SQUEEZE_APP_COLS)
     md = (tmp_path / "sq.md").read_text()
-    assert "## Per process" in md and "bg_squeeze_pct" in md and all(c in md for c in SQUEEZE_COLS[:3])
+    assert "## Per process" in md and "## Per app: active footprint" in md and "bg_squeeze_pct" in md
+    assert all(c in md for c in SQUEEZE_COLS[:3])
+    if pytest.importorskip("matplotlib", reason="no matplotlib"):
+        from cf.linux.plots import plot_squeeze_apps
+        assert plot_squeeze_apps([load(path), load(pn)], str(tmp_path / "sa.png")) and (tmp_path / "sa.png").stat().st_size > 1000
+        assert not plot_squeeze_apps([load(pn)] if False else [], str(tmp_path / "none.png"))
 
 
 def test_squeeze_off_keeps_the_single_reclaim_and_no_per_process_payload(tmp_path):

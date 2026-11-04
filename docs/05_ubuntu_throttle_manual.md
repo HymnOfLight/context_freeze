@@ -659,7 +659,7 @@ scripts/ubuntu/run_squeeze.sh                      # none 基线 + squeeze 激�
 CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # 只跑两格;  T=20 DWELL=240 更长的静默窗;  SEEDS="1 2" 复本;  ONBOARD=1 先过登录向导;  DRY=1 只打印命令
 ```
 
-配置 `configs/ubuntu_arm64_squeeze.json`; 输出除常规文件外多一个 `per_process.csv`, `report.md` 多一节 "Per process"。新指标 (都只看 `per_process` 的跑法, `--all-cols` 可见):
+配置 `configs/ubuntu_arm64_squeeze.json`; 输出除常规文件外多 `squeeze_apps.csv` + `plots/squeeze_apps.png` (每个应用一组柱: 活跃足迹 m_fg vs 后台驻留、驻留占 m_fg 的 %、后台拿到的单核 CPU %、后台每分钟回收 / 页回的量、切回延迟 P50/P95; `--squeeze-apps`) 和 `per_process.csv`, `report.md` 多 "Per app (squeeze)" 与 "Per process" 两节。新指标 (都只看 `per_process` 的跑法, `--all-cols` 可见):
 
 | 列 | 含义 |
 |---|---|
@@ -936,9 +936,9 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `python3 run_linux.py CONFIG --policy … --eta … --T … --scenario … [--work] [--resume FILE]` | 单格实验 | 一次实验 → `results/<name>.jsonl` (+ `.log`, `.ckpt`); Ctrl+C 安全, `--resume` 续跑 |
 | `cf/linux/work.py` (`WorkDriver`: `X11WorkDriver` + `AdbWorkDriver`) | `--work` 内部 | 每类应用的默认脚本 (打草稿 / 滚动 / 缩放 / 上滑) 与内容 oracle (clipboard / title / screen / statefile / ui), 比较规则; `work_overrides` 按 id 覆盖 |
 | `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / WORK (+ WORK_S) / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
-| `scripts/ubuntu/run_squeeze.sh` + `CELLS= T= DWELL= SEEDS= ONBOARD= DRY= OUT=` | 实验性 | §6.8: office 5 应用, none / squeeze (激进: cpuset+10 % 带宽+weight 1, memory.high 10 %, memory.reclaim 整个 cgroup ×3 并每 30 s 重复) / mild 三格, 长停留, 按进程统计 + 静默期换出速率; 出 `per_process.csv` |
+| `scripts/ubuntu/run_squeeze.sh` + `CELLS= T= DWELL= SEEDS= ONBOARD= SWAPPINESS= STRICT= DRY= OUT=` | 实验性 | §6.8: office 5 应用, none / squeeze (激进: cpuset+10 % 带宽+weight 1, memory.high 10 %, memory.reclaim 整个 cgroup ×3 并周期重复) / mild 三格, 长停留, 按进程统计 + 静默期换出速率; 出 `squeeze_apps.csv` / `plots/squeeze_apps.png` / `per_process.csv` |
 | `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= ONBOARD= PLACEHOLDERS= WORK= WORK_S= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → (`ONBOARD=1`: 登录向导 + `--check`, 不全就绪即停) → probe / catalog / mobile (/ work_plan) 快照 → 冒烟 (检查 state_lost / oom / COLD / work_fail = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
-| `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--per-proc] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / 每进程表 (`per_process` 的跑法) / Pareto 点 / 图 / Markdown 报告 |
+| `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--per-proc] [--squeeze-apps] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / 每进程表 / 每应用 squeeze 五项表 (`per_process` 的跑法) / Pareto 点 / 图 / Markdown 报告 |
 | `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |
 | `python3 -m cf.linux.placeholder_app --app ID --title T [--cpu f --mem MB --io-mbps n --notify-every s --workers k]` | 冒烟 / 占位 | 内置 X11 占位程序: 可控的 CPU / 内存 / 写盘 / 通知负载, 状态写到 `/tmp/cf_placeholder_<id>.json` |
 | `configs/ubuntu_cn_desktop.json` | 主配置 | 13 个应用、`substitute_kinds` / `mobile`、限流档位、轨迹、`dwell_s` 范围、`sample_every_s`、`placeholder_fill`、`work` / `work_s` / `work_overrides` |
