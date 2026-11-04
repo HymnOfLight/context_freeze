@@ -665,7 +665,8 @@ CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # 只跑两格;  T=20 DWELL=
 |---|---|
 | `fg_pss_avg_mb` | 前台应用在自己那步停留结束时的 PSS (各步平均) |
 | `bg_pss_quiet_avg_mb` | 停留结束时其它应用的 PSS 之和 (各步平均): 挤完后后台实际还驻留多少 |
-| `bg_squeeze_pct` | 1 − 后台应用现在的 PSS / 它们各自上一次在前台时的 PSS → 被挤掉的比例; `none` 应接近 0 |
+| `bg_squeeze_pct` | 1 − 后台应用现在的 PSS / 它们各自上一次在前台时的 PSS → 被挤掉的比例; `none` 应接近 0。注意参照本身会变: 被挤过的应用切回前台只页入它碰到的部分 (前台 PSS 也减半), 所以跨格比较用下一列 |
+| `bg_pct_of_m_fg` | 后台应用的驻留 PSS / 它们的 m_fg (warmup 时 PSS+Swap, 整个 sweep 固定) → "后台只剩活跃时的 x %" 的那个数; 目标 10 % 看这一列 |
 | `quiet_swap_out_mb_per_min` | 静默期内全系统 `pswpout` 折算的每分钟换出量 (zram 写入速率) |
 | `quiet_bg_reclaim_mb_per_min` | 静默期内后台 cgroup `memory.stat pgsteal` 增量: 内核每分钟从它们回收了多少页 (匿名页换出 + 文件页丢弃) |
 | `quiet_bg_swap_growth_mb_per_min` | 静默期内后台 cgroup `memory.swap.current` 的增量: 稳定状态下还在持续换出 = 后台应用还在醒着碰内存 |

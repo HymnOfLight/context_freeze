@@ -703,7 +703,8 @@ class ThrottleExperiment(Experiment):
                 break
             time.sleep(max(0.0, nxt - time.time()))
             squeezed = {}
-            if sq_every > 0 and time.time() - last_sq >= sq_every - 0.01:
+            # samples run a little late, so compare against half a sample interval, not the exact period
+            if sq_every > 0 and time.time() - last_sq >= sq_every - every / 2:
                 for app in sorted(self.shrunk):
                     if app != req and hasattr(self.dev, "squeeze"):
                         r = self.dev.squeeze(app)

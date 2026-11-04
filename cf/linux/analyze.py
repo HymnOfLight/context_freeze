@@ -19,6 +19,8 @@ keys - plus the throttling-specific metrics:
                                             squeezed pages still cost; zram_phys_avg_mb = its level)
   bg_squeeze_pct                            1 - PSS of the background apps at the end of the quiet window /
                                             their PSS when they were last in the foreground (per-process cfg)
+  bg_pct_of_m_fg                            resident PSS of the background apps / their m_fg (warmup PSS+Swap,
+                                            fixed across the cells) - the "x % of the active footprint" figure
   --per-proc                                per-process table: PSS in the foreground vs in the background
 
     python3 -m cf.linux.analyze results/ubuntu_matrix/*.jsonl --csv summary.csv --agg agg.csv --plot pareto.png
@@ -37,7 +39,7 @@ EXTRA_AGG_COLS = ["activate_p50_ms", "ping_p50_ms", "ping_p95_ms", "ping_p99_ms"
                   "notif_total", "notif_per_h", "compute_cpu_s", "state_lost_events", "oom_kills",
                   "psi_cpu_some_ms", "n_ping_timeout", "n_resident_avg", "work_checks", "work_fail",
                   "quiet_swap_out_mb_per_min", "quiet_bg_reclaim_mb_per_min", "quiet_bg_swap_growth_mb_per_min",
-                  "quiet_zram_growth_mb_per_min", "bg_squeeze_pct", "bg_pss_quiet_avg_mb"]
+                  "quiet_zram_growth_mb_per_min", "bg_squeeze_pct", "bg_pct_of_m_fg", "bg_pss_quiet_avg_mb"]
 
 MAIN_COLS = ["policy", "scenario", "eta", "seed", "cpu", "mem_frac", "T", "budget_mb", "bg_pss_avg_mb",
              "bg_pss_peak_mb", "swap_write_mb", "lat_p50_ms", "lat_p95_ms", "ping_p95_ms", "n_cold",
@@ -47,7 +49,7 @@ MAIN_COLS = ["policy", "scenario", "eta", "seed", "cpu", "mem_frac", "T", "budge
 
 # shown instead of MAIN_COLS when the run was recorded with cfg per_process (the squeeze experiment)
 SQUEEZE_COLS = ["policy", "scenario", "eta", "seed", "cpu", "mem_frac", "T", "fg_pss_avg_mb", "bg_pss_quiet_avg_mb",
-                "bg_squeeze_pct", "quiet_swap_out_mb_per_min", "quiet_bg_reclaim_mb_per_min",
+                "bg_squeeze_pct", "bg_pct_of_m_fg", "quiet_swap_out_mb_per_min", "quiet_bg_reclaim_mb_per_min",
                 "quiet_bg_swap_growth_mb_per_min", "quiet_zram_growth_mb_per_min", "zram_phys_avg_mb", "quiet_s",
                 "swap_write_mb", "lat_p50_ms", "lat_p95_ms",
                 "ping_p95_ms", "n_cold", "bg_cores_avg", "bg_throttled_pct", "state_lost_events", "oom_kills",
@@ -228,7 +230,8 @@ def quiet_metrics(run: dict) -> dict:
     # the warmup sample (every app launched and left in front of the others) stands in
     fg_last_pss: dict[str, float] = {w["pkg"]: w["app"]["pss_kb"] for w in run.get("warmup") or []
                                      if (w.get("app") or {}).get("pss_kb")}
-    squeeze, bg_quiet, fg_pss = [], [], []
+    squeeze, bg_quiet, fg_pss, of_mfg = [], [], [], []
+    m_fg = (run.get("budget") or {}).get("m_fg_kb") or {}
     for s in steps:
         req = s["req"]
         qs = _quiet_samples(s, quiet_after)
@@ -254,6 +257,9 @@ def quiet_metrics(run: dict) -> dict:
             fg_pss.append(apps2[req]["pss_kb"] / 1024)
         bg_now = {app: d.get("pss_kb") or 0 for app, d in apps2.items() if app != req and app not in never}
         bg_quiet.append(sum(bg_now.values()) / 1024)
+        den = sum(m_fg.get(app) or 0 for app in bg_now)
+        if den > 0:
+            of_mfg.append(sum(bg_now[app] for app in bg_now if m_fg.get(app)) / den)
         ref = {app: fg_last_pss[app] for app in bg_now if app in fg_last_pss}
         if ref and sum(ref.values()) > 0:
             squeeze.append(1 - sum(bg_now[app] for app in ref) / sum(ref.values()))
@@ -267,7 +273,10 @@ def quiet_metrics(run: dict) -> dict:
             "quiet_zram_growth_mb_per_min": round(zr_growth / mins, 2) if mins else None,
             "fg_pss_avg_mb": round(sum(fg_pss) / len(fg_pss)) if fg_pss else None,
             "bg_pss_quiet_avg_mb": round(sum(bg_quiet) / len(bg_quiet)) if bg_quiet else None,
-            "bg_squeeze_pct": round(100 * sum(squeeze) / len(squeeze), 1) if squeeze else None}
+            "bg_squeeze_pct": round(100 * sum(squeeze) / len(squeeze), 1) if squeeze else None,
+            # resident PSS of the background apps / their m_fg (warmup PSS+Swap, the same denominator in
+            # every cell of a run_squeeze.sh sweep) - the "10 % of the active footprint" number
+            "bg_pct_of_m_fg": round(100 * sum(of_mfg) / len(of_mfg), 1) if of_mfg else None}
 
 
 def per_process_rows(run: dict) -> list[dict]:
