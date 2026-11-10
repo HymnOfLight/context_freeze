@@ -690,6 +690,54 @@ CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # 只跑两格;  T=20 DWELL=
 7. 不能靠 `memory.max` 再逼: 它能把驻留压死在 10 %, 但 10 % 装不下时内核只能 OOM kill —— 丢状态, 与实验的不变量冲突; `memory.high` + 反复 `memory.reclaim` 已经是不杀进程前提下最激进的组合。
 预期: 激进档下后台应用很慢 (切回时 `lat_p95` / `ping_p95` 明显变大, 可能几秒), `swap_write_mb` 大, 但 `state_lost` / `work_fail` 仍应为 0 (没有 `memory.max`, 不会被杀); 如果 `quiet_bg_swap_growth_mb_per_min` 长期 > 0, 说明这个应用在后台一直在碰工作集, 静态上限只是在反复换入换出 (对比 `mild` 格的数字)。
 
+### 6.9 三类应用实验: 呼叫与切换 / 计算型 / 下载型 (`scripts/ubuntu/run_classes.sh`)
+
+一次短跑 (每格约 9 分钟) 同时回答三个问题 —— 把后台应用的资源压下去, 三类应用各付出什么代价:
+
+| 类别 | 应用 | 比什么 | 指标 |
+|---|---|---|---|
+| ① 呼叫 / 切换 (交互型) | 微信、QQ、WPS、Firefox (真实应用, 已登录) | 不限制时被呼叫多久响应 vs 被压制过以后多久响应; 切回后是否顺滑 | **响应** = 窗口激活 + 事件循环第一次应答 (P50 / P95 / 最大); **顺滑** = 切回后 1 s 内连续 5 次 `_NET_WM_PING` 的应答 (P95 / 最大, 超过 100 ms 记一次卡顿) + **输入回读** (全选 + 复制到剪贴板拿到文本的时间, 微信这类不应答 ping 的应用靠它); 内容核对 `work_fail` |
+| ② 计算型 | `bench_numeric` 科学计算 (LU 分解求解 + FFT + n 体积分, 一个工作进程, 每个任务约 0.2 s); `bench_compress` 压缩解压 (zlib -6 压 8 MB 再解压校验, 两个工作进程) | 同一个任务在前台做 vs 在后台做 | **单任务时延** P50 / P95, **每分钟任务数**, 后台 / 前台倍数, 后台做完 100 个任务要多少秒, 任务内 CPU 占比 (低 = 在等配额 / 等缺页) |
+| ③ 下载型 | `bench_download` (HTTP Range 分片下载, 每片 sha256 后写盘) | 在前台下 vs 在后台下 | **下载速度** MB/s (均值 / 最慢 10 %), **建连时延** (TCP connect 往返, 到下载源和到外网各一份), **处理延迟** (包到了以后应用等多久才轮到 CPU) |
+
+三个基准程序是仓库自带的 (`cf/linux/bench_app.py`, 应用目录里 kind = `bench`): 一个 X11 窗口 + 工作进程, 不停做同一个固定任务, 每个任务的墙钟 / CPU 时间写进 `/tmp/cf_bench_<id>.jsonl`, runner 每步把新增的记录抄进 step 记录 (`step["bench"]`)。任务自带结果校验 (LU 残差、FFT 往返误差、能量漂移、CRC), 所以 "算得慢" 和 "算错" 分得开。不用装 CAD, 不用账号。
+
+**三格** (同一份配置 `configs/ubuntu_arm64_classes.json`, 走完全相同的访问顺序):
+
+| 格 | 后台应用的限制 |
+|---|---|
+| `none` | 不限制 —— 基准, 表里 "相对不限制" 的列都以它为分母 |
+| `mild` | 1 核 `cpu.max` 配额 + `cpu.weight` 20, `memory.high` = 0.5 × m_fg, 回收一次 (夜间矩阵的档位) |
+| `squeeze` | 全部后台应用钉在最后一个核, `cpu.max` = 该核的 10 %, `cpu.weight` 1, `memory.high` = 0.1 × m_fg, 切走时 `memory.reclaim` × 3 (§6.8 的激进档, 但不做周期性再回收) |
+
+**访问顺序** (trace kind `pattern`, 不是随机轨迹, 所以短跑也可比): 每轮 11 步 `微信 → 科学计算 → WPS → 下载 → Firefox → 压缩解压 → QQ → 微信 → WPS → Firefox → QQ`, 默认 2 轮 = 22 步, 每步停留 15 s。每个交互应用每轮被呼叫 2 次 (两次之间在后台待 1–2 分钟); 每个基准应用每轮在前台 1 步、在后台 10 步 —— 前台 / 后台两种位置的任务时延都有足够样本。
+
+```bash
+scripts/ubuntu/run_classes.sh                        # none + mild + squeeze, 约 27 分钟; 结果在 results/arm64_classes
+CELLS="none squeeze" scripts/ubuntu/run_classes.sh    # 只要 "不限制 vs 压制" 两格, 约 18 分钟
+ROUNDS=3 DWELL=20 scripts/ubuntu/run_classes.sh       # 每个应用多呼叫几次 / 后台段更长 (时间按比例增加)
+ONBOARD=1 scripts/ubuntu/run_classes.sh               # 先过一遍 4 个交互应用的登录向导
+DL_URL=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.5-desktop-amd64.iso scripts/ubuntu/run_classes.sh
+                                                      # 改成下载一个真实的大文件 (要支持 Range); 默认用本机限速源
+DL_RATE_MBPS=10 RTT_HOST=223.5.5.5:443 scripts/ubuntu/run_classes.sh   # 本机源的限速 (默认 20 MB/s ≈ 160 Mbit/s 宽带); 外网时延探测的目标 (默认 www.baidu.com:443, 设成空串则不测)
+python3 -m cf.linux.classes results/arm64_classes/*.jsonl --out results/arm64_classes   # 只重新出表 / 出图, 不重跑
+```
+
+**上机时间**: 预热 7 个应用约 1.5 分钟 + 22 步 × (停留 15 s + 切换 / 探测 / 内容核对约 5 s) ≈ **9 分钟一格**; 三格约 27 分钟, 两格约 18 分钟。中断后同一条命令续跑, 已完成的格跳过。
+
+**下载源**: 默认由脚本在本机起一个限速的 HTTP 源 (`python3 -m cf.linux.bench_app --serve 18080 --rate-mbps 20`, 跑在脚本自己的 `/cf/host` 里, 不受限制), 速度上限固定、不依赖外网, 三格之间可比; 这时 "到下载源" 的建连时延是回环 (≈ 0.1 ms), 真实网络的往返时延看 "外网时延" 那两列 (`RTT_HOST`)。想量真实下载就给 `DL_URL=`, 但速度会随网络波动, 最好 `SEEDS="1 2"` 多跑一遍。下载的数据循环写进 `/tmp` 下一个 256 MB 的临时文件 (退出时删除), 20 MB/s 时每格累计写约 10 GB。
+
+**输出** (`$OUT/`): `classes_report.md` (三张表, 直接可读), `classes_tables.xlsx` (三个 sheet + 说明, 中文表头), `classes_interactive.csv` / `classes_compute.csv` / `classes_download.csv` (完整的列), `plots/classes.png` (3 行 × 2 列: 响应时间 / 顺滑度, 单任务时延 / 每分钟任务数, 下载速度 / 网络时延), `plots/<run>_bench.png` (每个基准应用随时间的单任务时延 / 下载速度, 绿色底 = 它在前台), 以及通常的 `summary.csv` 和每格的 jsonl / log。运行时每步的日志行末尾也有 `| bench numeric 58 jobs 262 ms, download 19.9 MB/s rtt 0.1 ms`。
+
+**怎么读**:
+
+- ① 里 "响应" 是在限制**已经解除之后**量的 (runner 先把被请求的应用提回 fg 档再激活窗口), 所以它回答的是 "被压过的应用醒过来要多久" —— 被换出的页要缺页换回, 正卡在 `memory.high` 惩罚性休眠里的线程要等休眠结束。`n_limited` 是其中有几次是从受限的后台切回的; 第 0 步 (预热后的第一次切换, 那时还没有任何应用被限制) 和冷启动不计入。
+- ② 里前台列在各格应该基本相同 (前台不受限), 它是这个任务本来的速度; 后台列除以前台列就是限制的代价。`squeeze` 下 CPU 配额是单核的 10 %, 所以科学计算的后台单任务时延的理论值就是前台的约 10 倍 —— 明显高于 10 倍的部分来自 `cpu.weight 1` (前台应用恰好也在用最后那个核时, 后台几乎拿不到时间片) 和 `memory.high` (工作集装不下时反复缺页); 压缩解压有两个工作进程和 32 MB 的输入缓冲, 对这两点都更敏感。P95 远大于 P50 就是这种 "偶尔被饿住" 的任务。
+- ③ 里**建连时延** (网络本身) 在各格几乎不变 —— cgroup 限制不改变链路; 变的是**下载速度** (收包、校验、写盘都要 CPU, 页缓存也记在 `memory.high` 里) 和**处理延迟** (`cpu.max` 10 ms / 100 ms 时, 一个包最多要等约 90 ms 应用才被调度到)。应用实际感受到的网络时延 = 建连时延 + 处理延迟。
+- 判读用的三个不变量仍然是: `state_lost` 为空、`work_fail` = 0、`n_cold` = 0 (被压制只是慢, 不能丢状态); 基准程序的 `bad_jobs` (结果校验失败) 也应为 0。
+
+**跑之前**: 同 §6.8 的第 1–5 条 —— 4 个交互应用已登录且 `python3 run_linux.py configs/ubuntu_arm64_classes.json --onboard-check` 全部 ready (或 `ONBOARD=1`); 退出实验之外的应用 (脚本会检查 `/cf` 下还有谁在跑, `STRICT=0` 可跳过); zram 用量过半先重置; 不能和别的矩阵同时跑; 跑的时候不要碰虚拟机。基准程序由 runner 自己启动, 脚本结束时会把它们和本机下载源一起停掉。没装某个交互应用时可以 `EXTRA="--placeholders"` 先用占位程序顶替着把流程跑通。
+
 ### 6.7 日常使用: `focusd`
 
 实验 runner 自己驱动窗口切换; 想在平时使用虚拟机时也享受 "切走就限流", 开一个守护进程:
@@ -916,6 +964,8 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 有 Xvfb + xfwm4/openbox + xdotool 时自动加跑一次真实窗口 发现 -> 激活 -> _NET_WM_PING 往返,
                                                    # 以及占位窗口上的 title / statefile / screen oracle; 再有 mousepad + xclip 时跑一次 edit -> clipboard 往返
                                                    # /sys/fs/cgroup/cf 已委托给当前用户时自动加跑一次真实 cgroup 的档位读写
+                                                   # 三类应用实验 (§6.9): 基准任务自校验 / 任务日志增量读取 / 本机下载源 + 下载 + 建连探测 /
+                                                   # pattern 轨迹 / 伪桌面上的 bench 记录、顺滑探测、前后台区间与三张表、CLI 出表出图
 ```
 
 ## 12. 脚本与文件清单
@@ -939,6 +989,9 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `cf/linux/work.py` (`WorkDriver`: `X11WorkDriver` + `AdbWorkDriver`) | `--work` 内部 | 每类应用的默认脚本 (打草稿 / 滚动 / 缩放 / 上滑) 与内容 oracle (clipboard / title / screen / statefile / ui), 比较规则; `work_overrides` 按 id 覆盖 |
 | `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / WORK (+ WORK_S) / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
 | `scripts/ubuntu/run_squeeze.sh` + `CELLS= T= DWELL= SEEDS= SAMPLE= ONBOARD= SWAPPINESS= STRICT= DRY= OUT=` | 实验性 | §6.8: office 5 应用, none / squeeze (激进: cpuset+10 % 带宽+weight 1, memory.high 10 %, memory.reclaim 整个 cgroup ×3 并周期重复) / mild 三格 (+ 可选 `squeeze1`: 不周期重挤, 配 `SAMPLE=2` 看换出 / 换入收敛曲线), 长停留, 按进程统计 + 静默期换出速率; 出 `squeeze_apps.csv` / `plots/squeeze_apps.png` / `plots/<run>_swapflow.png` / `per_process.csv` |
+| `scripts/ubuntu/run_classes.sh` + `CELLS= ROUNDS= DWELL= SEEDS= DL_URL= DL_RATE_MBPS= RTT_HOST= ONBOARD= EXTRA= SWAPPINESS= STRICT= DRY= OUT=` | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (`bench_numeric` / `bench_compress`: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 1 个 (`bench_download`: 下载速度、建连时延、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 9 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png` |
+| `python3 -m cf.linux.classes FILES… --out DIR [--no-plots]` | 分析 | §6.9 的三张表 (CSV / Markdown / Excel) 和图; 不重跑实验 |
+| `python3 -m cf.linux.bench_app --app ID --kind numeric\|compress\|download [--workers k --scale f --url U --rtt-host H:P]` / `--serve PORT --rate-mbps n` / `--check-url U` | §6.9 内部 | 内置基准程序: X11 窗口 + 工作进程循环做固定任务, 每个任务的时延写到 `/tmp/cf_bench_<id>.jsonl`; `--serve` 是本机限速下载源 |
 | `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= ONBOARD= PLACEHOLDERS= WORK= WORK_S= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → (`ONBOARD=1`: 登录向导 + `--check`, 不全就绪即停) → probe / catalog / mobile (/ work_plan) 快照 → 冒烟 (检查 state_lost / oom / COLD / work_fail = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
 | `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--per-proc] [--squeeze-apps] [--xlsx] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / 每进程表 / 每应用 squeeze 五项表 / Excel 工作簿 (`per_process` 的跑法) / Pareto 点 / 图 / Markdown 报告 |
 | `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |

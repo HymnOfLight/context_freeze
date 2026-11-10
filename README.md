@@ -15,11 +15,11 @@
 ├── docs/05_ubuntu_throttle_manual.md  # Ubuntu 22.04 虚拟机版 (不冻结, 切走后限 1 核 / memory.high / swap) 的运行与配置手册
 ├── scripts/                        # setup_avd / start_emulator / resize_data / prepare_device / install_cn_apps / first_run_cn_apps / run_matrix
 ├── scripts/mac/download_cn_apps.sh  # 在 Mac 上批量下载各应用的 Ubuntu deb (解析厂商页面 / 接口 / 签名链接), 跳过已有 / 删架构不符的, --scp --install 一键装进虚拟机
-├── scripts/ubuntu/                 # Ubuntu 版: setup_cgroups (cgroup v2 委托) / cf_enter / setup_zram / install_deps / install_cn_apps / setup_waydroid / install_mobile_apps / cf_launch / cf_onboard (统一账号登录向导) / check_env / run_matrix / run_all / run_squeeze (实验性: 按进程统计 + 激进挤压)
+├── scripts/ubuntu/                 # Ubuntu 版: setup_cgroups (cgroup v2 委托) / cf_enter / setup_zram / install_deps / install_cn_apps / setup_waydroid / install_mobile_apps / cf_launch / cf_onboard (统一账号登录向导) / check_env / run_matrix / run_all / run_squeeze (实验性: 按进程统计 + 激进挤压) / run_classes (三类应用: 响应 / 计算 / 下载)
 ├── configs/                        # 实验配置 (JSON): emulator_base (Google 应用) / cn_apps (国产应用 + 场景) / ubuntu_cn_desktop, ubuntu_no_login (不注册账号: 微信/QQ/钉钉/网盘用占位), ubuntu_arm64 (arm64 虚拟机实装的 13 个应用), ubuntu_placeholders (Ubuntu 版)
 ├── cf/                             # Python 包
 │   ├── adb.py, device.py, parsers.py   # adb 封装; cgroup freezer / memcg 回收 / zram / tmpfs 气球; /proc 解析
-│   ├── trace.py                        # 请求序列 σ 生成 (zipf / markov / drift / replay / scenario / day)
+│   ├── trace.py                        # 请求序列 σ 生成 (zipf / markov / drift / replay / scenario / day / pattern)
 │   ├── scenarios.py                    # 国产应用目录 + 使用场景 (办公 / 刷社交媒体 / 通勤 / 购物 / 晚间娱乐 / 一天)
 │   ├── policies.py                     # none / lru / lfu / landlord / markov / hybrid / belady
 │   ├── runner.py                       # 真机(模拟器)实验循环 -> results/*.jsonl (+ .log, 每步 .ckpt 断点)
@@ -59,6 +59,7 @@ scripts/ubuntu/cf_onboard.sh --check && python3 run_linux.py configs/ubuntu_cn_d
 python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 60
 CONFIG=configs/ubuntu_no_login.json PRESET=night WORK=1 scripts/ubuntu/run_all.sh   # 一个账号都不注册先出数据: 需登录的应用用占位顶替 (placeholder_apps), 其余真跑
 CONFIG=configs/ubuntu_arm64.json ONBOARD=1 PRESET=night WORK=1 scripts/ubuntu/run_all.sh   # arm64 虚拟机实装集合 (微信/QQ/钉钉/腾讯会议/网盘/迅雷/爱奇艺/哔哩哔哩/网易云/Firefox/WPS/中望/石墨), 五场景含 media 娱乐
+scripts/ubuntu/run_classes.sh                                            # 三类应用 (手册 §6.9, 约 9 分钟一格): 交互应用的呼叫 / 切换响应与顺滑度, 计算型 (科学计算 / 压缩解压基准) 前台 vs 后台的任务时延, 下载型的速度与网络时延; none / mild / squeeze 三格
 scripts/ubuntu/run_squeeze.sh                                            # 实验性 (手册 §6.8): office 5 应用、3 格, 按进程统计前/后台 PSS, 激进挤压 (memory.reclaim 整个 cgroup, 10 % 核带宽), 静默期每分钟换出量
 NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40  # 场景 x 策略 x η x 变体 (CPU 档位 / cpuset / swap 上限 / memory.max 对照); FULL=1 全量; PLACEHOLDERS=1 没装的用占位顶替
 WORK=1 NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40   # 每格加 --work: 脚本代替人工点击 (打草稿 / 滚页 / 上滑), 切回时核对内容 -> work_state_ok / work_fail
