@@ -127,23 +127,10 @@ class Worker(threading.Thread):
                 "pid": os.getpid(), "ts": time.time()}
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--app", default="sim_compute", help="catalogue id; WM_CLASS becomes cf-<app>")
-    ap.add_argument("--title", default=None)
-    ap.add_argument("--cpu", type=float, default=0.5, help="busy fraction of one core per worker (0..1)")
-    ap.add_argument("--workers", type=int, default=1,
-                    help="CPU workers (1 thread + N-1 child processes); >1 lets the app exceed one core "
-                         "so a 1-core cpu.max quota really binds")
-    ap.add_argument("--mem", type=int, default=300, help="MB of anonymous memory kept resident")
-    ap.add_argument("--io-mbps", type=float, default=0.0, help="MB/s written to a temp file")
-    ap.add_argument("--notify-every", type=float, default=0.0, help="seconds between notify-send calls")
-    ap.add_argument("--state-file", default=None)
-    ap.add_argument("--geometry", default="520x240")
-    args = ap.parse_args(argv)
-    title = args.title or args.app
-    state_file = args.state_file or os.path.join(tempfile.gettempdir(), f"cf_placeholder_{args.app}.json")
-
+def window_loop(app: str, title: str, geometry: str, lines, state, state_file: str, on_exit=None) -> int:
+    """A plain X11 window (WM_CLASS "cf-<app>") that answers _NET_WM_PING, redraws `lines(pings)` and
+    writes `state()` to `state_file` once a second until it is closed.  Shared by the placeholder
+    and the benchmark apps (cf.linux.bench_app).  Returns 2 without python3-xlib."""
     try:
         from Xlib import X, Xutil, display
         from Xlib.protocol import event as xevent
@@ -153,7 +140,7 @@ def main(argv=None) -> int:
 
     d = display.Display()
     scr = d.screen()
-    w, h = (int(x) for x in args.geometry.split("x"))
+    w, h = (int(x) for x in geometry.split("x"))
     win = scr.root.create_window(60, 60, w, h, 1, scr.root_depth, X.InputOutput, X.CopyFromParent,
                                  background_pixel=scr.white_pixel,
                                  event_mask=X.ExposureMask | X.StructureNotifyMask | X.KeyPressMask)
@@ -165,30 +152,17 @@ def main(argv=None) -> int:
     # WM_NAME is a latin-1 STRING; the UTF-8 title goes to _NET_WM_NAME (what modern WMs show)
     win.change_property(d.intern_atom("_NET_WM_NAME"), d.intern_atom("UTF8_STRING"), 8, title.encode("utf-8"))
     win.set_wm_name(title.encode("latin-1", "replace").decode("latin-1"))
-    win.set_wm_class(f"cf-{args.app}", f"cf-{args.app}")
+    win.set_wm_class(f"cf-{app}", f"cf-{app}")
     win.set_wm_protocols([WM_DELETE, NET_WM_PING])
     win.change_property(NET_WM_PID, d.intern_atom("CARDINAL"), 32, [os.getpid()])
     win.set_wm_hints(flags=Xutil.StateHint, initial_state=Xutil.NormalState)
     win.map()
     d.flush()
-
-    worker = Worker(args.cpu, args.mem, args.io_mbps, args.notify_every, title, workers=args.workers)
-    worker.start()
     pings = 0
 
     def draw() -> None:
         win.clear_area(0, 0, 0, 0, 0)
-        st = worker.state()
-        lines = [f"{title}   (cf placeholder, pid {os.getpid()})",
-                 f"counter   {st['counter']}  (+{st['worker_counter']} in {st['workers'] - 1} child workers)"
-                 f"      elapsed {st['elapsed_s']} s",
-                 f"workload  cpu {args.cpu:.0%} x {args.workers} worker(s), mem {args.mem} MB"
-                 + (f", io {args.io_mbps:g} MB/s" if args.io_mbps else "")
-                 + (f", notify every {args.notify_every:g} s" if args.notify_every else ""),
-                 f"written   {st['bytes_written'] // 2 ** 20} MB    notifications {st['notifications']}"
-                 f"    pings answered {pings}",
-                 f"state     {state_file}"]
-        for i, text in enumerate(lines):
+        for i, text in enumerate(lines(pings)):
             win.draw_text(gc, 12, 24 + i * 20, text.encode("latin-1", "replace"))
         d.flush()
 
@@ -196,7 +170,7 @@ def main(argv=None) -> int:
         tmp = state_file + ".tmp"
         try:
             with open(tmp, "w") as f:
-                json.dump(worker.state(), f)
+                json.dump(state(), f)
             os.replace(tmp, state_file)
         except OSError:
             pass
@@ -229,13 +203,54 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        worker.stop.set()
+        if on_exit:
+            on_exit()
         write_state()
         try:
             d.close()
         except Exception:   # noqa: BLE001
             pass
     return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--app", default="sim_compute", help="catalogue id; WM_CLASS becomes cf-<app>")
+    ap.add_argument("--title", default=None)
+    ap.add_argument("--cpu", type=float, default=0.5, help="busy fraction of one core per worker (0..1)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="CPU workers (1 thread + N-1 child processes); >1 lets the app exceed one core "
+                         "so a 1-core cpu.max quota really binds")
+    ap.add_argument("--mem", type=int, default=300, help="MB of anonymous memory kept resident")
+    ap.add_argument("--io-mbps", type=float, default=0.0, help="MB/s written to a temp file")
+    ap.add_argument("--notify-every", type=float, default=0.0, help="seconds between notify-send calls")
+    ap.add_argument("--state-file", default=None)
+    ap.add_argument("--geometry", default="520x240")
+    args = ap.parse_args(argv)
+    title = args.title or args.app
+    state_file = args.state_file or os.path.join(tempfile.gettempdir(), f"cf_placeholder_{args.app}.json")
+    try:
+        import Xlib  # noqa: F401
+    except ImportError:
+        print("python3-xlib is required: sudo apt install python3-xlib", file=sys.stderr)
+        return 2
+
+    worker = Worker(args.cpu, args.mem, args.io_mbps, args.notify_every, title, workers=args.workers)
+    worker.start()
+
+    def lines(pings: int) -> list[str]:
+        st = worker.state()
+        return [f"{title}   (cf placeholder, pid {os.getpid()})",
+                f"counter   {st['counter']}  (+{st['worker_counter']} in {st['workers'] - 1} child workers)"
+                f"      elapsed {st['elapsed_s']} s",
+                f"workload  cpu {args.cpu:.0%} x {args.workers} worker(s), mem {args.mem} MB"
+                + (f", io {args.io_mbps:g} MB/s" if args.io_mbps else "")
+                + (f", notify every {args.notify_every:g} s" if args.notify_every else ""),
+                f"written   {st['bytes_written'] // 2 ** 20} MB    notifications {st['notifications']}"
+                f"    pings answered {pings}",
+                f"state     {state_file}"]
+
+    return window_loop(args.app, title, args.geometry, lines, worker.state, state_file, on_exit=worker.stop.set)
 
 
 if __name__ == "__main__":

@@ -496,7 +496,7 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 | `work not-active (focus was on 0x... 'xxx' [class])` / `oracle clipboard: not-active (...)` | 脚本发键前核对 `_NET_ACTIVE_WINDOW`: 焦点在**别的程序**的窗口上 (括号里是谁: 弹窗 / 对话框 / 桌面) - 切前台失败 (GNOME 焦点保护 / 模态对话框挡住) 或当时记的是已经消失的登录框。该应用自己的其他窗口 (QQ / 钉钉弹出的独立会话窗、WPS 重建的文档窗) 不算, 照常输入。发现焦点被抢时脚本会**夺回一次** (再 `activate` 该应用) 再输入 / 读 oracle, 日志记 `refocused`; 只有夺不回来才算 `not-active` | 关掉括号里那个窗口 (操作者的终端: 回车后别再点它), 重跑 `cf_onboard.sh <id>`; 还不行看 §10 "activate 失败" |
 | `prep skipped` | 准备那一步回答了 `s` - 常常不是故意的: 上一问 (如 "退出并重新启动?") 回车后脚本忙了 10-20 s, 这期间敲的键被下一问吃掉了 | 重跑 `cf_onboard.sh <id>`, 等提示出现再敲键 (现在每个提示前会丢弃提前敲的键) |
 | `oracle clipboard: xclip: ...` | 没装 xclip | `sudo apt install xclip` |
-| `oracle clipboard read nothing` | ctrl+a / ctrl+c 后剪贴板没有文本: 输入框没焦点, 或该应用复制出来的不是文本 | 在输入框 / 正文里点一下再重跑; WPS 确认光标在 blank.docx 正文而不是 "新建" 页 |
+| `oracle clipboard read nothing` / `clipboard-unchanged` | ctrl+a / ctrl+c 后剪贴板没有文本 (2 s 内应用没有交出选区): 输入框没焦点, 回到了登录页, 或该应用复制出来的不是文本 | 在输入框 / 正文里点一下再重跑; WPS 确认光标在 blank.docx 正文而不是 "新建" 页; 聊天软件确认还在登录状态 |
 | `oracle ... unstable` | 两次读到的内容不同 (有东西在自动变: 动画标题、输入法候选) | 换 oracle (`work_overrides`: `"oracle": "title"` / `"screen"`) |
 
 ## 5. 配置文件参考 (`configs/ubuntu_cn_desktop.json`)
@@ -523,9 +523,12 @@ arm64 包在 ACE 容器里缺 `libc_secshared.so` 启动即退, 由哔哩哔哩�
 | `throttle.swap_max_mb` | null | 单个 `shrunk` 应用的 `memory.swap.max`; `memory.high` + 很小的 swap 上限 = 应用几乎不能再分配内存, 只会变慢, 仍不会死 |
 | `throttle.io_weight` | null | 后台 `io.weight` (需要 io 控制器, 对下载类应用有用) |
 | `throttle.proactive_reclaim` | true | 降档时立即写 `memory.reclaim` (内核 ≥ 5.19) |
+| `throttle.squeeze_rounds` / `squeeze_every_s` | 0 / 0 | **实验性 "挤压"** (§6.8): 降到 `shrunk` 时连写 `squeeze_rounds` 次 `memory.reclaim = memory.current` (把整个 cgroup 能换出的都换到 zram、能丢的页缓存都丢掉, 不只是压到 `memory.high`), 停留期间每 `squeeze_every_s` 秒对所有 `shrunk` 应用再挤一次 (记到 `timeline[].squeeze`); 0 关闭。CLI `--squeeze N --squeeze-every S`。与 `thrash_high_per_s=0` 搭配时内核会一直回收它们 → swap 写入大, 后台应用很慢 |
+| `throttle.cpu_weight` | 20 | 后台应用的 `cpu.weight` (1–10000, 前台 100); `cpu_mode both` + `cpu_cores 0.1` + `cpu_weight 1` = 所有后台应用挤在最后一个核上、每个只有该核 10 % 的带宽、前台要用时几乎抢不到 (CLI `--cpu-weight`) |
 | `cpu_throttle_resident` | true | 预算内的后台应用也限 CPU (`bg`); false 则预算内的完全不受限, 策略只决定内存 |
 | `trace` | scenario office T=60 | `kind`: `scenario` (`office` 办公 / `design` 设计 / `download` 下载 / `chat` 消息 / `media` 娱乐: 抖音 / 爱奇艺 / 网易云 / B站) / `day` (五场景按 15/35/15/20/15 % 依次经历) / `zipf` / `markov`; 也可内联 `{"apps":{id:权重},"hub":id,"flows":[[...]]}`。场景里本机没装 (不在 `apps`) 的应用自动剔除, 只要剩 ≥ 2 个就能跑 |
 | `dwell_s` / `settle_s` / `warmup_dwell_s` | [5, 12] / 2 / 10 | 每步停留 / 切换后等待 / warmup 每应用停留 (秒)。`dwell_s` 给一个数 = 固定; 给 `[lo, hi]` = 每步按 seed 均匀抽样 (同一 seed 下各策略的每一步停留相同, 可直接对比); 每条 `step` 记录带 `dwell_s` |
+| `per_process` / `quiet_after_s` | false / 30 | **按进程统计** (§6.8): true (或 `--per-process`) 时 warmup / 每步 `after_launch` / `after_dwell` 的每个应用带 `procs` (每个进程的 pid / 名字 / PSS / 匿名 / 文件 / SwapPss / RSS), timeline 采样带 `procs: {pid: [pss_kb, swap_pss_kb, name]}`; `quiet_after_s`: 一次停留里从第几秒起算 "后台稳定静默期" (前台的脚本操作已做完, 后台应用只是待着), analyze 的 `quiet_*` 列只用这一段的采样 |
 | `sample_every_s` | 2.0 | > 0 时停留期间每隔这么多秒做一次轻量采样 (PSI cpu/mem/io、zram、MemAvailable、swap in/out、每应用 PSS / swap / cpu / 写盘 / 节流时间 / tier) → `step.timeline`, 画时间序列 (`--plots-dir` 的 `*_timeline.png`); 0 关闭 |
 | `placeholder_fill` | false | true (或 `--placeholders`): 没装上的应用用内置占位程序顶替, **id 不变**, 场景 / 轨迹不变 (`meta.placeholders` 列出); 在真实应用装齐之前就能跑完整矩阵, 之后同一命令重跑即用真实应用 |
 | `placeholder_apps` | `[]` | 这些 id 即使装了也用占位程序顶替 (没有账号的应用; §4.7); CLI `--placeholder-apps a,b` 追加 |
@@ -612,8 +615,8 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --release
 
 | 应用 | 默认脚本 (`kind`) | 默认 oracle | 说明 |
 |---|---|---|---|
-| 微信 / QQ / 钉钉 | `draft`: 往焦点输入框键入 `cf-work <id> t<step> 草稿未保存 ` | `clipboard`: ctrl+a ctrl+c 后剪贴板文本的长度 + md5 | 需要先手动点开一个会话让输入框有焦点 (登录时顺手做) |
-| WPS | `edit`: 键入同样一行 + 回车 | `clipboard` | 文档不保存; 回来时 ctrl+a 全选再 End 取消选区 |
+| 微信 / QQ / 钉钉 | `draft`: ctrl+a 后键入 `cf-work <id> t<step> 草稿未保存 ` (**替换**上一步的草稿, 不追加) | `clipboard`: ctrl+a ctrl+c 后剪贴板文本的长度 + md5 | 需要先手动点开一个会话让输入框有焦点 (登录时顺手做) |
+| WPS | `edit`: ctrl+a 后键入同样一行 + 回车 (替换正文) | `clipboard` | 文档不保存; 回来时 ctrl+a 全选再 End 取消选区 |
 | 浏览器 / 腾讯视频 / 哔哩哔哩 | `browse`: 滚轮下翻 `scroll` 格再回退 1/4 | `title`: `_NET_WM_NAME` (页面标题) | 像素会随视频变化, 所以只认标题; 页面被重载会换标题 / 回到顶部 |
 | 百度网盘 / 小艺 / 腾讯会议 | `none` | `title` | 下载本身在后台进行 (`write_mb` 已经度量); 会议只做常驻 |
 | 迅雷 / 爱奇艺 / 网易云音乐 | `browse`: 滚动任务列表 / 剧集页 / 歌单 (`scroll` 4 / 6 / 6) | `title` | 下载 / 播放在后台继续; 标题 = 任务数 / 剧名 / 歌名, 被重载才会变 |
@@ -637,10 +640,103 @@ python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy s
 `run_all.sh` 的冒烟检查把 `work_fail = 0` 和 `state_lost / oom / COLD = 0` 一起当作继续跑矩阵的前提。
 
 注意事项: (a) `clipboard` oracle 会覆盖系统剪贴板, 实验期间不要指望剪贴板里的东西; 不想碰剪贴板就 `work_overrides` 改成
-`"oracle": "screen"` 或 `"title"`。(b) `draft` 文本会越积越长 (每步追加一段), 60 步 ≈ 3 KB, 对输入框无压力; 想清空就在下一次登录时删掉。
+`"oracle": "screen"` 或 `"title"`。(b) `draft` / `edit` 每步先 ctrl+a 再键入, 文本只有一段 (~28 字节), 不会越积越长: 早期版本是追加的, 两晚后 QQ 的草稿到了 22 KB, Electron 输入框慢到 ctrl+c 端出来的还是**上一步**的文本 (剪贴板过期 → 连续假 `work_fail`), 最后 QQ 崩掉回到登录页。读 oracle 前现在会先在剪贴板放一个哨兵, 等应用真的交出选区再读 (最多 2 s); 到时还是哨兵 = 没有可复制的内容 (空输入框 / 登录页) → 记为空摘要, 与之前的草稿不一致 → `work_fail`, 这才是 "会话丢了" 的正确判定。
 (c) 只支持 X11 (XTEST / `get_image`); Wayland 下 `--work` 会全部 `not-active` / `error`。(d) 手机版 `ui` oracle 依赖 `uiautomator dump`,
 Waydroid 上要 1–3 s; 列表页的推荐流本身会刷新 → 用 `tolerance` 更大的 `screen` 或 `kind: none`。(e) `work_s` 计入 dwell 的开头, 所以
-`dwell_s` 的下限至少要 ≥ 2 × `work_s`。(f) 微信 / QQ 在没有焦点输入框时 `draft` 的按键会被吞掉, 不影响实验, 只是 `clipboard` 读到的是空 → None。
+`dwell_s` 的下限至少要 ≥ 2 × `work_s`。(f) 微信 / QQ 在没有焦点输入框时 `draft` 的按键会被吞掉, 不影响实验, 只是 `clipboard` 读到的是空摘要 (`0:…`, 带 `clipboard-unchanged` 注记)。
+
+### 6.8 实验性: 按进程统计前 / 后台占用 + 激进挤压 (`scripts/ubuntu/run_squeeze.sh`)
+
+另一种统计口径: 不看 "后台总 PSS 占 Σm_fg 的比例", 而是**每个进程**切到后台前 (自己那一步停留结束时的 PSS, 没被请求过的用 warmup 样本)
+与切到后台后 (后台停留结束时) 各占多少、被挤掉了多少, 以及后台**稳定静默期间每分钟换出多少** (磁盘 / zram 写入速率)。后台用最激进的档位:
+`cpuset` 最后一个核 + 该核 10 % 的 `cpu.max` + `cpu.weight 1`; **目标是后台只留活跃时的 10 %**: `memory.high = 0.1 × m_fg` (≥ 32 MB), 切走时连写 3 次
+`memory.reclaim = memory.current` (带 `swappiness=200`, 优先换匿名页; 内核 < 6.9 不认这个参数时自动退回普通写法), 停留期间每 10 s 再挤一次,
+脚本把全局 `vm.swappiness` 设为 200 (结束时恢复); 关掉抖动保护。没有 `memory.max`, 所以仍不会 OOM kill —— 10 % 装不下时进程只是被节流 (分配内存时睡眠), 不会死。只跑 office 一个场景、5 个应用 (微信 / QQ / 钉钉 / WPS / Firefox), 固定 150 s 的长停留
+(前 3 s 脚本操作, 30 s 后算静默期, 每 10 s 采一次), T=12 → 一格约 32 min, 三格约 1.6 h, **不是全量矩阵**:
+
+```bash
+scripts/ubuntu/run_squeeze.sh                      # none 基线 + squeeze 激进 + mild 对照 (夜间跑的 1 核 / 0.5 档位), 结果在 results/arm64_squeeze
+CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # 只跑两格;  T=20 DWELL=240 更长的静默窗;  SEEDS="1 2" 复本;  ONBOARD=1 先过登录向导;  DRY=1 只打印命令
+```
+
+配置 `configs/ubuntu_arm64_squeeze.json`; 输出除常规文件外多 `squeeze_tables.xlsx` (四个工作表: 统计表 / 各格对照 / 每格汇总 / 每进程, 中文表头, 可直接进论文; `--xlsx`, 需要 openpyxl; 首次运行的那份存在 `docs/results/arm64_squeeze_2026-11-04.xlsx`)、`squeeze_apps.csv` + `plots/squeeze_apps.png` (每个应用一组柱: 活跃足迹 m_fg vs 后台驻留、驻留占 m_fg 的 %、后台拿到的单核 CPU %、后台每分钟回收 / 页回的量、切回延迟 P50/P95; `--squeeze-apps`) 和 `per_process.csv`, `report.md` 多 "Per app (squeeze)" 与 "Per process" 两节。新指标 (都只看 `per_process` 的跑法, `--all-cols` 可见):
+
+| 列 | 含义 |
+|---|---|
+| `fg_pss_avg_mb` | 前台应用在自己那步停留结束时的 PSS (各步平均) |
+| `bg_pss_quiet_avg_mb` | 停留结束时其它应用的 PSS 之和 (各步平均): 挤完后后台实际还驻留多少 |
+| `bg_squeeze_pct` | 1 − 后台应用现在的 PSS / 它们各自上一次在前台时的 PSS → 被挤掉的比例; `none` 应接近 0。注意参照本身会变: 被挤过的应用切回前台只页入它碰到的部分 (前台 PSS 也减半), 所以跨格比较用下一列 |
+| `bg_pct_of_m_fg` | 后台应用的驻留 PSS / 它们的 m_fg (warmup 时 PSS+Swap, 整个 sweep 固定) → "后台只剩活跃时的 x %" 的那个数; 目标 10 % 看这一列 |
+| `quiet_swap_out_mb_per_min` | 静默期内全系统 `pswpout` 折算的每分钟换出量 (zram 写入速率) |
+| `quiet_bg_reclaim_mb_per_min` | 静默期内后台 cgroup `memory.stat pgsteal` 增量: 内核每分钟从它们回收了多少页 (匿名页换出 + 文件页丢弃) |
+| `quiet_bg_swap_growth_mb_per_min` | 静默期内后台 cgroup `memory.swap.current` 的增量: 稳定状态下还在持续换出 = 后台应用还在醒着碰内存 |
+| `quiet_zram_growth_mb_per_min` / `zram_phys_avg_mb` | 静默期 zram 压缩存储的增长 / 水位: 被挤出去的页仍以压缩形式占着内存, **真正省下的 = PSS 减少 − zram 增长** (zstd 对 Electron 堆通常 3–4 : 1) |
+| `quiet_s` | 本格累计的静默秒数 (分母) |
+| per_process.csv: `pss_fg_mb` / `pss_bg_mb` / `pss_bg_quiet_mb` / `swap_bg_quiet_mb` / `squeeze_pct` / `swap_growth_mb_per_min` | 每个 (应用, 进程名) 的: 前台 PSS / 刚切走时 / 后台停留结束时 / 那时在 swap 里的量 / 被挤掉的比例 / 静默期 SwapPss 每分钟增长; 同名多进程 (Electron 的 renderer / utility) 合并, `n_pids` 给个数 |
+
+每步记录里 `bg.<app>.reclaim_mb` / `swap_delta_mb` 是这一步停留里从该 cgroup 回收 / 换出的量; `actions.limits.<app>.squeeze` 是切走时那次挤压的前后 `memory.current`。
+`report.md` 的 Per process 一节下面会列出后台仍高于前台 10 % 的进程 (`squeeze_pct` < 90, 前台 ≥ 20 MB): 剩下的就是 `memory.reclaim` 拿不走的 —— 钉住的页 (GPU / 共享缓冲、mlock、内核侧)、应用在后台一直碰的工作集; 看它的 `swap_growth_mb_per_min` 是否一直 > 0 就知道是 "拿不走" 还是 "拿走又被碰回来"。
+
+**换出 / 换入随时间的曲线** `plots/<run>_swapflow.png` (每个有 per-process 数据的 run 一张; 每个应用一行; 装了中文字体 —— Noto Sans CJK / 文泉驿 / 思源黑体 / PingFang 任一 —— 就是中文标注, 没有则自动退回英文): 横轴是**从该应用被切到后台起的秒数**, 左列是每个采样间隔内从它的 cgroup **换出**的量 (`Δpgsteal × 4 KB`, 红) 和它**换回**的量 (`Δmajflt × 4 KB`, 蓝; 都折算成每 `sample_every_s` 秒的量, 缺样本的间隔断开不画), 右列是两者自切走起的累计量 (灰虚线 = 该 cgroup `memory.swap.current` 比切走时多了多少)。一次 sweep 里同一个应用会被切走好几次, 每次 (一个 "episode") 都淡色叠在同一时间轴上, 粗线是各次的均值; 这轮里一次都没被切走过的应用 (如 QQ) 画它从实验开始起的那一段, 标题会注明。黄色底是**暂态**: 从切走到每间隔换出量回落到后半段中位数 2 倍以内的那段, 旁边标出切走瞬间一次性挤出的 MB; 右下角标出最长那次后半段的斜率 (每分钟换出 / 换回 MB 和换回占换出的 %) 并给一句判断: ≥ 80 % "换出 ≈ 换回, 稳态, 内存只是在来回搬"; 20–80 % "换出 > 换回, 稳态, 但一部分被丢掉的页 (文件页经 readahead) 不经缺页就回来了"; < 20 % "几乎不再换回, 后台安静"。两条累计线**平行** = 到了稳态。要看清从暂态到稳态的收敛, 用 `CELLS="none squeeze1" SAMPLE=2` 跑: `squeeze1` 与 `squeeze` 相同但 `squeeze_every_s 0` (只在切走时挤一次, 之后只靠 `memory.high` 顶着), 采样 2 s; 默认的 `squeeze` 格每 10 s 再挤一轮, 曲线是锯齿 (每轮挤出 ~150 MB, 10 s 内又页回), 采样 10 s 也太粗。
+
+**跑之前 (不用重启虚拟机, 不用关这 5 个应用):**
+
+1. 这 5 个应用 (微信 / QQ / 钉钉 / WPS / Firefox) **保持登录并开着**, 它们已在 `/cf/<id>` 里的话 runner 直接复用 (不在的话会重新启动, 需要重新登录); `python3 run_linux.py configs/ubuntu_arm64_squeeze.json --onboard-check` 五个都 ready 即可。WPS 里是 onboarding 的空白文档 / Firefox 固定几个轻页面, 两格之间不要改 (Firefox 的 PSS 随标签页变)。
+2. **其它应用全部退出** (腾讯会议 / 网盘 / 迅雷 / 爱奇艺 / 哔哩哔哩 / 网易云 / 中望 / 石墨): 它们不在本配置里, runner 不会碰它们, 但会占内存和 CPU (爱奇艺后台播放), 还会写 swap —— `quiet_swap_out_mb_per_min` 是全系统的 `pswpout`, 会被污染。脚本启动时检查 `/cf/*` 里还有进程的叶子, 发现不在实验里的就停下 (`STRICT=0` 可以硬跑)。退出前若它们还带着上一轮的限制, 先 `python3 run_linux.py configs/ubuntu_arm64.json --release`。
+3. **zram**: 上一轮矩阵跑完 zram 里常常还压着 1–2 GB; 退出其它应用后看 `cat /proc/swaps`, 用量 > 一半就重置: `sudo scripts/ubuntu/setup_zram.sh --off && sudo scripts/ubuntu/setup_zram.sh 4096` (swapoff 要把压着的页读回内存, 所以先退应用)。5 个应用被挤到底时 zram 要装下它们几乎全部的匿名页 (压缩后约 1–1.5 GB), 4 GB 够; 要跑 `SEEDS="1 2"` 或 `DWELL=240` 也不需要加大。
+4. 之前的矩阵 (tmux 里的 `run_all.sh`) **不能同时在跑**; 本脚本自己的 `OUT=results/arm64_squeeze` 与矩阵互不影响, 中断后同一命令续跑。
+5. 跑的 1.5 h 里**不要碰虚拟机**: 剪贴板会被 oracle 覆盖, 点别的窗口会抢焦点让 `work` 失败; Mac 侧 `caffeinate -dims` 防休眠, 之前花屏重启过的话按 §10 关掉 UTM 的 GPU 加速。
+6. 会看到什么: 激进格里后台应用被切回时要几秒 (`lat_p95` / `ping_p95` 几千 ms 是正常的), 微信 / 钉钉可能短暂显示 "连接中"; `swap_write_mb` 每格几 GB。**要盯的是** `state_lost` / `work_fail` / `n_cold` 必须仍为 0 —— 如果 QQ / 钉钉在 10 % + 10 % 单核下心跳超时掉线、回到登录页, 那就是这个档位的真实代价, 会以 `work_fail` (剪贴板只剩哨兵 → 空摘要) 和 `processes_gone` 记下来, 不要重跑掩盖它; 想找到不掉线的最低档位, 下一轮再把 `mem_frac` 抬到 0.15 / 0.2 或 `cpu_cores` 抬到 0.2 对比。
+7. 不能靠 `memory.max` 再逼: 它能把驻留压死在 10 %, 但 10 % 装不下时内核只能 OOM kill —— 丢状态, 与实验的不变量冲突; `memory.high` + 反复 `memory.reclaim` 已经是不杀进程前提下最激进的组合。
+预期: 激进档下后台应用很慢 (切回时 `lat_p95` / `ping_p95` 明显变大, 可能几秒), `swap_write_mb` 大, 但 `state_lost` / `work_fail` 仍应为 0 (没有 `memory.max`, 不会被杀); 如果 `quiet_bg_swap_growth_mb_per_min` 长期 > 0, 说明这个应用在后台一直在碰工作集, 静态上限只是在反复换入换出 (对比 `mild` 格的数字)。
+
+### 6.9 三类应用实验: 呼叫与切换 / 计算型 / 下载型 (`scripts/ubuntu/run_classes.sh`)
+
+一次短跑 (每格约 9 分钟) 同时回答三个问题 —— 把后台应用的资源压下去, 三类应用各付出什么代价:
+
+| 类别 | 应用 | 比什么 | 指标 |
+|---|---|---|---|
+| ① 呼叫 / 切换 (交互型) | 微信、QQ、WPS、Firefox (真实应用, 已登录) | 不限制时被呼叫多久响应 vs 被压制过以后多久响应; 切回后是否顺滑 | **响应** = 窗口激活 + 事件循环第一次应答 (P50 / P95 / 最大); **顺滑** = 切回后 1 s 内连续 5 次 `_NET_WM_PING` 的应答 (P95 / 最大, 超过 100 ms 记一次卡顿) + **输入回读** (全选 + 复制到剪贴板拿到文本的时间, 微信这类不应答 ping 的应用靠它); 内容核对 `work_fail` |
+| ② 计算型 | `bench_numeric` 科学计算 (LU 分解求解 + FFT + n 体积分, 一个工作进程, 每个任务约 0.2 s); `bench_compress` 压缩解压 (zlib -6 压 8 MB 再解压校验, 两个工作进程) | 同一个任务在前台做 vs 在后台做 | **单任务时延** P50 / P95, **每分钟任务数**, 后台 / 前台倍数, 后台做完 100 个任务要多少秒, 任务内 CPU 占比 (低 = 在等配额 / 等缺页) |
+| ③ 下载型 | `bench_download` (HTTP Range 分片下载, 每片 sha256 后写盘) | 在前台下 vs 在后台下 | **下载速度** MB/s (均值 / 最慢 10 %), **建连时延** (TCP connect 往返, 到下载源和到外网各一份), **处理延迟** (包到了以后应用等多久才轮到 CPU) |
+
+三个基准程序是仓库自带的 (`cf/linux/bench_app.py`, 应用目录里 kind = `bench`): 一个 X11 窗口 + 工作进程, 不停做同一个固定任务, 每个任务的墙钟 / CPU 时间写进 `/tmp/cf_bench_<id>.jsonl`, runner 每步把新增的记录抄进 step 记录 (`step["bench"]`)。任务自带结果校验 (LU 残差、FFT 往返误差、能量漂移、CRC), 所以 "算得慢" 和 "算错" 分得开。不用装 CAD, 不用账号。
+
+**三格** (同一份配置 `configs/ubuntu_arm64_classes.json`, 走完全相同的访问顺序):
+
+| 格 | 后台应用的限制 |
+|---|---|
+| `none` | 不限制 —— 基准, 表里 "相对不限制" 的列都以它为分母 |
+| `mild` | 1 核 `cpu.max` 配额 + `cpu.weight` 20, `memory.high` = 0.5 × m_fg, 回收一次 (夜间矩阵的档位) |
+| `squeeze` | 全部后台应用钉在最后一个核, `cpu.max` = 该核的 10 %, `cpu.weight` 1, `memory.high` = 0.1 × m_fg, 切走时 `memory.reclaim` × 3 (§6.8 的激进档, 但不做周期性再回收) |
+
+**访问顺序** (trace kind `pattern`, 不是随机轨迹, 所以短跑也可比): 每轮 11 步 `微信 → 科学计算 → WPS → 下载 → Firefox → 压缩解压 → QQ → 微信 → WPS → Firefox → QQ`, 默认 2 轮 = 22 步, 每步停留 15 s。每个交互应用每轮被呼叫 2 次 (两次之间在后台待 1–2 分钟); 每个基准应用每轮在前台 1 步、在后台 10 步 —— 前台 / 后台两种位置的任务时延都有足够样本。
+
+```bash
+scripts/ubuntu/run_classes.sh                        # none + mild + squeeze, 约 27 分钟; 结果在 results/arm64_classes
+CELLS="none squeeze" scripts/ubuntu/run_classes.sh    # 只要 "不限制 vs 压制" 两格, 约 18 分钟
+ROUNDS=3 DWELL=20 scripts/ubuntu/run_classes.sh       # 每个应用多呼叫几次 / 后台段更长 (时间按比例增加)
+ONBOARD=1 scripts/ubuntu/run_classes.sh               # 先过一遍 4 个交互应用的登录向导
+DL_URL=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.5-desktop-amd64.iso scripts/ubuntu/run_classes.sh
+                                                      # 改成下载一个真实的大文件 (要支持 Range); 默认用本机限速源
+DL_RATE_MBPS=10 RTT_HOST=223.5.5.5:443 scripts/ubuntu/run_classes.sh   # 本机源的限速 (默认 20 MB/s ≈ 160 Mbit/s 宽带); 外网时延探测的目标 (默认 www.baidu.com:443, 设成空串则不测)
+python3 -m cf.linux.classes results/arm64_classes/*.jsonl --out results/arm64_classes   # 只重新出表 / 出图, 不重跑
+```
+
+**上机时间**: 预热 7 个应用约 1.5 分钟 + 22 步 × (停留 15 s + 切换 / 探测 / 内容核对约 5 s) ≈ **9 分钟一格**; 三格约 27 分钟, 两格约 18 分钟。中断后同一条命令续跑, 已完成的格跳过。
+
+**下载源**: 默认由脚本在本机起一个限速的 HTTP 源 (`python3 -m cf.linux.bench_app --serve 18080 --rate-mbps 20`, 跑在脚本自己的 `/cf/host` 里, 不受限制), 速度上限固定、不依赖外网, 三格之间可比; 这时 "到下载源" 的建连时延是回环 (≈ 0.1 ms), 真实网络的往返时延看 "外网时延" 那两列 (`RTT_HOST`)。想量真实下载就给 `DL_URL=`, 但速度会随网络波动, 最好 `SEEDS="1 2"` 多跑一遍。下载的数据循环写进 `/tmp` 下一个 256 MB 的临时文件 (退出时删除), 20 MB/s 时每格累计写约 10 GB。
+
+**输出** (`$OUT/`): `classes_report.md` (三张表, 直接可读), `classes_tables.xlsx` (三个 sheet + 说明, 中文表头), `classes_interactive.csv` / `classes_compute.csv` / `classes_download.csv` (完整的列), `plots/classes.png` (3 行 × 2 列: 响应时间 / 顺滑度, 单任务时延 / 每分钟任务数, 下载速度 / 网络时延), `plots/<run>_bench.png` (每个基准应用随时间的单任务时延 / 下载速度, 绿色底 = 它在前台), 以及通常的 `summary.csv` 和每格的 jsonl / log。运行时每步的日志行末尾也有 `| bench numeric 58 jobs 262 ms, download 19.9 MB/s rtt 0.1 ms`。
+
+**怎么读**:
+
+- ① 里 "响应" 是在限制**已经解除之后**量的 (runner 先把被请求的应用提回 fg 档再激活窗口), 所以它回答的是 "被压过的应用醒过来要多久" —— 被换出的页要缺页换回, 正卡在 `memory.high` 惩罚性休眠里的线程要等休眠结束。`n_limited` 是其中有几次是从受限的后台切回的; 第 0 步 (预热后的第一次切换, 那时还没有任何应用被限制) 和冷启动不计入。
+- ② 里前台列在各格应该基本相同 (前台不受限), 它是这个任务本来的速度; 后台列除以前台列就是限制的代价。`squeeze` 下 CPU 配额是单核的 10 %, 所以科学计算的后台单任务时延的理论值就是前台的约 10 倍 —— 明显高于 10 倍的部分来自 `cpu.weight 1` (前台应用恰好也在用最后那个核时, 后台几乎拿不到时间片) 和 `memory.high` (工作集装不下时反复缺页); 压缩解压有两个工作进程和 32 MB 的输入缓冲, 对这两点都更敏感。P95 远大于 P50 就是这种 "偶尔被饿住" 的任务。
+- ③ 里**建连时延** (网络本身) 在各格几乎不变 —— cgroup 限制不改变链路; 变的是**下载速度** (收包、校验、写盘都要 CPU, 页缓存也记在 `memory.high` 里) 和**处理延迟** (`cpu.max` 10 ms / 100 ms 时, 一个包最多要等约 90 ms 应用才被调度到)。应用实际感受到的网络时延 = 建连时延 + 处理延迟。
+- 判读用的三个不变量仍然是: `state_lost` 为空、`work_fail` = 0、`n_cold` = 0 (被压制只是慢, 不能丢状态); 基准程序的 `bad_jobs` (结果校验失败) 也应为 0。
+
+**跑之前**: 同 §6.8 的第 1–5 条 —— 4 个交互应用已登录且 `python3 run_linux.py configs/ubuntu_arm64_classes.json --onboard-check` 全部 ready (或 `ONBOARD=1`); 退出实验之外的应用 (脚本会检查 `/cf` 下还有谁在跑, `STRICT=0` 可跳过); zram 用量过半先重置; 不能和别的矩阵同时跑; 跑的时候不要碰虚拟机。基准程序由 runner 自己启动, 脚本结束时会把它们和本机下载源一起停掉。没装某个交互应用时可以 `EXTRA="--placeholders"` 先用占位程序顶替着把流程跑通。
 
 ### 6.7 日常使用: `focusd`
 
@@ -868,6 +964,8 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 有 Xvfb + xfwm4/openbox + xdotool 时自动加跑一次真实窗口 发现 -> 激活 -> _NET_WM_PING 往返,
                                                    # 以及占位窗口上的 title / statefile / screen oracle; 再有 mousepad + xclip 时跑一次 edit -> clipboard 往返
                                                    # /sys/fs/cgroup/cf 已委托给当前用户时自动加跑一次真实 cgroup 的档位读写
+                                                   # 三类应用实验 (§6.9): 基准任务自校验 / 任务日志增量读取 / 本机下载源 + 下载 + 建连探测 /
+                                                   # pattern 轨迹 / 伪桌面上的 bench 记录、顺滑探测、前后台区间与三张表、CLI 出表出图
 ```
 
 ## 12. 脚本与文件清单
@@ -890,11 +988,16 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `python3 run_linux.py CONFIG --policy … --eta … --T … --scenario … [--work] [--resume FILE]` | 单格实验 | 一次实验 → `results/<name>.jsonl` (+ `.log`, `.ckpt`); Ctrl+C 安全, `--resume` 续跑 |
 | `cf/linux/work.py` (`WorkDriver`: `X11WorkDriver` + `AdbWorkDriver`) | `--work` 内部 | 每类应用的默认脚本 (打草稿 / 滚动 / 缩放 / 上滑) 与内容 oracle (clipboard / title / screen / statefile / ui), 比较规则; `work_overrides` 按 id 覆盖 |
 | `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / WORK (+ WORK_S) / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
+| `scripts/ubuntu/run_squeeze.sh` + `CELLS= T= DWELL= SEEDS= SAMPLE= ONBOARD= SWAPPINESS= STRICT= DRY= OUT=` | 实验性 | §6.8: office 5 应用, none / squeeze (激进: cpuset+10 % 带宽+weight 1, memory.high 10 %, memory.reclaim 整个 cgroup ×3 并周期重复) / mild 三格 (+ 可选 `squeeze1`: 不周期重挤, 配 `SAMPLE=2` 看换出 / 换入收敛曲线), 长停留, 按进程统计 + 静默期换出速率; 出 `squeeze_apps.csv` / `plots/squeeze_apps.png` / `plots/<run>_swapflow.png` / `per_process.csv` |
+| `scripts/ubuntu/run_classes.sh` + `CELLS= ROUNDS= DWELL= SEEDS= DL_URL= DL_RATE_MBPS= RTT_HOST= ONBOARD= EXTRA= SWAPPINESS= STRICT= DRY= OUT=` | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (`bench_numeric` / `bench_compress`: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 1 个 (`bench_download`: 下载速度、建连时延、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 9 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png` |
+| `python3 -m cf.linux.classes FILES… --out DIR [--no-plots]` | 分析 | §6.9 的三张表 (CSV / Markdown / Excel) 和图; 不重跑实验 |
+| `python3 -m cf.linux.bench_app --app ID --kind numeric\|compress\|download [--workers k --scale f --url U --rtt-host H:P]` / `--serve PORT --rate-mbps n` / `--check-url U` | §6.9 内部 | 内置基准程序: X11 窗口 + 工作进程循环做固定任务, 每个任务的时延写到 `/tmp/cf_bench_<id>.jsonl`; `--serve` 是本机限速下载源 |
 | `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= ONBOARD= PLACEHOLDERS= WORK= WORK_S= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → (`ONBOARD=1`: 登录向导 + `--check`, 不全就绪即停) → probe / catalog / mobile (/ work_plan) 快照 → 冒烟 (检查 state_lost / oom / COLD / work_fail = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
-| `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / Pareto 点 / 图 / Markdown 报告 |
+| `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--per-proc] [--squeeze-apps] [--xlsx] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / 每进程表 / 每应用 squeeze 五项表 / Excel 工作簿 (`per_process` 的跑法) / Pareto 点 / 图 / Markdown 报告 |
 | `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |
 | `python3 -m cf.linux.placeholder_app --app ID --title T [--cpu f --mem MB --io-mbps n --notify-every s --workers k]` | 冒烟 / 占位 | 内置 X11 占位程序: 可控的 CPU / 内存 / 写盘 / 通知负载, 状态写到 `/tmp/cf_placeholder_<id>.json` |
 | `configs/ubuntu_cn_desktop.json` | 主配置 | 13 个应用、`substitute_kinds` / `mobile`、限流档位、轨迹、`dwell_s` 范围、`sample_every_s`、`placeholder_fill`、`work` / `work_s` / `work_overrides` |
 | `configs/ubuntu_arm64.json` | arm64 真机集合 | UTM 虚拟机实际装好的 13 个应用 (含星火商店的 迅雷 / 爱奇艺 / 哔哩哔哩 / 网易云音乐 / 石墨文档 和 UOS 百度网盘), `work=true`, 五场景 (含 `media`), `sudo_adopt=true` (apm 容器 helper 属别的 uid) |
+| `configs/ubuntu_arm64_squeeze.json` | 实验性 (§6.8) | office 5 应用、激进档位 (`cpu_mode both` 0.1 核 weight 1, `mem_frac 0.1`, `squeeze_rounds 3` / `squeeze_every_s 30`, 无抖动保护)、`dwell_s 150`、`per_process`、`quiet_after_s 30` |
 | `configs/ubuntu_placeholders.json` | 冒烟 | 4 个占位程序的最小配置 (任何 X11 会话可跑, 含 Xvfb) |
 | `results/<matrix>/{summary,summary_agg,per_app,pareto}.csv`, `plots/*.png`, `report.md`, `matrix.env`, `*.console.log` | 产物 | 表 / 图 / 报告 / 本次矩阵的参数与机器信息 / 每格控制台输出 |

@@ -27,7 +27,7 @@ from . import apps as A
 from . import blankdoc
 from . import procs as PR
 from . import x11
-from .cgroup import CgroupTree, ThrottleProfile, HOST_LEAF, apply_tier
+from .cgroup import CgroupTree, ThrottleProfile, HOST_LEAF, apply_tier, squeeze
 from .mobile import MobileRuntime
 from .notify import NotifyCounter
 
@@ -72,10 +72,18 @@ class AppSampleL:
                 "cg_nr_throttled": cpu.get("nr_throttled") or 0,
                 "cg_events": cg.get("events") or {},
                 "cg_pgmajfault": cg.get("pgmajfault"),
+                "cg_pgsteal": cg.get("pgsteal"), "cg_pgscan": cg.get("pgscan"),
+                "cg_pswpout": cg.get("pswpout") if cg.get("pswpout") is not None else cg.get("zswpout"),
                 "cg_limits": {k: cg.get(k) for k in ("cpu_max", "cpuset", "cpu_weight", "memory_high",
                                                      "memory_max", "swap_max")},
                 "cg_psi_mem_full_us": (cg.get("psi_mem") or {}).get("full_total"),
                 "cg_psi_cpu_some_us": (cg.get("psi_cpu") or {}).get("some_total")}
+
+    def procs_dict(self) -> list[dict]:
+        """Per-process memory (kB) for the per-process accounting (cfg per_process)."""
+        return [{"pid": p.pid, "name": p.name, "pss_kb": p.pss_kb, "pss_anon_kb": p.pss_anon_kb,
+                 "pss_file_kb": p.pss_file_kb, "swap_pss_kb": p.swap_pss_kb, "rss_kb": p.rss_kb,
+                 "cpu_ms": p.cpu_ms, "majflt": p.majflt} for p in self.procs]
 
 
 PING_MISSES_TO_GIVE_UP = 2
@@ -103,6 +111,7 @@ class LinuxDesktop:
         self._warned_unmanaged: set[str] = set()
         self._ping_misses: dict[str, int] = {}       # consecutive unanswered pings per app
         self.ping_dead: set[str] = set()             # apps that advertise _NET_WM_PING but never answer
+        self._bench_off: dict[str, int] = {}         # bytes of each bench app's job log already read
 
     # ------------------------------------------------------------- probing
     def probe(self) -> dict:
@@ -355,6 +364,33 @@ class LinuxDesktop:
         self.tiers[id_] = "fg"
         return res
 
+    def smooth_probe(self, id_: str, wid: Optional[int], n: int = 5, every_s: float = 0.2,
+                     timeout_s: float = 1.0) -> dict:
+        """How smoothly the app reacts right after it was brought to the front: `n` _NET_WM_PING round
+        trips, one every `every_s` seconds.  A ping the event loop answers late (or not within
+        `timeout_s` -> None) is a stall the user would feel.  {"supported": False} for apps that
+        do not answer pings at all (Qt frameless windows, the Android display)."""
+        out: dict = {"supported": False, "pings_ms": []}
+        if not wid or n <= 0 or self.is_mobile(id_) or id_ in self.ping_dead:
+            return out
+        if not (self.pinger and self.pinger.available and self.pinger.supports(wid)):
+            return out
+        out["supported"] = True
+        for i in range(n):
+            t0 = time.monotonic()
+            out["pings_ms"].append(self.pinger.ping(wid, timeout=timeout_s))
+            rest = every_s - (time.monotonic() - t0)
+            if rest > 0 and i < n - 1:
+                time.sleep(rest)
+        return out
+
+    # ------------------------------------------------------------ bench apps
+    def bench_read(self, id_: str) -> list[dict]:
+        """New records of a bench app's job log (cf.linux.bench_app) since the last call."""
+        from .bench_app import log_path, read_new
+        recs, self._bench_off[id_] = read_new(log_path(id_), self._bench_off.get(id_, 0))
+        return recs
+
     def minimize(self, id_: str) -> None:
         w = self.window(id_)
         if w:
@@ -368,6 +404,13 @@ class LinuxDesktop:
         res = apply_tier(self.tree, id_, tier, self.profile, m_fg_bytes, memory_high_bytes)
         self.tiers[id_] = tier
         return res
+
+    def squeeze(self, id_: str, rounds: Optional[int] = None) -> dict:
+        """Re-run the aggressive reclaim on an app that is already shrunk (profile.squeeze_every_s)."""
+        if not self.tree.exists(id_):
+            return {"how": "no-cgroup", "rounds": 0, "asked_bytes": 0, "before_bytes": 0, "after_bytes": 0}
+        return squeeze(self.tree, id_, rounds if rounds is not None else self.profile.squeeze_rounds,
+                       self.profile.reclaim_swappiness)
 
     def release_all(self) -> int:
         n = 0

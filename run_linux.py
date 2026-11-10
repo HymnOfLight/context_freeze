@@ -70,6 +70,12 @@ def main(argv=None) -> int:
     ap.add_argument("--mem-frac", type=float, help="memory.high = mem_frac * m_fg for shrunk apps (default 0.5)")
     ap.add_argument("--swap-max-mb", type=int, help="memory.swap.max per shrunk app")
     ap.add_argument("--mem-hard", action="store_true", help="also set memory.max (OOM-kill risk; off by default)")
+    ap.add_argument("--cpu-weight", type=int, help="cpu.weight of throttled apps (1-10000, default 20)")
+    ap.add_argument("--squeeze", type=int, metavar="N", help="aggressive reclaim: write memory.reclaim <memory.current> N times "
+                    "when an app is shrunk (0 = off, default from the config)")
+    ap.add_argument("--squeeze-every", type=float, metavar="S", help="repeat the squeeze on shrunk apps every S s of a dwell")
+    ap.add_argument("--per-process", action="store_true", help="record per-process PSS / swap in every step and timeline sample")
+    ap.add_argument("--quiet-after", type=float, metavar="S", help="dwell seconds after which the analyzer counts a sample as 'quiet'")
     ap.add_argument("--no-resident-cpu", action="store_true", help="apps inside the budget keep full CPU (only shrunk ones limited)")
     ap.add_argument("--no-strict", action="store_true", help="warn instead of abort on preflight problems")
     ap.add_argument("--placeholders", action="store_true",
@@ -110,7 +116,8 @@ def main(argv=None) -> int:
         base["strict_preflight"] = False
     thr = dict(base.get("throttle") or {})
     for key, val in (("cpu_mode", args.cpu_mode), ("cpu_cores", args.cpu_cores), ("cpuset_cpus", args.cpuset),
-                     ("mem_frac", args.mem_frac), ("swap_max_mb", args.swap_max_mb)):
+                     ("mem_frac", args.mem_frac), ("swap_max_mb", args.swap_max_mb), ("cpu_weight", args.cpu_weight),
+                     ("squeeze_rounds", args.squeeze), ("squeeze_every_s", args.squeeze_every)):
         if val is not None:
             thr[key] = val
     if args.mem_hard:
@@ -124,6 +131,10 @@ def main(argv=None) -> int:
         base["dwell_s"] = args.dwell[0] if len(args.dwell) == 1 else args.dwell[:2]
     if args.sample_every is not None:
         base["sample_every_s"] = args.sample_every
+    if args.per_process:
+        base["per_process"] = True
+    if args.quiet_after is not None:
+        base["quiet_after_s"] = args.quiet_after
     if args.work or args.work_plan:
         base["work"] = True
     if args.work_s is not None:
@@ -241,7 +252,7 @@ def main(argv=None) -> int:
                     print(f"{id_}: unknown app"); continue
                 targets.append(id_)
         else:
-            targets = [u for u in used if cat[u].kind != "placeholder"]
+            targets = [u for u in used if cat[u].kind not in ("placeholder", "bench")]
         if args.onboard_check:
             rc = OB.check(dev, targets, base)
             dev.close()

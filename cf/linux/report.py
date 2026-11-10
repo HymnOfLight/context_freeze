@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import time
 
-from .analyze import MAIN_COLS, PER_APP_COLS, AGG_COLS_LINUX
+from .analyze import MAIN_COLS, PER_APP_COLS, PER_PROC_COLS, SQUEEZE_APP_COLS, AGG_COLS_LINUX
 
 
 def _fmt(v) -> str:
@@ -28,7 +28,8 @@ def md_table(rows: list[dict], cols: list[str]) -> str:
 
 
 def write_markdown(path: str, rows: list[dict], agg: list[dict], per_app: list[dict], segments: list[dict],
-                   plots_dir: str | None = None) -> None:
+                   plots_dir: str | None = None, per_proc: list[dict] | None = None,
+                   main_cols: list[str] | None = None, squeeze_apps: list[dict] | None = None) -> None:
     n_lost = sum(r.get("state_lost_events") or 0 for r in rows)
     n_oom = sum(r.get("oom_kills") or 0 for r in rows)
     n_cold = sum(r.get("n_cold") or 0 for r in rows)
@@ -43,7 +44,14 @@ def write_markdown(path: str, rows: list[dict], agg: list[dict], per_app: list[d
            + (f"- scripted-work state checks after a background phase (`work_checks`): {n_wchk}, "
               f"content lost (`work_fail`): **{n_wfail}**\n" if n_wchk else "")
            + (f"- unfinished runs: {', '.join(str(r.get('file')) for r in unfinished)}\n" if unfinished else ""),
-           "\n## Per run\n", md_table(rows, MAIN_COLS)]
+           "\n## Per run\n", md_table(rows, main_cols or MAIN_COLS)]
+    if per_proc is not None:
+        out.append("\n> **per-process accounting** (`per_process`): `fg_pss_avg_mb` is the PSS of the requested app at "
+                   "the end of its own dwell, `bg_pss_quiet_avg_mb` the summed PSS of the other apps at the end of a "
+                   "dwell, `bg_squeeze_pct` how far below their last foreground PSS they were pushed, and the "
+                   "`quiet_*_per_min` columns are rates over the quiet part of the dwells (after `quiet_after_s`): "
+                   "system swap-out (`pswpout`), pages reclaimed from the background cgroups (`pgsteal`), "
+                   "and growth of their swap.\n")
     infeasible = [r for r in rows if r.get("eta_feasible") is False]
     if infeasible:
         out.append("\n> **eta below the shrunk floor** in "
@@ -57,17 +65,34 @@ def write_markdown(path: str, rows: list[dict], agg: list[dict], per_app: list[d
         out += ["\n## Day traces: per-scenario segments\n", md_table(segments, list(segments[0].keys()))]
     if per_app:
         out += ["\n## Per app\n", md_table(per_app, PER_APP_COLS)]
+    if squeeze_apps:
+        out += ["\n## Per app: active footprint, background resident, CPU, swap traffic, switch-back\n",
+                md_table(squeeze_apps, SQUEEZE_APP_COLS),
+                "\n_m_fg = warmup PSS+Swap (active footprint); bg_resid = resident PSS at the end of the dwells spent "
+                "in the background; bg_cpu_pct_core = CPU it got there as % of one core (cap = 100 x cpu_cores); "
+                "bg_reclaim = pages the kernel took from its cgroup per minute (pgsteal), bg_swapin = major faults "
+                "x 4 KB per minute; lat = switch-back time when it was requested (n_req)._\n"]
+    if per_proc:
+        out += ["\n## Per process (foreground vs background PSS)\n", md_table(per_proc, PER_PROC_COLS)]
+        miss = [r for r in per_proc if (r.get("pss_fg_mb") or 0) >= 20 and r.get("squeeze_pct") is not None
+                and r["squeeze_pct"] < 90 and not str(r.get("run", "")).startswith("none")]
+        if miss:
+            out.append("\n> processes still above **10 % of their foreground PSS** in the background "
+                       "(`squeeze_pct` < 90, fg >= 20 MB): "
+                       + ", ".join(f"{r['run']}/{r['app']}/{r['proc']} {100 - r['squeeze_pct']:.0f} %" for r in miss)
+                       + " - what is left is what `memory.reclaim` cannot take (pinned, GPU / shared buffers, pages "
+                       "the app keeps touching); compare `swap_growth_mb_per_min` to see whether it is still fighting.\n")
     if plots_dir and os.path.isdir(plots_dir):
         rel = os.path.relpath(plots_dir, os.path.dirname(os.path.abspath(path)) or ".")
         pngs = sorted(f for f in os.listdir(plots_dir) if f.endswith(".png"))
         if pngs:
             out.append("\n## Figures\n")
-            for f in ("bg_tradeoff.png", "latency_cdf.png", "pareto.png"):
+            for f in ("squeeze_apps.png", "bg_tradeoff.png", "latency_cdf.png", "pareto.png"):
                 if f in pngs:
                     out.append(f"![{f}]({rel}/{f})\n")
             out.append("\nper run:\n")
             for f in pngs:
-                if f not in ("bg_tradeoff.png", "latency_cdf.png", "pareto.png"):
+                if f not in ("squeeze_apps.png", "bg_tradeoff.png", "latency_cdf.png", "pareto.png"):
                     out.append(f"- [{f}]({rel}/{f})\n")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(out))

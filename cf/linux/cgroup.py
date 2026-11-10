@@ -59,6 +59,16 @@ class ThrottleProfile:
     # larger than memory.high) gets its memory.high multiplied by thrash_backoff, up to m_fg. 0 = off.
     thrash_high_per_s: float = 5.0
     thrash_backoff: float = 1.5
+    # squeeze (experimental, aggressive): after lowering memory.high ask the kernel `squeeze_rounds`
+    # times to reclaim *everything* the cgroup holds (memory.reclaim <memory.current>), and repeat that
+    # every `squeeze_every_s` while the app sits shrunk in the background - pushes the resident set
+    # as low as the kernel will go, not just down to memory.high.  0 = off.
+    squeeze_rounds: int = 0
+    squeeze_every_s: float = 0.0
+    # memory.reclaim "<n> swappiness=<v>" (kernel >= 6.9): 200 = take anonymous pages first, keep the
+    # file cache the app needs to come back; None = the kernel's vm.swappiness.  Falls back to a plain
+    # write where the argument is not understood.
+    reclaim_swappiness: Optional[int] = None
 
     @classmethod
     def from_cfg(cls, d: Optional[dict]) -> "ThrottleProfile":
@@ -77,7 +87,11 @@ class ThrottleProfile:
                 + (f" mem.max=x{self.mem_hard_factor}" if self.mem_hard else " no mem.max")
                 + (f" swap.max={self.swap_max_mb} MB" if self.swap_max_mb else " swap unlimited")
                 + (f" thrash guard >{self.thrash_high_per_s:g} high/s -> x{self.thrash_backoff:g}"
-                   if self.thrash_high_per_s and self.thrash_high_per_s > 0 else " no thrash guard"))
+                   if self.thrash_high_per_s and self.thrash_high_per_s > 0 else " no thrash guard")
+                + (f" squeeze x{self.squeeze_rounds}"
+                   + (f" every {self.squeeze_every_s:g}s" if self.squeeze_every_s else "")
+                   + (f" swappiness={self.reclaim_swappiness}" if self.reclaim_swappiness is not None else "")
+                   if self.squeeze_rounds else ""))
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -263,14 +277,25 @@ class CgroupTree:
                                memory_high="max", memory_max="max", swap_max="max",
                                io_weight=100 if "io" in self.controllers() else None)
 
-    def reclaim(self, name: str, nbytes: int) -> str:
+    def reclaim(self, name: str, nbytes: int, swappiness: Optional[int] = None) -> str:
         """Proactive reclaim of up to nbytes (memory.reclaim). 'unsupported' on kernels < 5.19;
-        'partial' when the kernel could not reclaim the full amount (EAGAIN) - not an error."""
+        'partial' when the kernel could not reclaim the full amount (EAGAIN) - not an error.
+        swappiness (0-200, kernel >= 6.9) is dropped - once, remembered - where the kernel rejects it."""
         if nbytes <= 0:
             return "nothing"
         if not os.path.exists(os.path.join(self.path(name), "memory.reclaim")):
             return "unsupported"
-        err = self.write(name, "memory.reclaim", str(int(nbytes)))
+        val = str(int(nbytes))
+        if swappiness is not None and not getattr(self, "no_reclaim_swappiness", False):
+            err = self.write(name, "memory.reclaim", f"{val} swappiness={int(swappiness)}")
+            if err is None:
+                return "memory.reclaim"
+            if "EAGAIN" in err:
+                self.errors.pop()
+                return "partial"
+            self.errors.pop()
+            self.no_reclaim_swappiness = True          # EINVAL: old kernel, plain reclaim from now on
+        err = self.write(name, "memory.reclaim", val)
         if err is None:
             return "memory.reclaim"
         if "EAGAIN" in err:
@@ -299,6 +324,8 @@ class CgroupTree:
             "cpu": parse_kv(self.read(name, "cpu.stat")),
             "pgmajfault": mem_stat.get("pgmajfault"),
             "pgfault": mem_stat.get("pgfault"),
+            "pgscan": mem_stat.get("pgscan"), "pgsteal": mem_stat.get("pgsteal"),   # pages the kernel reclaimed
+            "zswpout": mem_stat.get("zswpout"), "pswpout": mem_stat.get("pswpout"),  # per-cgroup swap-outs (newer kernels)
             "refault_anon": mem_stat.get("workingset_refault_anon"),
             "refault_file": mem_stat.get("workingset_refault_file"),
             "anon": mem_stat.get("anon"), "file": mem_stat.get("file"),
@@ -350,7 +377,12 @@ def apply_tier(tree: CgroupTree, name: str, tier: str, profile: ThrottleProfile,
     # legal but pointless); order: cpu first, then memory
     applied = tree.set_limits(name, **lim)
     res = {"tier": tier, "limits": applied, "reclaim": None, "reclaim_bytes": 0}
-    if tier == "shrunk" and profile.proactive_reclaim:
+    if tier == "shrunk" and profile.squeeze_rounds > 0:
+        sq = squeeze(tree, name, profile.squeeze_rounds, profile.reclaim_swappiness)
+        res["reclaim"] = sq["how"]
+        res["reclaim_bytes"] = sq["asked_bytes"]
+        res["squeeze"] = sq
+    elif tier == "shrunk" and profile.proactive_reclaim:
         cur = tree.stats(name).get("memory_current") or 0
         high = int(lim["memory_high"])
         if cur > high:
@@ -359,3 +391,26 @@ def apply_tier(tree: CgroupTree, name: str, tier: str, profile: ThrottleProfile,
         else:
             res["reclaim"] = "nothing"
     return res
+
+
+def squeeze(tree: CgroupTree, name: str, rounds: int = 3, swappiness: Optional[int] = None) -> dict:
+    """Ask the kernel `rounds` times to reclaim everything cf/<name> currently holds (memory.reclaim
+    with the whole memory.current): anonymous pages go to swap / zram, file pages are dropped, down
+    to whatever is pinned.  Returns {"how", "rounds", "asked_bytes", "before_bytes", "after_bytes"}."""
+    before = tree.stats(name).get("memory_current") or 0
+    asked, how, done = 0, "nothing", 0
+    for _ in range(max(0, rounds)):
+        cur = tree.stats(name).get("memory_current") or 0
+        if cur <= 0:
+            break
+        r = tree.reclaim(name, cur, swappiness)
+        asked += cur
+        done += 1
+        how = r
+        if r in ("unsupported", "error"):
+            break
+        if r == "nothing":
+            break
+    after = tree.stats(name).get("memory_current") or 0
+    return {"how": f"{how} x{done}" if done else how, "rounds": done, "asked_bytes": asked,
+            "before_bytes": before, "after_bytes": after}

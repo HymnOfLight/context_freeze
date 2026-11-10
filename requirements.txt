@@ -1,3 +1,4 @@
 numpy>=1.24        # 离线 Bellman DP (cf/sim/bellman.py)
 pytest>=7          # 单元测试
 matplotlib>=3.7    # 可选: Pareto 前沿绘图 (cf.analyze --plot)
+openpyxl>=3.1    # 可选: squeeze 实验的 Excel 统计表 (cf.linux.analyze --xlsx)

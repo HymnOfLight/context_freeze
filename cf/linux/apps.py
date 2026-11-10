@@ -56,7 +56,7 @@ class LinuxApp:
     linux: bool = True                 # has a native Linux build
     substitute: Optional[str] = None   # catalogue id used when this one is not installed
     note: str = ""
-    kind: str = "desktop"              # desktop | mobile (Android build in Waydroid) | oss | placeholder
+    kind: str = "desktop"              # desktop | mobile (Android build in Waydroid) | oss | placeholder | bench
     work: Optional[dict] = None        # scripted work / state oracle (cf.linux.work.default_spec when None)
 
     @property
@@ -72,6 +72,17 @@ def _p(id_: str, name: str, category: str = "compute", **kw) -> LinuxApp:
     return LinuxApp(id_, name, category, cmd=PLACEHOLDER_CMD.format(id=id_, name=name),
                     match=rf"placeholder_app.*--app {id_}\b", wm_class=rf"^cf-{id_}$",
                     install="bundled: python3 -m cf.linux.placeholder_app (needs python3-xlib)", kind="placeholder", **kw)
+
+
+BENCH_CMD = "python3 -m cf.linux.bench_app --app {id} --kind {kind} --title '{name}'"
+
+
+def _b(id_: str, name: str, category: str, kind: str, extra: str = "", note: str = "") -> LinuxApp:
+    """Bundled benchmark app (cf.linux.bench_app): a window doing one fixed job over and over and
+    logging every job's time - the measurable stand-in for a compute / download application."""
+    return LinuxApp(id_, name, category, cmd=(BENCH_CMD.format(id=id_, kind=kind, name=name) + " " + extra).strip(),
+                    match=rf"bench_app.*--app {id_}\b", wm_class=rf"^cf-{id_}$", arch=("any",),
+                    install="bundled: python3 -m cf.linux.bench_app (needs python3-xlib)", kind="bench", note=note)
 
 
 PLACEHOLDER_ARGS = {          # per category: what the stand-in does in the background (see placeholder_app.py)
@@ -276,6 +287,14 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
     _p("sim_download", "下载占位", "download"),
     _p("sim_push", "推送占位", "push"),
     _p("sim_compute", "计算占位", "compute"),
+    # ------------------------------------- benchmark apps of the three-class experiment (manual §6.9)
+    _b("bench_numeric", "科学计算基准", "compute", "numeric",
+       note="科学计算 (一个工作进程): LU 分解求解 + FFT + n 体积分, 每个任务约 0.2 s; 记录每个任务的墙钟 / CPU 时间"),
+    _b("bench_compress", "压缩解压基准", "compute", "compress", "--workers 2",
+       note="两个工作进程各自 zlib -6 压缩 8 MB 再解压校验 (真的用到两个核, 限单核时吞吐减半)"),
+    _b("bench_download", "下载基准", "download", "download",
+       note="HTTP Range 分片下载 (CF_BENCH_URL, 默认本机限速源 127.0.0.1:18080) 写盘 + 每 0.5 s 测一次 TCP 建连时延 "
+            "(下载源, 以及 CF_BENCH_RTT_HOST)"),
 ]}
 
 CATEGORIES = {"download": "下载", "push": "通知推送", "compute": "计算处理"}
@@ -313,7 +332,7 @@ def with_overrides(overrides: Optional[dict], placeholder_apps: Optional[Sequenc
         else:
             d = {"id": id_, "name": ov.get("name", id_), "category": ov.get("category", "compute"),
                  "cmd": ov.get("cmd", id_), "match": ov.get("match", id_), "wm_class": ov.get("wm_class", id_)}
-            for k in ("name_rx", "package", "exe", "install", "note", "substitute", "kind", "work"):
+            for k in ("name_rx", "package", "exe", "install", "note", "substitute", "kind", "work"):   # kind incl. "bench"
                 if k in ov:
                     d[k] = ov[k]
             if "notify_names" in ov:

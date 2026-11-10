@@ -7,6 +7,13 @@
                        PSI, swap)
   latency_cdf.png      CDF of switch latency per policy (all runs), split resident / shrunk
   bg_tradeoff.png      per run: background PSS saving vs P95 latency, marker = policy, colour = scenario
+  <run>_swapflow.png   per app, from the moment it was switched away: memory the kernel reclaimed from its
+                       cgroup (out) vs memory it paged back (in), per sample interval and cumulative, every
+                       background episode overlaid + mean - shows the transient after the switch and whether
+                       the two flows converge (steady state)
+  squeeze_apps.png     runs recorded with per_process: per app, grouped by run - active footprint vs
+                       background resident PSS, CPU in the background (% of a core), swap traffic per
+                       minute (reclaimed / paged back), switch-back latency
 
     python3 -m cf.linux.analyze results/matrix/*.jsonl --plots-dir results/matrix/plots
 """
@@ -208,6 +215,285 @@ def plot_tradeoff(rows: list[dict], path: str) -> bool:
     return True
 
 
+def swap_flow_episodes(run: dict, app: str) -> list[dict]:
+    """Background episodes of `app`: consecutive steps in which it was not the requested app, starting
+    right after a step in which it was (from_start=False) or at the beginning of the run (True).
+    Each episode is {"from_start", "pts": [(t_s since the switch-away, reclaimed_mb, paged_back_mb,
+    swap_delta_mb)]} cumulative from the episode start, taken from after_launch (t=0), the dwell
+    samples and after_dwell of every step."""
+    steps = run["steps"]
+    out: list[dict] = []
+    cur: list[tuple[float, float, float, float]] = []
+    base = None
+    t_off = 0.0
+    from_start = True
+
+    def pt(d: dict, t: float):
+        nonlocal base
+        ps, mf, sw = d.get("cg_pgsteal"), d.get("majflt"), d.get("cg_swap_mb")
+        if ps is None or mf is None:
+            return None
+        if base is None:
+            base = (ps, mf, sw or 0.0)
+        return (round(t, 2), max(0.0, (ps - base[0]) * 4 / 1024), max(0.0, (mf - base[1]) * 4 / 1024),
+                (sw or 0.0) - base[2])
+
+    for s in steps:
+        if s["req"] == app:
+            if cur:
+                out.append({"from_start": from_start, "pts": cur})
+            cur, base, t_off, from_start = [], None, 0.0, False
+            continue
+        d1 = (s.get("after_launch") or {}).get("apps", {}).get(app)
+        if not d1 or d1.get("cg_pgsteal") is None:
+            continue
+        if not cur:
+            p0 = pt(d1, 0.0)
+            if p0:
+                cur.append(p0)
+        for x in s.get("timeline") or []:
+            d = (x.get("apps") or {}).get(app)
+            if d:
+                p = pt(d, t_off + (x.get("dt") or 0))
+                if p:
+                    cur.append(p)
+        d2 = (s.get("after_dwell") or {}).get("apps", {}).get(app)
+        if d2:
+            p = pt(d2, t_off + (s.get("dwell_s") or 0))
+            if p:
+                cur.append(p)
+        t_off += (s.get("dwell_s") or 0) + 3.0          # ~switch overhead between steps
+    if cur:
+        out.append({"from_start": from_start, "pts": cur})
+    return out
+
+
+def _slope_mb_per_min(pts, idx: int, frac: float = 0.5):
+    """Slope of column idx over the last `frac` of the episode (MB/min)."""
+    if len(pts) < 3:
+        return None
+    t_end = pts[-1][0]
+    tail = [p for p in pts if p[0] >= t_end * (1 - frac)]
+    if len(tail) < 2 or tail[-1][0] <= tail[0][0]:
+        return None
+    return 60 * (tail[-1][idx] - tail[0][idx]) / (tail[-1][0] - tail[0][0])
+
+
+def _transient_end_s(pts) -> float | None:
+    """Seconds after the switch-away until the per-interval reclaim settles: the first interval whose
+    reclaimed MB is at most twice the median of the second half of the episode."""
+    if len(pts) < 6:
+        return None
+    d = [(pts[k][0], pts[k][1] - pts[k - 1][1]) for k in range(1, len(pts))]
+    tail = sorted(v for _, v in d[len(d) // 2:])
+    med = tail[len(tail) // 2]
+    for t, v in d:
+        if v <= 2 * med + 1.0:
+            return t
+    return None
+
+
+_CJK_FONTS = ("Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "WenQuanYi Zen Hei",
+              "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "SimHei", "Droid Sans Fallback")
+
+
+def _use_cjk_font() -> bool:
+    """Put the first installed Chinese font in front of the sans-serif list; False when there is none
+    (the figures then fall back to English labels instead of empty boxes)."""
+    from matplotlib import font_manager, rcParams
+    have = {f.name for f in font_manager.fontManager.ttflist}
+    for name in _CJK_FONTS:
+        if name in have:
+            rcParams["font.sans-serif"] = [name] + [x for x in rcParams["font.sans-serif"] if x != name]
+            rcParams["axes.unicode_minus"] = False
+            return True
+    return False
+
+
+def _app_cn(app: str) -> str:
+    from .xlsx import APP_CN
+    return APP_CN.get(app, app)
+
+
+def plot_swap_flow(run: dict, path: str) -> bool:
+    """Per app: how fast its memory is pushed out (reclaimed from the cgroup) and pulled back in
+    (major faults) after it was switched to the background - MB per sample interval on the left,
+    cumulative on the right, every background episode overlaid on one time axis from the moment of
+    the switch-away, mean in bold.  The transient right after the switch is shaded; the steady-state
+    rates of the longest episode are annotated.  Labels are Chinese when a CJK font is installed."""
+    apps = list(run["meta"].get("apps") or [])
+    eps: dict[str, list[dict]] = {}
+    for a in apps:
+        all_eps = [e for e in swap_flow_episodes(run, a) if len(e["pts"]) >= 3]
+        real = [e for e in all_eps if not e["from_start"]]
+        if real or all_eps:
+            eps[a] = real or all_eps          # never switched away in this sweep: show the run-start episode
+    if not eps:
+        return False
+    plt = _plt()
+    zh = _use_cjk_font()
+    T = (lambda z, e: z) if zh else (lambda z, e: e)
+    every = float(run["meta"].get("config", {}).get("sample_every_s") or 0) or 10.0
+    c_out, c_in, c_sw = "#d62728", "#1f77b4", "#7f7f7f"
+    nan = float("nan")
+    fig, axes = plt.subplots(len(eps), 2, figsize=(13.5, 3.0 * len(eps)), squeeze=False)
+    for i, (a, episodes) in enumerate(eps.items()):
+        ax_f, ax_c = axes[i]
+        name = _app_cn(a) if zh else a
+        n_ep = len(episodes)
+        longest = max(episodes, key=lambda e: e["pts"][-1][0])["pts"]
+        nb = int(longest[-1][0] // every) + 1
+        sum_out = [0.0] * nb; sum_in = [0.0] * nb; cnt = [0] * nb
+        faint = 0.9 if n_ep == 1 else 0.25
+        for e in episodes:
+            pts = e["pts"]
+            ts = [p[0] for p in pts]
+            d_out, d_in, mid = [], [], []
+            for k in range(1, len(pts)):
+                dt = ts[k] - ts[k - 1]
+                if dt <= 0 or dt > 2.5 * every:          # missing samples (interrupted step): break the line
+                    d_out.append(nan); d_in.append(nan); mid.append((ts[k] + ts[k - 1]) / 2)
+                    continue
+                d_out.append((pts[k][1] - pts[k - 1][1]) * every / dt)
+                d_in.append((pts[k][2] - pts[k - 1][2]) * every / dt)
+                mid.append((ts[k] + ts[k - 1]) / 2)
+            ax_f.plot(mid, d_out, color=c_out, alpha=faint, linewidth=0.8)
+            ax_f.plot(mid, d_in, color=c_in, alpha=faint, linewidth=0.8)
+            ax_c.plot(ts, [p[1] for p in pts], color=c_out, alpha=faint, linewidth=0.9)
+            ax_c.plot(ts, [p[2] for p in pts], color=c_in, alpha=faint, linewidth=0.9)
+            for m, o, v in zip(mid, d_out, d_in):
+                if o != o:
+                    continue
+                bkt = min(nb - 1, int(m // every))
+                sum_out[bkt] += o; sum_in[bkt] += v; cnt[bkt] += 1
+        lbl_out = T("换出：内核从它那里收走的内存", "pushed out: memory the kernel reclaimed from it")
+        lbl_in = T("换回：它自己又读回来的内存", "pulled back: memory it paged back in")
+        if n_ep > 1:
+            xs = [(bk + 0.5) * every for bk in range(nb) if cnt[bk]]
+            ax_f.plot(xs, [sum_out[bk] / cnt[bk] for bk in range(nb) if cnt[bk]], color=c_out, linewidth=2.2,
+                      label=lbl_out + T(f"（粗线 = {n_ep} 次的平均）", f" (bold = mean of {n_ep})"))
+            ax_f.plot(xs, [sum_in[bk] / cnt[bk] for bk in range(nb) if cnt[bk]], color=c_in, linewidth=2.2,
+                      label=lbl_in + T(f"（淡线 = 每次单独）", " (faint = each episode)"))
+        else:
+            ax_f.plot([], [], color=c_out, linewidth=2.2, label=lbl_out)
+            ax_f.plot([], [], color=c_in, linewidth=2.2, label=lbl_in)
+        ax_c.plot([], [], color=c_out, linewidth=2, label=T("累计换出", "cumulative out"))
+        ax_c.plot([], [], color=c_in, linewidth=2, label=T("累计换回", "cumulative in"))
+        ax_c.plot([p[0] for p in longest], [p[3] for p in longest], color=c_sw, linestyle="--", linewidth=1,
+                  label=T("它占用的 swap 比切走时多了多少", "its swap usage vs the switch-away"))
+        # first interval = the one-shot squeeze on the switch-away
+        first_out = longest[1][1] - longest[0][1] if len(longest) > 1 else 0.0
+        t_tr = _transient_end_s(longest) if len(longest) > 1 and longest[1][0] <= 2.5 * every else None
+        if t_tr is not None and t_tr > 0:
+            for ax in (ax_f, ax_c):
+                ax.axvspan(0, t_tr, color="#ffd54f", alpha=0.25, linewidth=0)
+            ax_f.text(t_tr, 0.97, T(f"  暂态 ≈ {t_tr:.0f} 秒\n  切走瞬间一次性挤出 {first_out:.0f} MB",
+                                    f"  transient ≈ {t_tr:.0f} s\n  {first_out:.0f} MB pushed out at once"),
+                      transform=ax_f.get_xaxis_transform(), ha="left", va="top", fontsize=8, color="#7a5c00")
+        so, si = _slope_mb_per_min(longest, 1), _slope_mb_per_min(longest, 2)
+        if so is not None and si is not None:
+            ratio = (si / so * 100) if so > 1e-6 else 0.0
+            if ratio >= 80:
+                verdict = T("换出 ≈ 换回：达到稳态，内存只是在来回搬", "out ≈ in: steady state, pages just circulate")
+            elif ratio >= 20:
+                verdict = T("换出 > 换回：稳态，但一部分被丢掉的页不经缺页就回来了",
+                            "out > in: steady, part of the dropped pages come back without faults")
+            else:
+                verdict = T("几乎不再换回：后台基本安静", "almost nothing comes back: the app is quiet")
+            ax_c.text(0.98, 0.04, T(f"稳态（最长一次的后半段）：每分钟换出 {so:.0f} MB，换回 {si:.0f} MB（{ratio:.0f} %）\n{verdict}",
+                                    f"steady state (last half of the longest episode): out {so:.0f}, in {si:.0f} MB/min ({ratio:.0f} %)\n{verdict}"),
+                      transform=ax_c.transAxes, ha="right", va="bottom", fontsize=8,
+                      bbox=dict(boxstyle="round", facecolor="white", alpha=0.85, edgecolor="#cccccc"))
+        if episodes[0]["from_start"]:
+            ep_txt = T("这轮里没被切走过，从实验开始就在后台", "never requested in this sweep: in the background from the start")
+        else:
+            ep_txt = T(f"被切到后台 {n_ep} 次", f"{n_ep} background episode{'s' if n_ep > 1 else ''}")
+        ax_f.set_title(T(f"{name}：每 {every:g} 秒换出 / 换回多少（{ep_txt}）",
+                         f"{a}: MB pushed out / pulled back per {every:g} s ({ep_txt})"), fontsize=10)
+        ax_c.set_title(T(f"{name}：从切到后台起的累计量（两条线平行 = 稳态）",
+                         f"{a}: cumulative since the switch-away (parallel lines = steady state)"), fontsize=10)
+        for ax in (ax_f, ax_c):
+            ax.grid(alpha=0.3); ax.set_xlim(left=0); ax.set_ylabel(T("内存量 (MB)", "MB"))
+        ax_f.legend(fontsize=7, loc="upper right"); ax_c.legend(fontsize=7.5, loc="upper left")
+        if i == len(eps) - 1:
+            for ax in (ax_f, ax_c):
+                ax.set_xlabel(T("切到后台后经过的时间 (秒)", "s since the app left the foreground"))
+    fig.suptitle(T(f"{_name(run)}：应用切到后台后，内存被换出 / 换回的过程\n"
+                   "红 = 换出（内核从该应用的 cgroup 回收的页，pgsteal）；蓝 = 换回（该应用重新缺页读回的页，major fault）；"
+                   "黄色底 = 刚切走的暂态",
+                   f"{_name(run)}: swap flow of the background apps\n"
+                   "red = pushed out (pgsteal of the app's cgroup); blue = pulled back (major faults x 4 KB); "
+                   "yellow = transient after the switch-away"), fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.97)); fig.savefig(path, dpi=110); plt.close(fig)
+    return True
+
+
+def plot_squeeze_apps(runs: list[dict], path: str) -> bool:
+    """Five panels, one bar group per app, one bar per run (none / squeeze / mild ...)."""
+    from .analyze import squeeze_app_rows
+    runs = [r for r in runs if r["meta"].get("config", {}).get("per_process")]
+    if not runs:
+        return False
+    plt = _plt()
+    rows = {_name(r): squeeze_app_rows(r) for r in runs}
+    apps = list(runs[0]["meta"].get("apps") or [])
+    names = list(rows)
+    cmap = plt.get_cmap("tab10")
+    panels = [("bg_resid_mb", "resident PSS in the background (MB); hatched frame = active footprint m_fg", True),
+              ("bg_pct_of_m_fg", "background resident as % of m_fg", False),
+              ("bg_cpu_pct_core", "CPU obtained in the background (% of one core)", False),
+              ("bg_reclaim_mb_per_min", "swap traffic per minute in the background (MB): solid = reclaimed from the cgroup, "
+                                        "hatched = paged back (major faults)", False),
+              ("lat_p95_ms", "switch-back latency when requested (ms): bar = P95, mark = P50; n/a = never requested", False)]
+    fig, axes = plt.subplots(len(panels), 1, figsize=(max(8, 1.9 * len(apps) + 3), 3.1 * len(panels)))
+    width = 0.8 / max(1, len(names))
+    xs = list(range(len(apps)))
+    for ax, (col, title, with_mfg) in zip(axes, panels):
+        top = 0.0
+        for j, name in enumerate(names):
+            byapp = {r["app"]: r for r in rows[name]}
+            x = [i + (j - (len(names) - 1) / 2) * width for i in xs]
+            vals = [byapp.get(a, {}).get(col) for a in apps]
+            if col == "bg_reclaim_mb_per_min":
+                swin = [byapp.get(a, {}).get("bg_swapin_mb_per_min") or 0 for a in apps]
+                ax.bar([xi - width / 4 for xi in x], [v or 0 for v in vals], width * 0.45, color=cmap(j % 10), label=name)
+                ax.bar([xi + width / 4 for xi in x], swin, width * 0.45, color=cmap(j % 10), alpha=0.45, hatch="..")
+                for xi, v, w in zip(x, vals, swin):
+                    ax.text(xi - width / 4, v or 0, f"{v or 0:g}", ha="center", va="bottom", fontsize=6.5)
+                    ax.text(xi + width / 4, w, f"{w:g}", ha="center", va="bottom", fontsize=6.5, color="#444444")
+                top = max(top, max((v or 0) for v in vals), max(swin))
+                continue
+            ax.bar(x, [v or 0 for v in vals], width * 0.9, color=cmap(j % 10), label=name)
+            if with_mfg and j == 0:
+                mfg = [byapp.get(a, {}).get("m_fg_mb") or 0 for a in apps]
+                ax.bar(xs, mfg, 0.8, fill=False, edgecolor="#555555", hatch="//", linewidth=0.8, label="m_fg")
+                top = max(top, max(mfg))
+            if col == "lat_p95_ms":
+                p50 = [byapp.get(a, {}).get("lat_p50_ms") for a in apps]
+                ax.plot([xi for xi, v in zip(x, p50) if v], [v for v in p50 if v], "k_", markersize=12, markeredgewidth=2)
+                for xi, a in zip(x, apps):
+                    if not byapp.get(a, {}).get("n_req"):
+                        ax.text(xi, 0, "n/a", ha="center", va="bottom", fontsize=7, color="#777777")
+            for xi, v in zip(x, vals):
+                if v is not None:
+                    ax.text(xi, v, f"{v:g}", ha="center", va="bottom", fontsize=7)
+            top = max(top, max((v or 0) for v in vals))
+        ax.set_xticks(xs); ax.set_xticklabels(apps)
+        ax.set_title(title, fontsize=9.5); ax.grid(axis="y", alpha=0.3)
+        if col == "bg_pct_of_m_fg":
+            ax.axhline(10, color="#d62728", linestyle="--", linewidth=0.8)
+            ax.text(-0.45, 10.5, "10 % target", color="#d62728", fontsize=8, va="bottom")
+        if col == "bg_reclaim_mb_per_min" and top > 50:
+            ax.set_yscale("symlog", linthresh=10); ax.set_ylim(0, top * 3)
+        elif top > 0:
+            ax.set_ylim(0, top * 1.18)
+    h, l = axes[0].get_legend_handles_labels()
+    fig.legend(h, l, loc="upper center", ncol=len(l), fontsize=8, bbox_to_anchor=(0.5, 0.985), frameon=False)
+    fig.suptitle(f"per-app squeeze figures ({len(apps)} apps)", fontsize=11, y=0.998)
+    fig.tight_layout(rect=(0, 0, 1, 0.975)); fig.savefig(path, dpi=110); plt.close(fig)
+    return True
+
+
 def plot_all(runs: list[dict], out_dir: str) -> list[str]:
     from .analyze import summarize
     os.makedirs(out_dir, exist_ok=True)
@@ -219,10 +505,16 @@ def plot_all(runs: list[dict], out_dir: str) -> list[str]:
         p = os.path.join(out_dir, _name(r) + "_timeline.png")
         if plot_timeline(r, p):
             made.append(p)
+        p = os.path.join(out_dir, _name(r) + "_swapflow.png")
+        if plot_swap_flow(r, p):
+            made.append(p)
     p = os.path.join(out_dir, "latency_cdf.png")
     if plot_latency_cdf(runs, p):
         made.append(p)
     p = os.path.join(out_dir, "bg_tradeoff.png")
     if plot_tradeoff([summarize(r) for r in runs], p):
+        made.append(p)
+    p = os.path.join(out_dir, "squeeze_apps.png")
+    if plot_squeeze_apps(runs, p):
         made.append(p)
     return made
