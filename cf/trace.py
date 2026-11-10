@@ -5,6 +5,7 @@ Generators return a list of app indices / names. Options mirror the experiment p
 - Markov chain with a random sparse transition matrix
 - distribution drift: popularity permuted at `drift_at` (habit change test)
 - replay of a recorded trace (JSONL from the runner or plain text)
+- an explicit visiting pattern repeated T steps (`pattern`), round robin
 - usage scenarios of mainland-China apps (办公 / 刷社交媒体 / 通勤 / 购物 / 晚间娱乐, cf.scenarios)
   and a "day" that chains them (natural drift)
 """
@@ -122,4 +123,14 @@ def make_trace(apps: Sequence[str], cfg: dict) -> list[str]:
         return [a for a in seq if a in set(apps)][:T] if T else seq
     if kind == "round_robin":
         return [apps[t % len(apps)] for t in range(T)]
+    if kind == "pattern":
+        # an explicit visiting order, repeated; apps that are not available are skipped
+        have = set(apps)
+        pat = [a for a in cfg.get("pattern") or [] if a in have]
+        pat = [a for i, a in enumerate(pat) if i == 0 or a != pat[i - 1]]
+        if len(pat) > 2 and pat[-1] == pat[0]:
+            pat.pop()                      # the pattern wraps around: no app twice in a row
+        if len(pat) < 2:
+            raise ValueError("trace kind 'pattern' needs at least two available apps in trace.pattern")
+        return [pat[t % len(pat)] for t in range(T)]
     raise ValueError(f"unknown trace kind {kind}")
