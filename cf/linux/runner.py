@@ -46,6 +46,12 @@ DEFAULTS = {
     # window of a dwell (after quiet_after_s) is where the analyzer measures the steady swap-out rate
     "per_process": False,
     "quiet_after_s": 30.0,
+    # three-class experiment (manual §6.9): which apps are judged as interactive / compute / download
+    # (cf.linux.classes reads it from the meta record), and the responsiveness probe run on the
+    # requested app right after it was brought to the front: n _NET_WM_PING round trips, one every
+    # every_s seconds, inside the settle time (n = 0: off) -> launch["smooth"]
+    "classes": {},
+    "smooth_probe": {"n": 0, "every_s": 0.2, "timeout_s": 1.0},
     # apps that are not installed (desktop, nor an allowed substitute) run as the bundled placeholder
     # program under their own id, so the whole matrix can be run before the vendor apps are in place
     "placeholder_fill": False,
@@ -165,6 +171,7 @@ class ThrottleExperiment(Experiment):
             self.tiers[app] = tier
         self.log.info(f"resume: re-applied tiers - throttled {len(self.throttled)}, shrunk {len(self.shrunk)}, "
                       f"running {len(alive)}/{len(self.apps)}")
+        self._bench_collect(None)            # jobs logged while the runner was away belong to no step
 
     # ------------------------------------------------------------- lifecycle
     def prepare(self) -> None:
@@ -407,6 +414,7 @@ class ThrottleExperiment(Experiment):
                           f"the footprint is {floor_kb // 1024} MB (eta_min = {eta_min:.2f}) > B; the '{self.cfg['policy']}' "
                           f"policy will keep nothing resident and behave like static. Use eta >= {eta_min + 0.05:.2f} "
                           f"or a smaller throttle.mem_frac / mem_min_mb.")
+        self._bench_collect(None)            # the bench apps' jobs during the warmup are not part of any step
         return self.B_kb
 
     # ------------------------------------------------------------------ step
@@ -546,7 +554,9 @@ class ThrottleExperiment(Experiment):
         if was_shrunk and launch.get("launch_state") == "HOT":
             # process never left memory, but came back from a memory.high-shrunk tier (page-ins expected)
             launch["launch_state"] = "WARM"
-        time.sleep(self.cfg["settle_s"])
+        t_settle = time.time()
+        self._smooth_probe(req, launch)
+        time.sleep(max(0.0, self.cfg["settle_s"] - (time.time() - t_settle)))
         work_lost = self._work_check(req, launch)
         s1 = self.dev.sample(self.apps)
         rho = self._rho(s1)
@@ -566,6 +576,7 @@ class ThrottleExperiment(Experiment):
         timeline = self._dwell_sampling(max(0.0, dwell - (time.time() - t_dwell)), t_dwell, req)
         s2 = self.dev.sample(self.apps)
         wall = time.time() - t_dwell
+        bench = self._bench_collect(t_dwell)
         self._work_remember(req, launch)
         d1 = {p: self._app_dict(s1["apps"][p]) for p in self.apps}
         d2 = {p: self._app_dict(s2["apps"][p]) for p in self.apps}
@@ -603,8 +614,59 @@ class ThrottleExperiment(Experiment):
                "after_launch": {"system": s1["system"], "apps": d1},
                "after_dwell": {"system": s2["system"], "apps": d2},
                "tau_hat": pol.predicted_next_use(req)}
+        if bench:
+            rec["bench"], rec["t_dwell"] = bench, round(t_dwell, 3)
         self._log_step(rec, t_step)
         return rec
+
+    # ------------------------------------------------- bench apps / responsiveness probe
+    def _bench_collect(self, t_dwell: Optional[float]) -> dict:
+        """What the bench apps (kind "bench", cf.linux.bench_app) logged since the last call:
+        {app: [{"dt": seconds since the dwell began (negative = during the switch), "k": job | dl |
+        rtt | err, ...}]}.  With t_dwell None the records are only consumed."""
+        out: dict = {}
+        if not hasattr(self.dev, "bench_read"):
+            return out
+        for app in self.apps:
+            if self.kinds.get(app) != "bench":
+                continue
+            try:
+                recs = self.dev.bench_read(app)
+            except Exception as e:    # noqa: BLE001 - never let a log file abort the run
+                self.log.warn(f"{app}: bench log unreadable: {type(e).__name__}: {e}")
+                continue
+            if t_dwell is not None:
+                out[app] = [{"dt": round(r["t"] - t_dwell, 3), **{k: v for k, v in r.items() if k != "t"}}
+                            for r in recs]
+        return out
+
+    def _smooth_probe(self, req: str, launch: dict) -> None:
+        sp = self.cfg.get("smooth_probe") or {}
+        n = int(sp.get("n") or 0)
+        if n <= 0 or not launch.get("wid") or not hasattr(self.dev, "smooth_probe"):
+            return
+        try:
+            launch["smooth"] = self.dev.smooth_probe(req, launch["wid"], n, float(sp.get("every_s", 0.2)),
+                                                     float(sp.get("timeout_s", 1.0)))
+        except Exception as e:    # noqa: BLE001
+            self.log.warn(f"{req}: responsiveness probe failed: {type(e).__name__}: {e}")
+
+    @staticmethod
+    def _bench_note(bench: dict) -> str:
+        """' | bench numeric 58 jobs 262 ms, download 38.1 MB/s rtt 0.4 ms' for the step line."""
+        parts = []
+        for app, recs in bench.items():
+            jobs = sorted(r["ms"] for r in recs if r.get("k") == "job" and r["dt"] - r["ms"] / 1000 >= 0)
+            dl = [r for r in recs if r.get("k") == "dl" and r["dt"] - r["s"] >= 0]
+            rtt = sorted(r["ms"] for r in recs if r.get("k") == "rtt" and r.get("to") == "dl" and r.get("ms") is not None
+                         and r["dt"] >= 0)
+            name = app[len("bench_"):] if app.startswith("bench_") else app
+            if jobs:
+                parts.append(f"{name} {len(jobs)} jobs {jobs[len(jobs) // 2]:.0f} ms")
+            if dl:
+                parts.append(f"{name} {sum(r['b'] for r in dl) / 2 ** 20 / max(1e-6, sum(r['s'] for r in dl)):.1f} MB/s"
+                             + (f" rtt {rtt[len(rtt) // 2]:.1f} ms" if rtt else ""))
+        return (" | bench " + ", ".join(parts)) if parts else ""
 
     # ------------------------------------------------------------ scripted work
     def _setup_work(self) -> None:
@@ -761,7 +823,8 @@ class ThrottleExperiment(Experiment):
                 f"(act {la.get('activate_ms')} ping {la.get('ping_ms')}) <-{src:<3} "
                 f"| S={len(rec['resident']):2d} bg={len(rec['throttled']):2d} shr={len(rec['shrunk']):2d} "
                 f"| M_bg {mbg:5d}/{b} MB{viol} | bg {cores:.2f} cores thr {thr:.1f}s dl {dl:.1f}MB ntf {ntf} "
-                f"| {len(rec['actions']['tiers'])} tier changes {rec['action_ms'] / 1000:.1f}s{lost}")
+                f"| {len(rec['actions']['tiers'])} tier changes {rec['action_ms'] / 1000:.1f}s{lost}"
+                + self._bench_note(rec.get("bench") or {}))
         (self.log.warn if rec["state_lost"] or rec["killed_since_prev"] else self.log.step)(line)
 
     # ------------------------------------------------------------------- run

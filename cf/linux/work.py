@@ -94,7 +94,7 @@ _MOBILE = {
 
 def default_spec(a: LinuxApp) -> dict:
     """What to do / what to read back for this app when nothing is configured."""
-    if a.kind == "placeholder":
+    if a.kind in ("placeholder", "bench"):
         spec = {"kind": "none", "oracle": "statefile"}
     elif a.kind == "mobile":
         spec = dict(_MOBILE.get(a.category) or {"kind": "swipe", "oracle": "ui", "swipes": 2})
@@ -309,7 +309,7 @@ class X11WorkDriver:
         want = sentinel.encode() if sentinel else None
         data = None
         while True:
-            time.sleep(0.15)
+            time.sleep(0.05)
             data = self._clip_read()
             if data is not None and data != want:
                 return self._digest(data)
@@ -404,8 +404,13 @@ class X11WorkDriver:
             sentinel = f"cf-oracle-sentinel {time.time_ns()}"
             parked = self._clip_set(sentinel)
             self.err = ""
+            t_keys = time.monotonic()
             self._key("ctrl+a", "ctrl+c")
             out["value"] = self._clip_wait(sentinel if parked else None, timeout=2.0)
+            # select-all + copy -> the text is on the clipboard: how long the app took to act on input
+            # (two 60 ms key delays + one 50 ms poll are the floor; a sluggish app adds to it)
+            if out["value"] is not None and not self.err:
+                out["read_ms"] = int((time.monotonic() - t_keys) * 1000)
             self._key("End")                      # drop the selection
             if out["value"] is None:
                 out["error"] = self.err[:80] or "clipboard-unavailable"

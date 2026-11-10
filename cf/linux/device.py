@@ -111,6 +111,7 @@ class LinuxDesktop:
         self._warned_unmanaged: set[str] = set()
         self._ping_misses: dict[str, int] = {}       # consecutive unanswered pings per app
         self.ping_dead: set[str] = set()             # apps that advertise _NET_WM_PING but never answer
+        self._bench_off: dict[str, int] = {}         # bytes of each bench app's job log already read
 
     # ------------------------------------------------------------- probing
     def probe(self) -> dict:
@@ -362,6 +363,33 @@ class LinuxDesktop:
         res["host_elapsed_ms"] = int((time.monotonic() - t0) * 1000)
         self.tiers[id_] = "fg"
         return res
+
+    def smooth_probe(self, id_: str, wid: Optional[int], n: int = 5, every_s: float = 0.2,
+                     timeout_s: float = 1.0) -> dict:
+        """How smoothly the app reacts right after it was brought to the front: `n` _NET_WM_PING round
+        trips, one every `every_s` seconds.  A ping the event loop answers late (or not within
+        `timeout_s` -> None) is a stall the user would feel.  {"supported": False} for apps that
+        do not answer pings at all (Qt frameless windows, the Android display)."""
+        out: dict = {"supported": False, "pings_ms": []}
+        if not wid or n <= 0 or self.is_mobile(id_) or id_ in self.ping_dead:
+            return out
+        if not (self.pinger and self.pinger.available and self.pinger.supports(wid)):
+            return out
+        out["supported"] = True
+        for i in range(n):
+            t0 = time.monotonic()
+            out["pings_ms"].append(self.pinger.ping(wid, timeout=timeout_s))
+            rest = every_s - (time.monotonic() - t0)
+            if rest > 0 and i < n - 1:
+                time.sleep(rest)
+        return out
+
+    # ------------------------------------------------------------ bench apps
+    def bench_read(self, id_: str) -> list[dict]:
+        """New records of a bench app's job log (cf.linux.bench_app) since the last call."""
+        from .bench_app import log_path, read_new
+        recs, self._bench_off[id_] = read_new(log_path(id_), self._bench_off.get(id_, 0))
+        return recs
 
     def minimize(self, id_: str) -> None:
         w = self.window(id_)

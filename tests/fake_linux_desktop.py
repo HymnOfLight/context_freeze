@@ -27,7 +27,13 @@ OVERRIDES = {
     "fake_office": {"name": "假办公", "category": "compute"},
     "fake_cad": {"name": "假CAD", "category": "compute"},
 }
-for _id, _ov in OVERRIDES.items():
+# bench apps (kind "bench", cf.linux.bench_app on the real desktop): a compute one logging jobs and
+# a download one logging MB per interval + connect times - add them to a test's apps / app_overrides
+BENCH_OVERRIDES = {
+    "fake_num": {"name": "假计算基准", "category": "compute", "kind": "bench"},
+    "fake_dlb": {"name": "假下载基准", "category": "download", "kind": "bench"},
+}
+for _id, _ov in {**OVERRIDES, **BENCH_OVERRIDES}.items():
     _ov.update({"cmd": "true", "match": _id, "wm_class": _id, "arch": ["any"]})
 
 APPS = {k: LinuxApp(k, v["name"], v["category"], cmd="true", match=k, wm_class=k, arch=("any",),
@@ -107,6 +113,12 @@ class FakeLinuxDesktop:
         self.crash_app: str | None = None       # this app's process vanishes after the next sample
         self.oom_app: str | None = None         # memory.events oom_kill increments on the next sample
         self.vm = {"pswpin": 0, "pswpout": 0, "pgmajfault": 0}
+        self.ping_dead: set[str] = set()        # apps that never answer _NET_WM_PING (no smooth probe)
+        self.bench_job_s = 0.004                # a bench job with a whole core; slower by 1 / cpu_cores when limited
+        self.bench_mbps = 40.0                  # download speed with a whole core
+        self.bench_tick_s = 0.01                # download: one "dl" + one "rtt" record per tick
+        self._bench_t: dict[str, float] = {}
+        self._woke_missing: dict[str, int] = {}
 
     # ------------------------------------------------------------- probing
     def probe(self):
@@ -155,6 +167,7 @@ class FakeLinuxDesktop:
             res["launch_state"] = "HOT"
             missing = s["m"] - s["resident"]
             res["ping_ms"] = round(0.3 + missing / 1200, 2)      # ~1.2 GB/s page-in
+            self._woke_missing[id_] = missing
             if missing:
                 self.vm["pswpin"] += missing // 4
                 self.vm["pgmajfault"] += missing // 16
@@ -171,6 +184,39 @@ class FakeLinuxDesktop:
 
     def minimize(self, id_):
         pass
+
+    def smooth_probe(self, id_, wid, n=5, every_s=0.2, timeout_s=1.0):
+        """The first ping after a switch back from a shrunk tier is slow (pages still coming back)."""
+        if id_ in self.ping_dead or not wid or n <= 0:
+            return {"supported": False, "pings_ms": []}
+        first = round(0.3 + self._woke_missing.pop(id_, 0) / 500, 2)
+        return {"supported": True, "pings_ms": [first] + [0.3] * (n - 1)}
+
+    def bench_read(self, id_):
+        """Records a bench app would have logged since the last call, at the speed its current tier
+        allows: compute -> "job" records, download -> "dl" + "rtt" records."""
+        s = self.state[id_]
+        now = time.time()
+        if s["pid"] is None or self.cat[id_].kind != "bench":
+            return []
+        t = self._bench_t.get(id_, now)
+        limited = self.tiers.get(id_, "fg") in ("bg", "shrunk")
+        share = min(1.0, self.profile.cpu_cores) if limited else 1.0
+        out = []
+        if self.cat[id_].category == "download":
+            while t + self.bench_tick_s <= now:
+                t += self.bench_tick_s
+                out.append({"t": t, "k": "dl", "b": int(self.bench_mbps * share * 2 ** 20 * self.bench_tick_s),
+                            "s": self.bench_tick_s})
+                out.append({"t": t, "k": "rtt", "ms": 0.4, "to": "dl", "late": round(10 * (1 - share), 2) if limited else 0.0})
+        else:
+            d = self.bench_job_s / share
+            while t + d <= now:
+                t += d
+                out.append({"t": t, "k": "job", "ms": round(d * 1000, 3), "cpu": round(self.bench_job_s * 1000, 3),
+                            "w": 0, "ok": True})
+        self._bench_t[id_] = t
+        return out
 
     def set_tier(self, id_, tier, m_fg_bytes=None, memory_high_bytes=None):
         s = self.state[id_]
@@ -332,7 +378,7 @@ class FakeWorkDriver:
         if app_id in self.lost_pending:
             self.lost_pending.discard(app_id)
             self.docs[app_id] = ""
-        return {"oracle": "clipboard", "value": self.docs.get(app_id, ""), "ts": time.time()}
+        return {"oracle": "clipboard", "value": self.docs.get(app_id, ""), "ts": time.time(), "read_ms": 180}
 
     def compare(self, before, after, app_id=None):
         from cf.linux.work import compare
