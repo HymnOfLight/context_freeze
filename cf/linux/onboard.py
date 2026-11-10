@@ -116,8 +116,8 @@ _GENERIC_LOGIN = {"method": "optional", "main": MAIN_WINDOW, "needs": "按应用
 
 def login_spec(a: LinuxApp, overrides: Optional[dict] = None) -> dict:
     """Login method / main-window size / prep hint for an app (config `onboard_overrides` win)."""
-    if a.kind == "placeholder":
-        spec = {"method": "none", "main": (0, 0), "needs": "占位程序, 无账号", "prep": "无需准备"}
+    if a.kind in ("placeholder", "bench"):
+        spec = {"method": "none", "main": (0, 0), "needs": "内置程序, 无账号", "prep": "无需准备"}
     elif a.is_mobile:
         spec = dict(_MOBILE_LOGIN)
     else:

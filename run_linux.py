@@ -252,7 +252,7 @@ def main(argv=None) -> int:
                     print(f"{id_}: unknown app"); continue
                 targets.append(id_)
         else:
-            targets = [u for u in used if cat[u].kind != "placeholder"]
+            targets = [u for u in used if cat[u].kind not in ("placeholder", "bench")]
         if args.onboard_check:
             rc = OB.check(dev, targets, base)
             dev.close()
