@@ -79,8 +79,9 @@ BENCH_CMD = "python3 -m cf.linux.bench_app --app {id} --kind {kind} --title '{na
 
 def _b(id_: str, name: str, category: str, kind: str, extra: str = "", note: str = "", install: str = "") -> LinuxApp:
     """Measurable app (cf.linux.bench_app): a window doing one fixed job over and over and logging
-    every job's time.  Kinds sevenzip / z3 run the installed tool (cf.linux.tool_jobs); the others
-    are bundled stand-ins for a compute / download application."""
+    every job's time.  The kinds of cf.linux.tool_jobs (sevenzip, z3, openssl, llama, tesseract,
+    ffmpeg) run the installed tool; the others are bundled stand-ins for a compute / download
+    application."""
     return LinuxApp(id_, name, category, cmd=(BENCH_CMD.format(id=id_, kind=kind, name=name) + " " + extra).strip(),
                     match=rf"bench_app.*--app {id_}\b", wm_class=rf"^cf-{id_}$", arch=("any",),
                     install=install or "bundled: python3 -m cf.linux.bench_app (needs python3-xlib)", kind="bench",
@@ -296,6 +297,16 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
     _b("z3", "Z3 求解器", "compute", "z3", install="sudo apt install z3",
        note="真实的 Z3 SMT 求解器: 每个任务解三个约束问题 —— 24 皇后 (整数约束, sat)、9 只鸽子进 8 个笼 (命题, unsat)、"
             "32 位半素数分解 (位向量, sat), 答案必须正确; 单线程"),
+    _b("openssl", "OpenSSL 加解密", "compute", "openssl", install="sudo apt install openssl",
+       note="真实的 OpenSSL: 对一个 32 MB 文件做口令加密 (AES-256-CBC, PBKDF2 60 万次迭代)、解密并核对 SHA-256、"
+            "RSA-3072 签名并验签; 三个操作各记一条耗时; 单线程"),
+    _b("llama", "大模型推理 (llama.cpp)", "compute", "llama", install="scripts/ubuntu/install_compute_apps.sh --llama",
+       note="真实的本地大模型: llama.cpp 的 llama-completion + GGUF 模型 (默认 Qwen2.5-0.5B-Instruct Q4_K_M, 约 470 MB); "
+            "每个任务启动一次程序、载入模型、对同一个问题贪心生成恰好 64 个 token; 单线程"),
+    _b("tesseract", "文字识别 (Tesseract)", "compute", "tesseract", install="sudo apt install tesseract-ocr",
+       note="真实的 Tesseract OCR (LSTM 神经网络): 识别一页 A4 英文 (200 dpi, 启动时画好), 至少认对 90 % 的词; 单线程"),
+    _b("ffmpeg", "视频转码 (FFmpeg)", "compute", "ffmpeg", install="sudo apt install ffmpeg",
+       note="真实的 FFmpeg: 把一段 4 s 的 1280x720 视频解码、缩到 960x540、用 libx264 (preset medium, crf 23) 重新编码; 两线程"),
     # ------------------------------------- bundled stand-ins (no tool to install; configs/ubuntu_arm64_classes_synthetic.json)
     _b("bench_numeric", "科学计算基准", "compute", "numeric",
        note="科学计算 (一个工作进程): LU 分解求解 + FFT + n 体积分, 每个任务约 0.2 s; 记录每个任务的墙钟 / CPU 时间"),
@@ -616,9 +627,9 @@ def is_installed(a: LinuxApp, arch: Optional[str] = None, mobile=None) -> bool:
         if importlib.util.find_spec("Xlib") is None:
             return False
         m = re.search(r"cf\.linux\.bench_app\b.*--kind (\S+)", a.cmd)
-        if m:                                  # kinds that drive a real tool (7z, z3) need it on PATH
-            from .tool_jobs import TOOLS, find_tool
-            return m.group(1) not in TOOLS or find_tool(m.group(1)) is not None
+        if m:                                  # kinds that drive a real tool (7z, z3, llama.cpp + a model ...) need it
+            from .tool_jobs import missing
+            return not missing(m.group(1))
         return True
     if a.exe and os.path.exists(a.exe):
         return True

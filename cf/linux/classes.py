@@ -46,7 +46,7 @@ DOWNLOAD_COLS = ["run", "policy", "app", "fg_s", "fg_mbps", "fg_mbps_p10", "fg_r
                  "bg_vs_none_pct", "rtt_lost_pct", "errors", "bg_tiers", "source", "fg_socks", "bg_socks", "fg_recvq_p95_kb",
                  "bg_recvq_p95_kb", "fg_idle_pct", "bg_idle_pct", "fg_retrans", "bg_retrans", "fg_disk_mbps", "bg_disk_mbps"]
 IDLE_KBPS = 10.0          # a sample below this rate: nothing is being downloaded (task finished / paused / stalled)
-OP_CN = {"compress": "压缩", "extract": "解压"}
+OP_CN = {"compress": "压缩", "extract": "解压", "encrypt": "加密", "decrypt": "解密", "sign": "签名验签"}
 
 INTERACTIVE_CN = [("run", "格"), ("app", "应用"), ("n_calls", "呼叫次数"), ("n_limited", "其中从受限后台切回"),
                   ("resp_p50_ms", "响应 P50 (ms)"), ("resp_p95_ms", "响应 P95 (ms)"), ("resp_max_ms", "响应最大 (ms)"),
@@ -87,7 +87,10 @@ NOTES = [
     "全选+复制 到剪贴板拿到文本的时间 (两次按键延时 + 轮询约 0.2 s 是固定底噪, 看格与格的差). 不应答 ping 的应用 (微信等) 只有输入回读.",
     "计算型: 同一个固定任务循环做, 由真实程序完成: 7-Zip = 用系统里装的 7z 把约 4 MB 的真实文件 (文档 / python 源码 / 可执行文件) "
     "以默认级别 -mx=5、两线程压成 .7z (压缩), 再解压出来 (解压), 两个操作各占一行; Z3 求解器 = 用系统里装的 z3 依次解三个约束问题 "
-    "(24 皇后 sat / 9 鸽 8 笼 unsat / 32 位半素数分解 sat), 三个都解对算一个任务. (合成配置里: 科学计算 = LU + FFT + n 体, "
+    "(24 皇后 sat / 9 鸽 8 笼 unsat / 32 位半素数分解 sat), 三个都解对算一个任务; OpenSSL = 对一个 32 MB 文件做口令加密 (AES-256-CBC, "
+    "PBKDF2 60 万次迭代)、解密并核对 SHA-256、RSA-3072 签名并验签, 三个操作各占一行; 大模型推理 = llama.cpp 每个任务启动一次、载入本地 GGUF 模型、"
+    "对同一个问题贪心生成恰好 64 个 token (单线程); 文字识别 = Tesseract (LSTM) 识别一页 A4 英文, 至少认对 90 % 的词; "
+    "视频转码 = FFmpeg 把 4 s 的 720p 视频缩到 540p 并用 libx264 重新编码. (合成配置里: 科学计算 = LU + FFT + n 体, "
     "压缩解压 = zlib.) 前台 = 该应用是当前请求的应用的停留期; 后台 = 其它应用在前台的停留期 (只统计至少 90 % 的时间落在同一档位里的任务). "
     "任务内 CPU 占比 = 该程序的 CPU 时间 / 任务墙钟时间 (两线程的 7z 压缩不受限时约 180 %), 低说明任务大部分时间在等 CPU 配额或等缺页.",
     "下载型 (真实应用: 百度网盘 / 迅雷, 数据来源 = sockets): 每秒从内核读一次该应用全部 TCP 连接的统计 (ss -tin, 按 cgroup / 进程归属), "
