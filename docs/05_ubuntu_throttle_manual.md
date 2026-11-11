@@ -677,7 +677,7 @@ CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # 只跑两格;  T=20 DWELL=
 每步记录里 `bg.<app>.reclaim_mb` / `swap_delta_mb` 是这一步停留里从该 cgroup 回收 / 换出的量; `actions.limits.<app>.squeeze` 是切走时那次挤压的前后 `memory.current`。
 `report.md` 的 Per process 一节下面会列出后台仍高于前台 10 % 的进程 (`squeeze_pct` < 90, 前台 ≥ 20 MB): 剩下的就是 `memory.reclaim` 拿不走的 —— 钉住的页 (GPU / 共享缓冲、mlock、内核侧)、应用在后台一直碰的工作集; 看它的 `swap_growth_mb_per_min` 是否一直 > 0 就知道是 "拿不走" 还是 "拿走又被碰回来"。
 
-**换出 / 换入随时间的曲线** `plots/<run>_swapflow.png` (每个有 per-process 数据的 run 一张; 每个应用一行; 装了中文字体 —— Noto Sans CJK / 文泉驿 / 思源黑体 / PingFang 任一 —— 就是中文标注, 没有则自动退回英文): 横轴是**从该应用被切到后台起的秒数**, 左列是每个采样间隔内从它的 cgroup **换出**的量 (`Δpgsteal × 4 KB`, 红) 和它**换回**的量 (`Δmajflt × 4 KB`, 蓝; 都折算成每 `sample_every_s` 秒的量, 缺样本的间隔断开不画), 右列是两者自切走起的累计量 (灰虚线 = 该 cgroup `memory.swap.current` 比切走时多了多少)。一次 sweep 里同一个应用会被切走好几次, 每次 (一个 "episode") 都淡色叠在同一时间轴上, 粗线是各次的均值; 这轮里一次都没被切走过的应用 (如 QQ) 画它从实验开始起的那一段, 标题会注明。黄色底是**暂态**: 从切走到每间隔换出量回落到后半段中位数 2 倍以内的那段, 旁边标出切走瞬间一次性挤出的 MB; 右下角标出最长那次后半段的斜率 (每分钟换出 / 换回 MB 和换回占换出的 %) 并给一句判断: ≥ 80 % "换出 ≈ 换回, 稳态, 内存只是在来回搬"; 20–80 % "换出 > 换回, 稳态, 但一部分被丢掉的页 (文件页经 readahead) 不经缺页就回来了"; < 20 % "几乎不再换回, 后台安静"。两条累计线**平行** = 到了稳态。要看清从暂态到稳态的收敛, 用 `CELLS="none squeeze1" SAMPLE=2` 跑: `squeeze1` 与 `squeeze` 相同但 `squeeze_every_s 0` (只在切走时挤一次, 之后只靠 `memory.high` 顶着), 采样 2 s; 默认的 `squeeze` 格每 10 s 再挤一轮, 曲线是锯齿 (每轮挤出 ~150 MB, 10 s 内又页回), 采样 10 s 也太粗。
+**换出 / 换入随时间的曲线** `plots/<run>_swapflow.png` (每个有 per-process 数据的 run 一张; 每个应用一行; 有中文字体就是中文标注, 没有则自动退回英文; 字体怎么选、图里出现方框怎么办见 §10 "图里的字是方框"): 横轴是**从该应用被切到后台起的秒数**, 左列是每个采样间隔内从它的 cgroup **换出**的量 (`Δpgsteal × 4 KB`, 红) 和它**换回**的量 (`Δmajflt × 4 KB`, 蓝; 都折算成每 `sample_every_s` 秒的量, 缺样本的间隔断开不画), 右列是两者自切走起的累计量 (灰虚线 = 该 cgroup `memory.swap.current` 比切走时多了多少)。一次 sweep 里同一个应用会被切走好几次, 每次 (一个 "episode") 都淡色叠在同一时间轴上, 粗线是各次的均值; 这轮里一次都没被切走过的应用 (如 QQ) 画它从实验开始起的那一段, 标题会注明。黄色底是**暂态**: 从切走到每间隔换出量回落到后半段中位数 2 倍以内的那段, 旁边标出切走瞬间一次性挤出的 MB; 右下角标出最长那次后半段的斜率 (每分钟换出 / 换回 MB 和换回占换出的 %) 并给一句判断: ≥ 80 % "换出 ≈ 换回, 稳态, 内存只是在来回搬"; 20–80 % "换出 > 换回, 稳态, 但一部分被丢掉的页 (文件页经 readahead) 不经缺页就回来了"; < 20 % "几乎不再换回, 后台安静"。两条累计线**平行** = 到了稳态。要看清从暂态到稳态的收敛, 用 `CELLS="none squeeze1" SAMPLE=2` 跑: `squeeze1` 与 `squeeze` 相同但 `squeeze_every_s 0` (只在切走时挤一次, 之后只靠 `memory.high` 顶着), 采样 2 s; 默认的 `squeeze` 格每 10 s 再挤一轮, 曲线是锯齿 (每轮挤出 ~150 MB, 10 s 内又页回), 采样 10 s 也太粗。
 
 **跑之前 (不用重启虚拟机, 不用关这 5 个应用):**
 
@@ -740,13 +740,16 @@ python3 -m cf.linux.classes results/arm64_classes/*.jsonl --out results/arm64_cl
 
 **上机时间**: 预热 8 个应用约 1.5 分钟 + 24 步 × (停留 15 s + 切换 / 探测 / 内容核对约 5 s) ≈ **10 分钟一格**; 三格约 30 分钟, 两格约 20 分钟。中断后同一条命令续跑, 已完成的格跳过。
 
-**输出** (`$OUT/`): `classes_report.md` (三张表, 直接可读; 整列为空的列不显示), `classes_tables.xlsx` (三个 sheet + 说明, 中文表头), `classes_interactive.csv` / `classes_compute.csv` / `classes_download.csv` (完整的列; 计算型每个 (应用, 操作) 一行, 如 `sevenzip:compress` / `sevenzip:extract`), `plots/classes.png` (3 行 × 2 列: 响应时间 / 顺滑度, 单任务时延 / 每分钟任务数, 下载速度 / 网络时延与处理延迟), `plots/<run>_bench.png` (每个计算 / 下载应用随时间的单任务时延 / 下载速度 / 时延, 绿色底 = 它在前台), 以及通常的 `summary.csv` 和每格的 jsonl / log。运行时每步的日志行末尾也有 `| bench sevenzip 27 jobs compress 465 ms / extract 79 ms, z3 16 jobs 897 ms, xunlei 2.0 MB/s rtt 31.0 ms wake 0.1 ms`。
+**输出** (`$OUT/`): `classes_report.md` (三张表, 直接可读; 整列为空的列不显示), `classes_tables.xlsx` (三个 sheet + 说明, 中文表头), `classes_interactive.csv` / `classes_compute.csv` / `classes_download.csv` (完整的列; 计算型每个 (应用, 操作) 一行, 如 `sevenzip:compress` / `sevenzip:extract`), `plots/classes.png` (每类一行, 没有数据的类不画 —— 配置里去掉了下载型就只有两行: 响应时间 / 顺滑度, 单任务时延 / 每分钟任务数, 下载速度 / 网络时延与处理延迟), `plots/<run>_bench.png` (每个计算 / 下载应用随时间的单任务时延 / 下载速度 / 时延, 绿色底 = 它在前台), 以及通常的 `summary.csv` 和每格的 jsonl / log。运行时每步的日志行末尾也有 `| bench sevenzip 27 jobs compress 465 ms / extract 79 ms, z3 16 jobs 897 ms, xunlei 2.0 MB/s rtt 31.0 ms wake 0.1 ms`。
 
 **怎么读**:
 
 - ① 里 "响应" 是在限制**已经解除之后**量的 (runner 先把被请求的应用提回 fg 档再激活窗口), 所以它回答的是 "被压过的应用醒过来要多久" —— 被换出的页要缺页换回, 正卡在 `memory.high` 惩罚性休眠里的线程要等休眠结束。`n_limited` 是其中有几次是从受限的后台切回的; 第 0 步 (预热后的第一次切换, 那时还没有任何应用被限制) 和冷启动不计入。
 - ② 里前台列是这个任务不受限时的速度; 后台列除以前台列就是限制的代价。前台列在各格**不一定相同**: `none` 格里前台任务要和同样不受限的后台计算 / 下载应用抢核, 压制的格里后台被赶到一个核的 10 % 上, 前台反而更快 (开发用的 4 核 x86 云机上 7-Zip 压缩前台 P50: none 779 ms, squeeze 439 ms; 核多的机器差别小) —— 这是压制后台给前台带来的好处, 也是表里另有 "后台相对不限制" 一列的原因 (和 none 格的同一任务比, 不受前台列变化的影响)。如果压制格的前台列反而**明显变慢**, 先看报告开头有没有 "前台应用仍被 cpuset 钉在核 N 上" 的提示和日志里的 `was not applied`。`squeeze` 下 CPU 配额是单核的 10 %: **Z3** 是纯 CPU 任务 (工作集约 40 MB), 后台时延的理论值就是前台的约 10 倍; **7-Zip 解压**只要约 10 MB 内存, 也是约 10 倍; **7-Zip 压缩**要约 65 MB, 超过 `memory.high` (32 MB) 以后每次分配都要先把别的页换出去, 时延会远高于 10 倍 —— 多出来的部分就是内存限制的代价, `任务内 CPU 占比` 掉到个位数说明时间几乎都花在等配额和等换页上。P95 远大于 P50 是 "偶尔被饿住" 的任务 (前台应用恰好也在用最后那个核, `cpu.weight 1` 的后台拿不到时间片)。压缩任务在 `squeeze` 下一个可能要几十秒, 一个后台段 (约 4 分钟) 只能做完几个, 样本少时看 `bg_jobs` 列, 需要更多样本就 `ROUNDS=3`。
 - ③ 里**往返时延** (连接本身) 和**外网建连时延**的网络部分在各格应基本不变 —— cgroup 限制不改变链路; 变的是**下载速度** (收包、解密、校验、写盘都要 CPU, 页缓存也记在 `memory.high` 里)、**收包积压** (应用来不及收, 数据堆在内核里, 积压顶到接收窗口以后对端就被 TCP 流控压慢) 和**处理延迟** (`cpu.max` 10 ms / 100 ms 时, 一个包最多要等约 90 ms 应用才被调度到; 探针自己的页被换出时还要加上缺页的时间)。下载限速 (例如 2 MB/s) 低于应用在 10 % 核下的处理能力时, 后台速度可以不掉, 这时代价只体现在处理延迟和积压上 —— 这本身就是一个结论。
+- **先看报告开头每格下面有没有 "注意"**, 以及日志里的 WARN —— 它们说的是这一格的数据能不能用:
+  - "**X 的内存限制在这一格没有生效**": X 被压到后台时仍留着远多于 `memory.high` 的匿名内存, 而它的 cgroup 只记着几 MB。cgroup v2 里内存记在**分配它的时候进程所在的 cgroup** 上, 进程后来被移进 `/cf/<app>` 时账不跟着走, 所以 `memory.high` / `memory.reclaim` 够不着这些页。典型原因是应用启动时真正干活的进程离开了它的 cgroup (snap 包、交给桌面环境启动的包装脚本; 日志 `N matching process(es) outside its cgroup` / `had left its cgroup while it started`), 事后才被收养回来。这一格对 X 只有 CPU 限制, 它的响应时间不能写成 "内存被压过以后" 的结果; 处理办法见 §10 "应用的进程不在它的 cgroup 里"。
+  - 日志 "**N app(s) were started by this warmup**": 应用是这次运行冷启动的, `m_fg` 是它启动后 `warmup_dwell_s` 秒时的占用, 通常远小于稳定后的占用 (一次实测: 微信冷启动后 6 s 是 252 MB, 用了几分钟后约 590 MB), 于是 `memory.high = 比例 × m_fg` 比设想的紧得多 (那次 `mild` 格的 "0.5 × m_fg" 实际只有稳定占用的约 21 %), 后面几格沿用第一格的 `m_fg` 也一样。**先把交互应用启动好** (`python3 run_linux.py <配置> --launch wechat qq wps firefox`, 或 `ONBOARD=1`), 用一两分钟、让它们稳定下来再跑; 这样它们也一定是在各自的 cgroup 里启动的。
 - 判读用的不变量仍然是: `state_lost` 为空、`work_fail` = 0、`n_cold` = 0 (被压制只是慢, 不能丢状态); 计算型的 `bad_jobs` (程序报错或答案不对) 应为 0; 下载型的 `无流量的秒` 应接近 0。
 
 **局限** (写报告时要交代):
@@ -869,6 +872,11 @@ tmux 里要在 **每个 pane** 做。
 (a) snap 包: snapd 把每个 snap 应用放进自己的 systemd scope, 用户移不动 → 用 deb 版 (Firefox: Mozilla APT 仓库; Chromium:
 ppa:xtradeb/apps); (b) 通过 D-Bus 激活或桌面图标启动的应用在 `user.slice` 里 → 用 `cf_launch.sh` 启动, 或配置
 `sudo_adopt=true` + sudoers 免密 (见 `scripts/ubuntu/cf_adopt.sh` 头部); (c) 应用自己 fork 出的 daemon 一般会继承 cgroup, 没问题。
+runner 在每次冷启动之后**立刻**再找一遍并把跑出去的进程移回来 (日志 `had left its cgroup while it started`), 这样 `m_fg`
+和 CPU 限制是对的; 但它们在移回来之前分配的内存仍记在原来的 cgroup 上, `memory.high` 管不到 (三类实验的报告会写
+"内存限制在这一格没有生效", §6.9)。要让内存限制也生效, 只能让进程**从一开始**就在 cgroup 里: 先查它为什么跑出去 ——
+`snap list firefox`、`readlink -f "$(command -v firefox)"`、`cat /proc/<pid>/cgroup` (在 `snap.firefox...scope` 或
+`app-gnome-...scope` 里就是 (a) / (b)), 换成 deb 版后重跑。
 
 **没有 swap: `memory.high can only drop file pages`** — 匿名页没地方去, 内核只能在应用每次分配时让它停下来等
 (allocation throttling): 应用更慢、`notify-send` 之类的子进程启动也可能被卡住几秒, 但依旧不会被杀。做 `sudo scripts/ubuntu/setup_zram.sh 4096`。
@@ -975,6 +983,22 @@ sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubunt
 **`--work`: 浏览器 / 哔哩哔哩的 `work_fail` 偶发** — 页面自己换了标题 (视频自动连播、标签页标题带未读数)。把那个应用的 oracle 改成 `screen`
 并放大 `tolerance`, 或 `kind: none` + `oracle: title` 只看窗口还在不在; 真正的上下文丢失通常伴随 `n_cold > 0` 或 `ping` 很长。
 
+**图里的字是方框 (数字、字母、图例全是 □)** — 系统里只有 `Droid Sans Fallback` 这一种中文字体 (最小安装的 Ubuntu 常见),
+它只有汉字、没有拉丁字母和数字; 旧版出图代码把它排在字体列表最前面, 而 matplotlib 对一个通用字体族只用第一个匹配的字体,
+不会逐字回退, 于是所有 ASCII 字符都成了方框 (日志里是一串 `Glyph 100 (d) missing from font(s) Droid Sans Fallback`)。
+现在的规则 (`cf/linux/plots.py`): 逐个检查字体**实际有哪些字**, 优先用汉字和拉丁字符都有的 (Noto Sans CJK / 思源黑体 /
+文泉驿 / PingFang / 微软雅黑 …, 以及任何不在名单里但字全的字体); 只有 "只有汉字" 的字体时, 字母数字用 matplotlib 自带的
+DejaVu Sans、汉字用它 (逐字回退, 需要 matplotlib ≥ 3.6; 更旧的版本退回英文标注); 一个中文字体都没有就是英文标注。
+装完字体不用清缓存 (出图时会把 matplotlib 还不认识的字体文件登记进来)。**已经跑完的结果不用重跑, 重画即可**:
+
+```bash
+git pull
+sudo apt install -y fonts-wqy-microhei                 # 可选: 字形更好看 (install_deps.sh 现在会装); 或 fonts-noto-cjk
+python3 -m cf.linux.classes results/arm64_classes_ci/*.jsonl --out results/arm64_classes_ci      # §6.9 的表和图
+python3 -m cf.linux.analyze results/arm64_night/*.jsonl --plots-dir results/arm64_night/plots     # 其它实验的图同理 (§7)
+CF_PLOT_FONT="Noto Sans CJK JP" python3 -m cf.linux.classes ...                                   # 指定用哪个字体 (fc-list :lang=zh family)
+```
+
 **macOS 侧** — 跑矩阵时关闭 Spotlight 索引新建的结果目录 (如果是共享目录), 关闭 Time Machine; UTM 不要开 "Balloon" 内存气球。
 
 **微信 / 钉钉 / 中望 每次切到都报 `ping-timeout`, 每步多等 15 s** — 它们的 Qt 无边框窗口在 `WM_PROTOCOLS` 里声明了 `_NET_WM_PING`
@@ -996,6 +1020,9 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # pattern 轨迹 / 伪桌面上的 bench 记录、顺滑探测、前后台区间与三张表、CLI 出表出图
                                                    # 真实应用 (tests/test_linux_realapps.py): ss 输出解析 / 连接计数器 -> 每应用速率 / 真实 ss 量一次本机下载 /
                                                    # cgroup 内探针 / 语料构建 / 装了 7z、z3 时真跑一遍并核对答案 / 按操作分行的计算表、套接字来源的下载表
+                                                   # 冷启动后立刻收养跑出 cgroup 的进程 / "m_fg 是冷启动后量的" 与 "内存限制没有生效" 的提示 / 图只画有数据的类
+                                                   # 出图字体 (tests/test_linux_plot_fonts.py): 字全的字体优先 / 只有汉字的字体配 DejaVu 逐字回退 /
+                                                   # 装了 Droid Sans Fallback 时真画一张中英混排 + 对数轴的图, 不许有缺字告警
 ```
 
 ## 12. 脚本与文件清单
