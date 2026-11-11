@@ -77,12 +77,14 @@ def _p(id_: str, name: str, category: str = "compute", **kw) -> LinuxApp:
 BENCH_CMD = "python3 -m cf.linux.bench_app --app {id} --kind {kind} --title '{name}'"
 
 
-def _b(id_: str, name: str, category: str, kind: str, extra: str = "", note: str = "") -> LinuxApp:
-    """Bundled benchmark app (cf.linux.bench_app): a window doing one fixed job over and over and
-    logging every job's time - the measurable stand-in for a compute / download application."""
+def _b(id_: str, name: str, category: str, kind: str, extra: str = "", note: str = "", install: str = "") -> LinuxApp:
+    """Measurable app (cf.linux.bench_app): a window doing one fixed job over and over and logging
+    every job's time.  Kinds sevenzip / z3 run the installed tool (cf.linux.tool_jobs); the others
+    are bundled stand-ins for a compute / download application."""
     return LinuxApp(id_, name, category, cmd=(BENCH_CMD.format(id=id_, kind=kind, name=name) + " " + extra).strip(),
                     match=rf"bench_app.*--app {id_}\b", wm_class=rf"^cf-{id_}$", arch=("any",),
-                    install="bundled: python3 -m cf.linux.bench_app (needs python3-xlib)", kind="bench", note=note)
+                    install=install or "bundled: python3 -m cf.linux.bench_app (needs python3-xlib)", kind="bench",
+                    note=note)
 
 
 PLACEHOLDER_ARGS = {          # per category: what the stand-in does in the background (see placeholder_app.py)
@@ -287,7 +289,14 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
     _p("sim_download", "下载占位", "download"),
     _p("sim_push", "推送占位", "push"),
     _p("sim_compute", "计算占位", "compute"),
-    # ------------------------------------- benchmark apps of the three-class experiment (manual §6.9)
+    # ------------------------------------- compute apps of the three-class experiment (manual §6.9): real tools
+    _b("sevenzip", "7-Zip", "compute", "sevenzip", install="sudo apt install p7zip-full",
+       note="真实的 7-Zip (7z): 把约 4 MB 的系统真实文件 (文档 / python 源码 / 可执行文件) 用默认级别 -mx=5、两线程压成 .7z, "
+            "再解压校验; 每次压缩 / 解压各记一条耗时 (墙钟 + 7z 自己的 CPU 时间)"),
+    _b("z3", "Z3 求解器", "compute", "z3", install="sudo apt install z3",
+       note="真实的 Z3 SMT 求解器: 每个任务解三个约束问题 —— 24 皇后 (整数约束, sat)、9 只鸽子进 8 个笼 (命题, unsat)、"
+            "32 位半素数分解 (位向量, sat), 答案必须正确; 单线程"),
+    # ------------------------------------- bundled stand-ins (no tool to install; configs/ubuntu_arm64_classes_synthetic.json)
     _b("bench_numeric", "科学计算基准", "compute", "numeric",
        note="科学计算 (一个工作进程): LU 分解求解 + FFT + n 体积分, 每个任务约 0.2 s; 记录每个任务的墙钟 / CPU 时间"),
     _b("bench_compress", "压缩解压基准", "compute", "compress", "--workers 2",
@@ -602,9 +611,15 @@ def is_installed(a: LinuxApp, arch: Optional[str] = None, mobile=None) -> bool:
     if arch not in a.arch and "any" not in a.arch:
         return False
     tok = _first_token(a.cmd)
-    if tok == "python3":                       # placeholder: needs python3-xlib
+    if tok == "python3":                       # placeholder / bench app: needs python3-xlib
         import importlib.util
-        return importlib.util.find_spec("Xlib") is not None
+        if importlib.util.find_spec("Xlib") is None:
+            return False
+        m = re.search(r"cf\.linux\.bench_app\b.*--kind (\S+)", a.cmd)
+        if m:                                  # kinds that drive a real tool (7z, z3) need it on PATH
+            from .tool_jobs import TOOLS, find_tool
+            return m.group(1) not in TOOLS or find_tool(m.group(1)) is not None
+        return True
     if a.exe and os.path.exists(a.exe):
         return True
     if shutil.which(tok):

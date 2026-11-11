@@ -15,8 +15,10 @@ Nothing here freezes or kills processes.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -43,6 +45,9 @@ class AppSampleL:
     window: Optional[int] = None
     tier: str = "fg"
     stray_pids: list[int] = field(default_factory=list)
+    # the processes that are the app's state; None = all of them.  An app that keeps starting a tool
+    # (7z, z3) for every job has processes that come and go by design
+    state_pids: Optional[list[int]] = None
 
     @property
     def alive(self) -> bool:
@@ -57,7 +62,8 @@ class AppSampleL:
         return {"pkg": self.app, "alive": self.alive, "pids": [p.pid for p in self.procs],
                 # helpers such as notify-send / xdg-open live for a fraction of a second; only
                 # processes older than this count as "state" whose disappearance matters
-                "stable_pids": [p.pid for p in self.procs if p.age_s >= STABLE_PID_AGE_S],
+                "stable_pids": [p.pid for p in self.procs if p.age_s >= STABLE_PID_AGE_S
+                                and (self.state_pids is None or p.pid in self.state_pids)],
                 "pss_kb": self.total("pss_kb"), "pss_anon_kb": self.total("pss_anon_kb"),
                 "pss_file_kb": self.total("pss_file_kb"), "pss_shmem_kb": self.total("pss_shmem_kb"),
                 "swap_pss_kb": self.total("swap_pss_kb"), "rss_kb": self.total("rss_kb"),
@@ -438,9 +444,13 @@ class LinuxDesktop:
                 pids = pids + [p for p in stray if p not in pids]
             plist = [pi for pi in (PR.proc_info(p) for p in pids) if pi is not None]
             win = self.window(id_, infos, pids) if infos else None
+            own = None
+            if self.cat[id_].kind == "bench" and self.cat[id_].match:
+                rx = re.compile(self.cat[id_].match)
+                own = [pi.pid for pi in plist if rx.search(pi.cmdline)]
             apps[id_] = AppSampleL(app=id_, procs=plist, cgroup=self.tree.stats(id_) if self.tree.exists(id_) else {},
                                    window=win["wid"] if win else None, tier=self.tiers.get(id_, "fg"),
-                                   stray_pids=stray)
+                                   stray_pids=stray, state_pids=own)
         notifs = self.notify.snapshot() if self.notify else {}
         if self.mobile is not None and self.mobile.available and any(self.is_mobile(i) for i in ids):
             notifs = {**notifs, **self.mobile.notification_snapshot()}
