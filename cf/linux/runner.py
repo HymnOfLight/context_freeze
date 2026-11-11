@@ -365,6 +365,28 @@ class ThrottleExperiment(Experiment):
             raise PreflightError(f"{len(blocking)} blocking preflight problem(s) for mobile apps; fix them, "
                                  f"drop the apps, or use --no-strict")
 
+    def _adopt_escaped(self, app: str) -> None:
+        """Right after a launch: processes of the app that are not in its cgroup - the launcher handed
+        the real program to a snap scope / the desktop's app scope, or a helper was D-Bus activated -
+        are moved in now.  Left outside they are not limited at all and the app's m_fg is measured
+        without them; moved in late (at the start of the next run) their memory stays charged to
+        the cgroup they grew up in, where the app's memory.high does not reach it."""
+        if not self.cfg["adopt_strays"] or self.kinds.get(app) == "mobile":      # mobile: sample() adopts
+            return
+        try:
+            r = self.dev.adopt(app)
+        except Exception as e:    # noqa: BLE001 - the stray warning of the warmup still reports them
+            self.log.warn(f"{app}: could not look for processes outside its cgroup ({type(e).__name__}: {e})")
+            return
+        if r.get("moved"):
+            self.log.warn(f"{display_name(app)}: {len(r['moved'])} process(es) had left its cgroup while it started "
+                          f"{r['moved'][:5]} - moved back into {self.dev.tree.path(app)}; what they allocated before "
+                          f"the move stays outside the app's memory.high (snap package? started by the desktop? "
+                          f"manual §10)")
+        if r.get("failed"):
+            self.log.warn(f"{display_name(app)}: processes outside its cgroup could not be moved {r['failed']} - "
+                          f"limits will not apply to them (snap? see manual §6)")
+
     def warmup(self) -> float:
         dev = self.dev
         self.log.head(f"warmup: bring up {len(self.apps)} apps (no restarts - logins are kept), dwell "
@@ -372,6 +394,7 @@ class ThrottleExperiment(Experiment):
         t0 = time.time()
         for i, app in enumerate(self.apps):
             res = dev.launch(app)
+            self._adopt_escaped(app)
             self.tiers[app] = "fg"
             t_dwell = time.time()
             work = self._work_do(app, res, -1, None)        # first draft / first scroll, not capped by the dwell
@@ -574,6 +597,8 @@ class ThrottleExperiment(Experiment):
         self.throttled.discard(req)
         self.shrunk.discard(req)
         launch = self.dev.launch(req)
+        if launch.get("launch_state") == "COLD":
+            self._adopt_escaped(req)
         if was_shrunk and launch.get("launch_state") == "HOT":
             # process never left memory, but came back from a memory.high-shrunk tier (page-ins expected)
             launch["launch_state"] = "WARM"
