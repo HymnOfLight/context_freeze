@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
+from typing import Optional
 
 SRC_COLOR = {"fg": "#9e9e9e", "bg": "#1f77b4", "shr": "#d62728", "cold": "#000000"}
 
@@ -294,20 +295,94 @@ def _transient_end_s(pts) -> float | None:
 
 
 _CJK_FONTS = ("Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "WenQuanYi Zen Hei",
-              "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "SimHei", "Droid Sans Fallback")
+              "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "SimHei", "Noto Sans CJK JP", "Noto Sans CJK TC",
+              "Noto Sans CJK HK", "Noto Sans CJK KR", "Noto Serif CJK SC", "Noto Serif CJK JP", "AR PL UMing CN",
+              "AR PL UKai CN", "Droid Sans Fallback")
+_LATIN_FONT = "DejaVu Sans"            # ships with matplotlib
+_CJK_PROBE = "中文应用压缩解压时延前后台"
+_LATIN_PROBE = "AZaz09:/()=%.,-+"
+
+
+def _covers(fname: str, text: str) -> bool:
+    try:
+        from matplotlib.ft2font import FT2Font
+        cmap = FT2Font(fname).get_charmap()
+    except Exception:    # noqa: BLE001 - an unreadable font file is simply not a candidate
+        return False
+    return all(ord(c) in cmap for c in text)
+
+
+def _add_new_fonts(font_manager) -> int:
+    """matplotlib lists the fonts once and keeps the list in ~/.cache/matplotlib: a font installed
+    afterwards (`apt install fonts-wqy-microhei` because the figures had boxes) stays invisible to
+    it.  Register the font files it does not know yet -> how many were added."""
+    try:
+        known = {os.path.realpath(f.fname) for f in font_manager.fontManager.ttflist}
+        new = [p for p in font_manager.findSystemFonts() if os.path.realpath(p) not in known]
+    except Exception:    # noqa: BLE001
+        return 0
+    n = 0
+    for path in new:
+        try:
+            font_manager.fontManager.addfont(path)
+            n += 1
+        except Exception:    # noqa: BLE001 - a format FreeType cannot read
+            pass
+    return n
+
+
+def _pick_cjk_font(fonts: Optional[list] = None) -> tuple:
+    """(family, has Latin too) of the Chinese font to draw with, ("", False) when none is installed.
+    `fonts`: [(family, file)], default every font matplotlib knows.  A font that also has letters and
+    digits wins over one that has only Chinese glyphs (Droid Sans Fallback: often the only CJK font
+    of a minimal install - drawn alone it turns every digit and letter into an empty box);
+    $CF_PLOT_FONT names a family to use regardless of the preference order."""
+    if fonts is None:
+        from matplotlib import font_manager
+        _add_new_fonts(font_manager)
+        fonts = [(f.name, f.fname) for f in font_manager.fontManager.ttflist]
+    files: dict = {}
+    for name, fname in fonts:
+        files.setdefault(name, fname)
+    forced = os.environ.get("CF_PLOT_FONT", "")
+    listed = ([forced] if forced in files else []) + [n for n in _CJK_FONTS if n in files]
+    rest = sorted(n for n in files if n not in listed and "Mono" not in n)
+    cjk_only = ""
+    for names in (listed, rest):
+        for name in names:
+            if not _covers(files[name], _CJK_PROBE):
+                continue
+            if name == forced or _covers(files[name], _LATIN_PROBE):
+                return name, _covers(files[name], _LATIN_PROBE)
+            cjk_only = cjk_only or name
+    return cjk_only, False
+
+
+_font_choice: Optional[tuple] = None
 
 
 def _use_cjk_font() -> bool:
-    """Put the first installed Chinese font in front of the sans-serif list; False when there is none
-    (the figures then fall back to English labels instead of empty boxes)."""
+    """Make matplotlib draw Chinese text; False when it cannot (the figures then fall back to
+    English labels instead of empty boxes).  font.family becomes a list, which matplotlib >= 3.6
+    walks per glyph: [Chinese font, DejaVu Sans] when the Chinese font has Latin glyphs too, and
+    [DejaVu Sans, Chinese font] when it has not - letters, digits and the math text of log axes
+    then come from DejaVu Sans, Chinese from the other one.  (Putting the font first in
+    font.sans-serif is not enough: only the first match of a generic family is ever used.)"""
+    global _font_choice
     from matplotlib import font_manager, rcParams
-    have = {f.name for f in font_manager.fontManager.ttflist}
-    for name in _CJK_FONTS:
-        if name in have:
-            rcParams["font.sans-serif"] = [name] + [x for x in rcParams["font.sans-serif"] if x != name]
-            rcParams["axes.unicode_minus"] = False
-            return True
-    return False
+    if _font_choice is None or os.environ.get("CF_PLOT_FONT", "") != _font_choice[2]:
+        _font_choice = (*_pick_cjk_font(), os.environ.get("CF_PLOT_FONT", ""))
+    name, latin, _ = _font_choice
+    if not name:
+        return False
+    if latin:
+        rcParams["font.family"] = [name, _LATIN_FONT]
+    elif hasattr(font_manager.FontManager, "_find_fonts_by_props"):      # per-glyph fallback, matplotlib >= 3.6
+        rcParams["font.family"] = [_LATIN_FONT, name]
+    else:
+        return False
+    rcParams["axes.unicode_minus"] = False
+    return True
 
 
 def _app_cn(app: str) -> str:
