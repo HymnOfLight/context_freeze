@@ -52,6 +52,13 @@ DEFAULTS = {
     # every_s seconds, inside the settle time (n = 0: off) -> launch["smooth"]
     "classes": {},
     "smooth_probe": {"n": 0, "every_s": 0.2, "timeout_s": 1.0},
+    # download-class apps that are real programs (百度网盘, 迅雷 ...) cannot log their own speed: their
+    # TCP sockets are sampled from the kernel instead (cf.linux.netstat) -> step["bench"][app] in the
+    # bench apps' record format.  by: auto | cgroup | pid; loopback: count sockets to 127.0.0.1 too.
+    # probe_host: a latency probe inside each of these apps' cgroups (cf.linux.net_probe) connects to
+    # it every probe_every_s seconds ("" = no probe; $CF_BENCH_RTT_HOST overrides)
+    "net_probe": {"every_s": 1.0, "loopback": False, "by": "auto", "probe_host": "www.baidu.com:443",
+                  "probe_every_s": 0.5},
     # apps that are not installed (desktop, nor an allowed substitute) run as the bundled placeholder
     # program under their own id, so the whole matrix can be run before the vendor apps are in place
     "placeholder_fill": False,
@@ -168,10 +175,11 @@ class ThrottleExperiment(Experiment):
         for app in self.apps:
             tier = self.tiers.get(app, "fg") if app in alive else "fg"
             if tier != "fg":
-                dev.set_tier(app, tier, self.m_fg.get(app, 0) * 1024, memory_high_bytes=self.mem_high.get(app))
+                self._set_tier(app, tier, self.m_fg.get(app, 0) * 1024, memory_high_bytes=self.mem_high.get(app))
             self.tiers[app] = tier
         self.log.info(f"resume: re-applied tiers - throttled {len(self.throttled)}, shrunk {len(self.shrunk)}, "
                       f"running {len(alive)}/{len(self.apps)}")
+        self._net_start()
         self._bench_collect(None)            # jobs logged while the runner was away belong to no step
 
     # ------------------------------------------------------------- lifecycle
@@ -260,6 +268,7 @@ class ThrottleExperiment(Experiment):
                     self.log.warn(f"{app}: processes outside its cgroup could not be moved {r['failed']} - "
                                   f"limits will not apply to them (snap? started before setup? see manual §6)")
         self._setup_work()
+        self._net_start()
         self.emit({"type": "meta", "config": self.cfg, "apps": self.apps, "caps": dev.caps_dict(),
                    "backend": "linux", "categories": self.categories, "substitutions": self.substitutions,
                    "kinds": self.kinds, "placeholders": self.placeholders, "profile": self.profile.to_dict(),
@@ -634,15 +643,37 @@ class ThrottleExperiment(Experiment):
         return rec
 
     # ------------------------------------------------- bench apps / responsiveness probe
+    def net_apps(self) -> list[str]:
+        """Real apps of the download class: measured through their sockets (cf.linux.netstat)."""
+        dl = (self.cfg.get("classes") or {}).get("download") or []
+        return [a for a in self.apps if a in dl and self.kinds.get(a) not in ("bench", "placeholder", "mobile")]
+
+    def _net_start(self) -> None:
+        apps = self.net_apps()
+        if not apps or not hasattr(self.dev, "net_start"):
+            return
+        p = {**DEFAULTS["net_probe"], **(self.cfg.get("net_probe") or {})}
+        host = os.environ.get("CF_BENCH_RTT_HOST", p["probe_host"]) or ""
+        try:
+            self.dev.net_start(apps, every_s=float(p["every_s"]), loopback=bool(p["loopback"]), by=str(p["by"]),
+                               probe_host=host, probe_every_s=float(p["probe_every_s"]))
+            self.log.info(f"download speed / latency of {', '.join(display_name(a) for a in apps)}: "
+                          f"kernel TCP statistics of their sockets (ss), every {p['every_s']:g} s"
+                          + (f"; latency probe inside each app's cgroup -> {host}" if host else ""))
+        except Exception as e:    # noqa: BLE001 - the run is still worth having without it
+            self.log.warn(f"socket sampler not started ({type(e).__name__}: {e}) - no download figures")
+
     def _bench_collect(self, t_dwell: Optional[float]) -> dict:
-        """What the bench apps (kind "bench", cf.linux.bench_app) logged since the last call:
+        """What the bench apps (kind "bench", cf.linux.bench_app) logged, and what the socket
+        sampler saw of the real download apps, since the last call:
         {app: [{"dt": seconds since the dwell began (negative = during the switch), "k": job | dl |
         rtt | err, ...}]}.  With t_dwell None the records are only consumed."""
         out: dict = {}
         if not hasattr(self.dev, "bench_read"):
             return out
+        net = set(self.net_apps())
         for app in self.apps:
-            if self.kinds.get(app) != "bench":
+            if self.kinds.get(app) != "bench" and app not in net:
                 continue
             try:
                 recs = self.dev.bench_read(app)
@@ -667,19 +698,29 @@ class ThrottleExperiment(Experiment):
 
     @staticmethod
     def _bench_note(bench: dict) -> str:
-        """' | bench numeric 58 jobs 262 ms, download 38.1 MB/s rtt 0.4 ms' for the step line."""
+        """' | bench sevenzip 27 jobs compress 465 ms / extract 79 ms, xunlei 2.1 MB/s rtt 31.0 ms wake 0.1 ms'
+        for the step line (wake = how late the latency probe / probe thread was scheduled)."""
         parts = []
         for app, recs in bench.items():
-            jobs = sorted(r["ms"] for r in recs if r.get("k") == "job" and r["dt"] - r["ms"] / 1000 >= 0)
+            ops: dict = {}
+            for r in recs:
+                if r.get("k") == "job" and r["dt"] - r["ms"] / 1000 >= 0:
+                    ops.setdefault(r.get("op") or "", []).append(r["ms"])
             dl = [r for r in recs if r.get("k") == "dl" and r["dt"] - r["s"] >= 0]
             rtt = sorted(r["ms"] for r in recs if r.get("k") == "rtt" and r.get("to") == "dl" and r.get("ms") is not None
                          and r["dt"] >= 0)
+            late = [r for r in recs if r.get("k") == "rtt" and r.get("late") is not None and r["dt"] >= 0]
+            who = "dl" if any(r.get("to") == "dl" for r in late) else "ext"
+            late = sorted(r["late"] for r in late if r.get("to") == who)
             name = app[len("bench_"):] if app.startswith("bench_") else app
-            if jobs:
-                parts.append(f"{name} {len(jobs)} jobs {jobs[len(jobs) // 2]:.0f} ms")
+            if ops:
+                parts.append(f"{name} {max(len(v) for v in ops.values())} jobs "
+                             + " / ".join(f"{op + ' ' if op else ''}{sorted(v)[len(v) // 2]:.0f} ms"
+                                          for op, v in sorted(ops.items())))
             if dl:
                 parts.append(f"{name} {sum(r['b'] for r in dl) / 2 ** 20 / max(1e-6, sum(r['s'] for r in dl)):.1f} MB/s"
-                             + (f" rtt {rtt[len(rtt) // 2]:.1f} ms" if rtt else ""))
+                             + (f" rtt {rtt[len(rtt) // 2]:.1f} ms" if rtt else "")
+                             + (f" wake {late[len(late) // 2]:.1f} ms" if late else ""))
         return (" | bench " + ", ".join(parts)) if parts else ""
 
     # ------------------------------------------------------------ scripted work

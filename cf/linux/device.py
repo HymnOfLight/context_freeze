@@ -118,6 +118,9 @@ class LinuxDesktop:
         self._ping_misses: dict[str, int] = {}       # consecutive unanswered pings per app
         self.ping_dead: set[str] = set()             # apps that advertise _NET_WM_PING but never answer
         self._bench_off: dict[str, int] = {}         # bytes of each bench app's job log already read
+        self.net = None                              # cf.linux.netstat.SockSampler (net_start)
+        self.net_apps: list[str] = []
+        self._probes: dict[str, subprocess.Popen] = {}   # app -> cf.linux.net_probe process in <app>/cfprobe
 
     # ------------------------------------------------------------- probing
     def probe(self) -> dict:
@@ -391,8 +394,75 @@ class LinuxDesktop:
         return out
 
     # ------------------------------------------------------------ bench apps
+    def net_start(self, ids: list[str], every_s: float = 1.0, loopback: bool = False, by: str = "auto",
+                  strays: bool = False, probe_host: str = "", probe_every_s: float = 0.5) -> None:
+        """Watch the TCP sockets of these apps (cf.linux.netstat): received bytes and round trip
+        time per sample interval, read with bench_read() like a bench app's log.  `strays`: also
+        the app's processes that are not (yet) in its cgroup - before the runner adopted them.
+        `probe_host` ("host:port"): additionally a latency probe inside each app's cgroup
+        (cf.linux.net_probe): connect time to that host and how late the probe wakes up."""
+        from . import net_probe
+        from .netstat import SockSampler
+        self.net_stop()
+        self.net_apps = list(ids)
+        if not ids:
+            return
+        for a in ids if probe_host else []:
+            log = net_probe.log_path(a)
+            try:
+                child = os.path.join(self.tree.ensure(a), net_probe.CHILD)
+                os.makedirs(child, exist_ok=True)
+                open(log, "w").close()
+                self._bench_off[a + "#probe"] = 0
+                self._probes[a] = subprocess.Popen(
+                    [sys.executable, "-S", "-E", os.path.abspath(net_probe.__file__), "--log", log, "--host", probe_host,
+                     "--every", str(probe_every_s), "--cgroup", child],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError as e:
+                self.log.warn(f"{a}: latency probe not started: {type(e).__name__}: {e}")
+        tree = self.tree
+
+        def groups() -> dict:
+            out = {}
+            for a in self.net_apps:
+                pids = self.pids(a)
+                out[a] = {"cgroup": "/" + tree.subdir + "/" + a, "pids": pids + (self.stray_pids(a, pids) if strays else [])}
+            return out
+
+        self.net = SockSampler(groups, every_s=every_s, loopback=loopback, by=by, log=self.log.warn)
+        self.net.start()
+
+    def net_stop(self) -> None:
+        if self.net is not None:
+            self.net.stop()
+            self.net.join(3.0)
+            self.net = None
+        from . import net_probe
+        for a, p in list(self._probes.items()):
+            p.terminate()
+            try:
+                p.wait(3.0)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait(3.0)
+            try:
+                os.rmdir(os.path.join(self.tree.path(a), net_probe.CHILD))
+            except OSError:
+                pass
+        self._probes.clear()
+
     def bench_read(self, id_: str) -> list[dict]:
-        """New records of a bench app's job log (cf.linux.bench_app) since the last call."""
+        """New records since the last call: of a bench app's job log (cf.linux.bench_app), or of
+        the socket sampler for a real app watched with net_start()."""
+        if id_ in self.net_apps and self.cat[id_].kind != "bench":
+            recs = self.net.read(id_) if self.net is not None else []
+            if id_ in self._probes:
+                from . import net_probe
+                from .bench_app import read_new
+                key = id_ + "#probe"
+                more, self._bench_off[key] = read_new(net_probe.log_path(id_), self._bench_off.get(key, 0))
+                recs += more
+            return recs
         from .bench_app import log_path, read_new
         recs, self._bench_off[id_] = read_new(log_path(id_), self._bench_off.get(id_, 0))
         return recs
@@ -485,6 +555,7 @@ class LinuxDesktop:
         return NotifyCounter.count_for(d, list(a.notify_names) + [a.name, a.id])
 
     def close(self) -> None:
+        self.net_stop()
         if self.notify:
             self.notify.stop()
         if self.pinger:
