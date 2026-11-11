@@ -100,6 +100,7 @@ class ThrottleExperiment(Experiment):
         self.throttled: set[str] = set()     # tier bg or shrunk (CPU-limited)
         self.shrunk: set[str] = set()        # tier shrunk (memory.high)
         self.tiers: dict[str, str] = {}
+        self._limit_errs: set[tuple[str, str]] = set()
         self.mem_high: dict[str, int] = {}   # app -> memory.high bytes raised by the thrash guard (else profile)
         self.substitutions: list[tuple[str, str]] = []
         self.categories: dict[str, str] = {}
@@ -477,7 +478,7 @@ class ThrottleExperiment(Experiment):
             if new <= cur:
                 continue
             self.mem_high[app] = new
-            r = self.dev.set_tier(app, "shrunk", cap, memory_high_bytes=new)
+            r = self._set_tier(app, "shrunk", cap, memory_high_bytes=new)
             actions.setdefault("limits", {})[app] = r.get("limits")
             raised[app] = new >> 20
             self.log.warn(f"{display_name(app)}: memory.high thrash ({rate:.0f} high events/s, "
@@ -492,6 +493,16 @@ class ThrottleExperiment(Experiment):
             return "bg" if self.cfg["cpu_throttle_resident"] else "fg"
         return "shrunk"
 
+    def _set_tier(self, app: str, tier: str, *args, **kw) -> dict:
+        """dev.set_tier, but a knob the kernel refused is said out loud (once per app and knob): a
+        limit that silently stays on - or never goes on - changes what the whole run measures."""
+        r = self.dev.set_tier(app, tier, *args, **kw)
+        for knob, val in ((r or {}).get("limits") or {}).items():
+            if str(val).startswith("ERR") and (app, knob) not in self._limit_errs:
+                self._limit_errs.add((app, knob))
+                self.log.warn(f"{display_name(app)}: {knob} for tier {tier} was not applied - {str(val)[4:]}")
+        return r
+
     def _apply(self, req: str, S: set[str], sample: dict, infos: dict[str, AppInfo]) -> dict:
         dev = self.dev
         actions = {"freeze": [], "unfreeze": [], "reclaim": {}, "tiers": {}, "limits": {}}
@@ -501,7 +512,7 @@ class ThrottleExperiment(Experiment):
             tier = self._tier_for(app, app in S)
             cur = self.tiers.get(app, "fg")
             if tier != cur or (tier == "shrunk" and app not in self.shrunk):
-                r = dev.set_tier(app, tier, self.m_fg[app] * 1024, memory_high_bytes=self.mem_high.get(app))
+                r = self._set_tier(app, tier, self.m_fg[app] * 1024, memory_high_bytes=self.mem_high.get(app))
                 actions["tiers"][app] = tier
                 actions["limits"][app] = r.get("limits")
                 if tier == "shrunk":
@@ -549,7 +560,7 @@ class ThrottleExperiment(Experiment):
         was_shrunk = req in self.shrunk
         was_throttled = req in self.throttled
         if self.tiers.get(req, "fg") != "fg":
-            self.dev.set_tier(req, "fg")
+            self._set_tier(req, "fg")
         self.tiers[req] = "fg"
         self.throttled.discard(req)
         self.shrunk.discard(req)
