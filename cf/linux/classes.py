@@ -405,6 +405,27 @@ def fg_pinned(run: dict) -> tuple[int, str]:
     return n, cpus
 
 
+def mem_unbounded(run: dict) -> list[tuple]:
+    """[(app, anonymous MB it kept, memory.high MB, MB its cgroup accounts for)] for apps whose
+    memory limit did not bite: while shrunk they still held several times their memory.high in
+    anonymous memory.  That memory is charged to another cgroup - the processes were moved into
+    cf/<app> only after they had allocated it (they left the cgroup at launch, or were running
+    before the experiment) - so only the CPU limit applied to the app in this run."""
+    seen: dict = {}
+    for s in run["steps"]:
+        for app, a in (((s.get("after_dwell") or {}).get("apps")) or {}).items():
+            high = (a.get("cg_limits") or {}).get("memory_high")
+            if app == s["req"] or a.get("tier") != "shrunk" or not str(high or "").isdigit():
+                continue
+            seen.setdefault(app, []).append((a.get("pss_anon_kb") or 0, int(high) / 1024, (a.get("cg_mem_mb") or 0)))
+    out = []
+    for app, v in seen.items():
+        anon, high, cg = (sorted(x[i] for x in v)[len(v) // 2] for i in range(3))
+        if anon > 3 * high and anon - high > 128 * 1024:
+            out.append((app, round(anon / 1024), round(high / 1024), round(cg)))
+    return out
+
+
 def report_md(runs: list[dict], tb: Optional[dict] = None) -> str:
     tb = tb or tables(runs)
     lines = ["# 三类应用实验: 呼叫与切换 / 计算型 / 下载型", ""]
@@ -418,6 +439,11 @@ def report_md(runs: list[dict], tb: Optional[dict] = None) -> str:
         if n:
             lines.append(f"  - **注意**: {n}/{len(r['steps'])} 步里前台应用仍被 cpuset 钉在核 {cpus} 上 (和全部后台应用挤同一个核) —— "
                          "这是修复前的 bug (提回前台时 cpuset.cpus 没有被放开) 或上一次运行留下的限制; 这一格的前台列 / 响应时间偏慢, 需重跑")
+        for app, anon, high, cg in mem_unbounded(r):
+            lines.append(f"  - **注意**: {_cn(app)} 的内存限制在这一格没有生效 —— 被压到后台时仍留着约 {anon} MB 匿名内存 "
+                         f"(memory.high = {high} MB, 它的 cgroup 只记着 {cg} MB): 这些内存是进程被移进 cgroup **之前**分配的 "
+                         "(启动时进程离开了 cgroup, 或实验前它已在运行), 账记在别处; 这一格对它只有 CPU 限制, "
+                         "它的响应时间不能当作 '内存被压过以后' 的结果")
     short = {"interactive": ["run", "app", "n_calls", "resp_p50_ms", "resp_p95_ms", "resp_max_ms", "resp_p50_x", "probe_p95_ms",
                              "stall_pct", "echo_p50_ms", "echo_max_ms", "work_fail"],
              "compute": ["run", "app", "fg_job_p50_ms", "bg_job_p50_ms", "bg_job_p95_ms", "slowdown_x", "fg_jobs_per_min",
