@@ -117,6 +117,13 @@ class FakeLinuxDesktop:
         self.bench_job_s = 0.004                # a bench job with a whole core; slower by 1 / cpu_cores when limited
         self.bench_mbps = 40.0                  # download speed with a whole core
         self.bench_tick_s = 0.01                # download: one "dl" + one "rtt" record per tick
+        # bench apps driving a real tool with several operations per cycle (7-Zip: compress, extract):
+        # app -> [(op, duration as a multiple of bench_job_s, cores it uses)]
+        self.bench_ops: dict[str, list[tuple[str, float, float]]] = {}
+        # real download apps watched through their sockets (cf.linux.netstat on the real desktop)
+        self.net_apps: list[str] = []
+        self.net_mbps = 3.0                     # what such an app downloads with a whole core
+        self.net_calls: list[dict] = []
         self._bench_t: dict[str, float] = {}
         self._woke_missing: dict[str, int] = {}
 
@@ -192,18 +199,51 @@ class FakeLinuxDesktop:
         first = round(0.3 + self._woke_missing.pop(id_, 0) / 500, 2)
         return {"supported": True, "pings_ms": [first] + [0.3] * (n - 1)}
 
+    def net_start(self, ids, every_s=1.0, loopback=False, by="auto", strays=False, probe_host="", probe_every_s=0.5):
+        self.net_apps = list(ids)
+        self.net_probe_host = probe_host
+        self.net_calls.append({"ids": list(ids), "every_s": every_s, "loopback": loopback, "by": by,
+                               "probe_host": probe_host})
+
+    def net_stop(self):
+        self.net_apps = []
+
     def bench_read(self, id_):
         """Records a bench app would have logged since the last call, at the speed its current tier
-        allows: compute -> "job" records, download -> "dl" + "rtt" records."""
+        allows: compute -> "job" records, download -> "dl" + "rtt" records; for a real download app
+        watched with net_start(): what the socket sampler would have seen."""
         s = self.state[id_]
         now = time.time()
-        if s["pid"] is None or self.cat[id_].kind != "bench":
+        net = id_ in self.net_apps and self.cat[id_].kind != "bench"
+        if s["pid"] is None or not (net or self.cat[id_].kind == "bench"):
             return []
         t = self._bench_t.get(id_, now)
         limited = self.tiers.get(id_, "fg") in ("bg", "shrunk")
         share = min(1.0, self.profile.cpu_cores) if limited else 1.0
         out = []
-        if self.cat[id_].category == "download":
+        if net:
+            # a limited app reads its sockets late: less arrives, and what arrived waits in the kernel
+            while t + self.bench_tick_s <= now:
+                t += self.bench_tick_s
+                out.append({"t": t, "k": "dl", "b": int(self.net_mbps * share * 2 ** 20 * self.bench_tick_s),
+                            "s": self.bench_tick_s, "tx": 400, "n": 4, "q": 900_000 if limited else 20_000, "retr": 0})
+                out.append({"t": t, "k": "rtt", "ms": 23.5, "to": "dl", "n": 3})
+                if getattr(self, "net_probe_host", ""):           # the probe inside the app's cgroup
+                    late = round(10 * (1 - share), 2) if limited else 0.0
+                    out.append({"t": t, "k": "rtt", "ms": round(31.0 + late, 2), "to": "ext", "late": late})
+        elif id_ in self.bench_ops:
+            ops = self.bench_ops[id_]
+            i = self._bench_i = getattr(self, "_bench_i", {})
+            while True:
+                op, mult, cores = ops[i.get(id_, 0) % len(ops)]
+                d = self.bench_job_s * mult / share
+                if t + d > now:
+                    break
+                t += d
+                i[id_] = i.get(id_, 0) + 1
+                out.append({"t": t, "k": "job", "op": op, "ms": round(d * 1000, 3),
+                            "cpu": round(self.bench_job_s * mult * cores * 1000, 3), "w": 0, "ok": True})
+        elif self.cat[id_].category == "download":
             while t + self.bench_tick_s <= now:
                 t += self.bench_tick_s
                 out.append({"t": t, "k": "dl", "b": int(self.bench_mbps * share * 2 ** 20 * self.bench_tick_s),
@@ -346,6 +386,7 @@ class FakeLinuxDesktop:
         return NotifyCounter.count_for(NotifyCounter.delta(before, after), list(a.notify_names) + [a.name, a.id])
 
     def close(self):
+        self.net_stop()
         pass
 
 
