@@ -279,8 +279,9 @@ def test_smt_problems_are_well_formed():
     assert 65519 * 65521 == int(re.search(r"\(_ bv(\d+) 32\)\)\)\n\(check-sat\)", J.smt_factor()).group(1))
 
 
-def _fake_tool(tmp_path, body):
-    p = tmp_path / "tool"
+def _fake_tool(tmp_path, body, name="tool"):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    p = tmp_path / name
     p.write_text("#!/bin/sh\n" + body)
     p.chmod(0o755)
     return str(p)
@@ -362,6 +363,179 @@ def test_real_z3_gives_the_known_answers(tmp_path):
         assert out == s.expect, (s.op, out)
 
 
+def test_a_step_can_check_the_output_itself_and_set_the_environment(tmp_path):
+    tool = _fake_tool(tmp_path, 'echo "threads=$OMP_THREAD_LIMIT $1"\n')
+    log = B.BenchLog(str(tmp_path / "c.jsonl"))
+    w = J.ToolWorker([], log, threading.Event())
+    seen = []
+    ok = J.Step("a", [tool, "x"], env={"OMP_THREAD_LIMIT": "1"}, check=lambda out: seen.append(out) or "threads=1 x" in out)
+    assert w._run(ok)[2] is True and seen == ["threads=1 x\n"]
+    assert w._run(J.Step("b", [tool, "x"], check=lambda out: "threads=1" in out))[2] is False        # not set: not inherited
+    assert w._run(J.Step("c", [tool, "x"], check=lambda out: 1 / 0))[2] is False                     # a check that raises
+    fail = _fake_tool(tmp_path / "f", 'echo fine; exit 2\n')
+    assert w._run(J.Step("d", [fail], check=lambda out: True))[2] is False                          # exit status first
+    log.close()
+    errs = [r["msg"] for r in B.read_new(log.path, 0)[0] if r["k"] == "err"]
+    assert len(errs) == 3 and errs[0].startswith("b: exit 0, answered 'threads= x'") and errs[2].startswith("d: exit 2")
+
+
+@pytest.mark.skipif(J.find_tool("openssl") is None, reason="needs openssl")
+def test_real_openssl_encrypts_decrypts_and_signs(tmp_path):
+    work = str(tmp_path)
+    steps = J.openssl_steps(J.find_tool("openssl"), work, mb=2, iters=20000, rsa_bits=2048)
+    assert [s.op for s in steps] == ["encrypt", "decrypt", "sign"]
+    payload, enc = os.path.join(work, "payload.bin"), os.path.join(work, "payload.enc")
+    assert os.path.getsize(payload) == 2 << 20
+    log = B.BenchLog(str(tmp_path / "o.jsonl"))
+    w = J.ToolWorker(steps, log, threading.Event())
+    assert all(w._run(s)[2] for s in steps)
+    blob = open(enc, "rb").read()
+    assert blob[:8] == b"Salted__" and len(blob) > 2 << 20 and blob[16:4096] != open(payload, "rb").read()[:4080]
+    # a damaged ciphertext must not count as a decrypted file, nor a changed file as a signed one
+    with open(enc, "r+b") as fh:
+        fh.seek(1 << 20)
+        fh.write(b"\0" * 64)
+    assert w._run(steps[1])[2] is False
+    assert w._run(steps[2])[2] is True
+    key_before = open(os.path.join(work, "key.pem")).read()
+    assert J.openssl_steps(J.find_tool("openssl"), work, mb=2, iters=20000, rsa_bits=2048) and \
+        open(os.path.join(work, "key.pem")).read() == key_before                # inputs are kept between runs
+    log.close()
+
+
+def test_ocr_answer_is_judged_by_the_words_it_found():
+    words = "The quick brown fox jumps over the lazy dog again and again".split()
+    assert J.ocr_ok("the quick brown fox jumps over the lazy dog again and again", words)
+    assert J.ocr_ok("The qu1ck brown fox, jumps over the lazy dog again and again.", words)       # 11 of 12
+    assert not J.ocr_ok("The qu1ck br0wn f0x jumps over the lazy dog", words)
+    assert not J.ocr_ok("", words) and not J.ocr_ok("anything", [])
+
+
+@pytest.mark.skipif(bool(J.missing("tesseract")), reason="needs tesseract-ocr + python3-pil")
+def test_real_tesseract_reads_the_page(tmp_path):
+    steps = J.tesseract_steps(J.find_tool("tesseract"), str(tmp_path))
+    assert steps[0].env == {"OMP_THREAD_LIMIT": "1"}
+    log = B.BenchLog(str(tmp_path / "t.jsonl"))
+    w = J.ToolWorker(steps, log, threading.Event())
+    ms, cpu, ok = w._run(steps[0])
+    assert ok and ms > 50 and cpu <= ms * 1.3                                    # one thread
+    from PIL import Image
+    Image.new("L", (800, 600), 255).save(os.path.join(str(tmp_path), "page.png"))    # a blank page has no words
+    assert w._run(steps[0])[2] is False
+    log.close()
+
+
+@pytest.mark.skipif(J.find_tool("ffmpeg") is None, reason="needs ffmpeg")
+def test_real_ffmpeg_transcodes_the_clip(tmp_path):
+    work = str(tmp_path)
+    steps = J.ffmpeg_steps(J.find_tool("ffmpeg"), work, seconds=1)
+    src, out = os.path.join(work, "src.mkv"), os.path.join(work, "out.mp4")
+    assert os.path.getsize(src) > 20000
+    log = B.BenchLog(str(tmp_path / "f.jsonl"))
+    w = J.ToolWorker(steps, log, threading.Event())
+    ms, cpu, ok = w._run(steps[0])
+    assert ok and cpu > 0 and os.path.getsize(out) > 20000
+    probe = subprocess.run([J.find_tool("ffmpeg"), "-hide_banner", "-i", out], capture_output=True, text=True).stderr
+    assert "h264" in probe and "960x540" in probe
+    os.rename(src, src + ".gone")                                               # no input: no output, not ok
+    assert w._run(steps[0])[2] is False and not os.path.exists(out)
+    log.close()
+
+
+def test_llama_binary_and_model_are_looked_up(tmp_path, monkeypatch):
+    monkeypatch.setenv("CF_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.delenv("CF_LLAMA_BIN", raising=False)
+    monkeypatch.delenv("CF_LLAMA_MODEL", raising=False)
+    if shutil.which("llama-completion"):
+        pytest.skip("llama-completion is on the system PATH")
+    assert J.find_tool("llama") is None and "llama-completion not found" in J.missing("llama")
+    exe = _fake_tool(tmp_path / "llama" / "llama.cpp" / "build" / "bin", "echo hi\n", name="llama-completion")
+    assert J.find_tool("llama") == exe and "no GGUF model" in J.missing("llama")
+    models = tmp_path / "llama" / "models"
+    models.mkdir()
+    (models / "b.gguf").write_bytes(b"GGUF")
+    (models / "a.gguf").write_bytes(b"GGUF")
+    assert J.find_model() == str(models / "a.gguf") and J.missing("llama") == ""
+    monkeypatch.setenv("CF_LLAMA_MODEL", str(models / "b.gguf"))
+    assert J.find_model() == str(models / "b.gguf")
+    monkeypatch.setenv("CF_LLAMA_MODEL", str(models / "nope.gguf"))
+    assert J.find_model() is None and J.missing("llama")
+    monkeypatch.setenv("CF_LLAMA_BIN", str(tmp_path / "nope"))
+    assert J.find_tool("llama") is None
+    job_env = {"CF_LLAMA_MODEL": str(models / "a.gguf"), "CF_LLAMA_BIN": exe}
+    for k, v in job_env.items():
+        monkeypatch.setenv(k, v)
+    job = J.build("llama", J.find_tool("llama"), str(tmp_path / "w"), tokens=16, threads=3)
+    argv = job.steps[0].argv
+    assert job.cache == [str(models / "a.gguf")] and job.per_op is False and "16 tokens, 3 threads" in job.what
+    assert argv[:3] == [exe, "-m", str(models / "a.gguf")] and argv[argv.index("-n") + 1] == "16" and argv[argv.index("-t") + 1] == "3"
+    assert "--ignore-eos" in argv and "--single-turn" in argv and J.LLAMA_PROMPT in argv            # always 16 tokens
+
+
+def test_llama_job_needs_an_answer_but_not_the_same_one(tmp_path):
+    """A busy machine does not always give the same tokens; a model that did not load gives none."""
+    tool = _fake_tool(tmp_path, 'n=$(cat "$0.n" 2>/dev/null || echo 0); echo $((n + 1)) > "$0.n"\n'
+                                'case $n in 1) echo "另一个回答, 一样是六十四个 token 的工作量";; 2) echo;; 3) echo "短";;\n'
+                                '*) echo "操作系统把长时间不用的内存页换出到磁盘, 把内存让给别的程序";; esac\n')
+    st = J.llama_steps(tool, "/nonexistent/model.gguf")[0]
+    assert st.argv[st.argv.index("-t") + 1] == "1"                              # see llama_steps: busy-waiting threads
+    log = B.BenchLog(str(tmp_path / "l.jsonl"))
+    w = J.ToolWorker([st], log, threading.Event())
+    assert [w._run(st)[2] for _ in range(5)] == [True, True, False, False, True]
+    log.close()
+
+
+@pytest.mark.skipif(bool(J.missing("llama")), reason="needs llama.cpp + a GGUF model (install_compute_apps.sh --llama)")
+def test_real_llama_generates_the_tokens_it_was_asked_for(tmp_path):
+    job = J.build("llama", J.find_tool("llama"), str(tmp_path), tokens=24)
+    log = B.BenchLog(str(tmp_path / "l.jsonl"))
+    w = J.ToolWorker(job.steps, log, threading.Event())
+    (ms, cpu, ok), (_, _, again) = w._run(job.steps[0]), w._run(job.steps[0])
+    log.close()
+    assert ok and again and cpu > 100, [r for r in B.read_new(log.path, 0)[0] if r["k"] == "err"]
+    err = subprocess.run(job.steps[0].argv, capture_output=True, stdin=subprocess.DEVNULL).stderr.decode()
+    assert re.search(r"eval time =.*/\s+23 runs", err), err[-600:]              # 24 tokens: the first comes with the prompt
+
+
+def test_evict_drops_a_file_from_the_page_cache(tmp_path):
+    J.evict(str(tmp_path / "missing"))                                          # nothing to do, no error
+    f = tmp_path / "big"
+    f.write_bytes(os.urandom(1 << 20))
+    os.sync()
+    J.evict(str(f))
+    assert f.read_bytes()[:4] is not None
+
+
+def test_check_runs_a_cycle_and_reports_what_is_missing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(J, "find_tool", lambda kind: None)
+    assert J.check("z3")[0] is False and "sudo apt install z3" in J.check("z3")[1]
+    assert J.main(["sevenzip", "llama"]) == 1
+    out = capsys.readouterr().out
+    assert "sevenzip   MISSING" in out and "install_compute_apps.sh --llama" in out
+    assert J.main(["nosuchkind"]) == 2
+    monkeypatch.undo()
+    tool = _fake_tool(tmp_path, 'case "$1" in *queens*|*factor*) echo sat;; *) echo unsat;; esac\n')
+    monkeypatch.setattr(J, "find_tool", lambda kind: tool)
+    ok, line = J.check("z3", cycles=2, work=str(tmp_path / "w"))
+    assert ok and "queens24" in line and "factor32" in line and "cpu" in line
+    wrong = _fake_tool(tmp_path / "w2", "echo sat\n")
+    monkeypatch.setattr(J, "find_tool", lambda kind: wrong)
+    ok, line = J.check("z3", work=str(tmp_path / "w"))
+    assert not ok and "pigeonhole8: exit 0, answered 'sat'" in line
+
+
+def test_missing_tools_of_a_config_are_listed(tmp_path, monkeypatch, capsys):
+    cfg = os.path.join(REPO, "configs", "ubuntu_arm64_compute.json")
+    assert J.config_kinds(cfg) == {k: k for k in ("sevenzip", "z3", "openssl", "llama", "tesseract", "ffmpeg")}
+    assert J.config_kinds(os.path.join(REPO, "configs", "ubuntu_arm64_classes_synthetic.json")) == {}
+    monkeypatch.setattr(J, "missing", lambda kind, *a, **kw: "no model" if kind == "llama" else "")
+    assert J.main(["--missing", cfg]) == 1
+    assert capsys.readouterr().out.strip() == "llama: no model  ->  scripts/ubuntu/install_compute_apps.sh --llama"
+    monkeypatch.setattr(J, "missing", lambda kind, *a, **kw: "")
+    assert J.main(["--missing", cfg]) == 0 and capsys.readouterr().out == ""
+
+
 def test_real_tool_apps_are_in_the_catalogue(monkeypatch):
     from cf.linux.onboard import login_spec
     from cf.linux.work import default_spec
@@ -377,6 +551,19 @@ def test_real_tool_apps_are_in_the_catalogue(monkeypatch):
         import importlib.util
         assert A.is_installed(a) is (importlib.util.find_spec("Xlib") is not None)
     assert J.TOOLS["sevenzip"][0] == "7z" and all(k in J.INSTALL for k in J.TOOLS)
+    monkeypatch.undo()
+    for id_ in ("openssl", "llama", "tesseract", "ffmpeg"):
+        a = A.CATALOG[id_]
+        assert a.kind == "bench" and a.category == "compute" and f"--kind {id_}" in a.cmd and id_ in B.TOOL_KINDS
+        assert re.search(a.match, f"python3 -m cf.linux.bench_app --app {id_} --kind {id_}")
+        assert default_spec(a) == {"kind": "none", "oracle": "statefile"} and login_spec(a)["method"] == "none"
+        import shlex
+        assert shlex.split(a.cmd)[-1] == a.name                                 # the title survives the shell
+    # a language model needs its model file as well as its program
+    monkeypatch.setattr(J, "find_tool", lambda kind: "/usr/bin/" + kind)
+    monkeypatch.setattr(J, "find_model", lambda: None)
+    assert A.is_installed(A.CATALOG["llama"]) is False
+    assert set(B.TOOL_KINDS) == set(J.TOOLS) and set(J.THREADS) <= set(J.TOOLS)
 
 
 def test_tool_runs_are_not_the_apps_state():
@@ -411,6 +598,16 @@ def test_configs_real_and_synthetic():
     assert real["net_probe"]["by"] == "auto" and real["net_probe"]["loopback"] is False
     assert all(A.CATALOG[a].kind == "bench" for a in syn["classes"]["compute"] + syn["classes"]["download"])
     assert real["throttle"] == syn["throttle"] and real["dwell_s"] == syn["dwell_s"]
+    # responsiveness + compute only: the same interactive apps and limits, six real tools, no download app
+    comp = json.load(open(os.path.join(REPO, "configs", "ubuntu_arm64_compute.json")))
+    apps, cl, pat = set(comp["apps"]), comp["classes"], comp["trace"]["pattern"]
+    assert set(cl["interactive"]) | set(cl["compute"]) == apps == set(pat) and cl["download"] == []
+    assert cl["interactive"] == real["classes"]["interactive"]
+    assert cl["compute"] == ["sevenzip", "z3", "openssl", "llama", "tesseract", "ffmpeg"]
+    assert all(pat[i] != pat[i - 1] for i in range(len(pat))) and comp["trace"]["T"] % len(pat) == 0
+    assert all(pat.count(a) == 1 for a in cl["compute"]) and all(pat.count(a) == 2 for a in cl["interactive"])
+    assert {k: v for k, v in comp["throttle"].items() if k != "_comment"} == \
+        {k: v for k, v in real["throttle"].items() if k != "_comment"} and comp["dwell_s"] == real["dwell_s"]
 
 
 # ------------------------------------------------------------------ runner + analyzer on the fake desktop
@@ -528,6 +725,20 @@ def test_processes_that_left_the_cgroup_at_launch_are_moved_back_before_m_fg_is_
     assert ("sample", None) in order[i + 2:]
     hits = [ln for ln in lines if "had left its cgroup" in ln]
     assert len(hits) == 1 and "2 process(es)" in hits[0] and "[4242, 4243]" in hits[0]
+
+
+def test_m_fg_of_a_tool_app_is_the_peak_of_its_cgroup(tmp_path):
+    """The tool is started for every job: a single sample catches it between two jobs or in the
+    middle of one.  memory.high must be a fraction of what the job needs."""
+    dev = FakeLinuxDesktop(APPS, seed=3)
+    plain = load(ThrottleExperiment(_short_cfg(tmp_path, "nopeak"), FakeLinuxDesktop(APPS, seed=3), log=lambda *a: None).run())
+    dev.mem_peak = {"fake_zip": 480 * 1024, "fake_smt": 1, "fake_office": 9 * 1024 * 1024}
+    run = load(ThrottleExperiment(_short_cfg(tmp_path, "peak"), dev, log=lambda *a: None).run())
+    m, m0 = run["budget"]["m_fg_kb"], plain["budget"]["m_fg_kb"]
+    assert m["fake_zip"] == 480 * 1024 > m0["fake_zip"]
+    assert m["fake_smt"] == m0["fake_smt"]                                # a peak below the sample changes nothing
+    assert m["fake_office"] == m0["fake_office"]                          # only for apps that start a tool per job
+    assert run["budget"]["a_fg_kb"]["fake_zip"] == 480 * 1024
 
 
 def test_m_fg_taken_right_after_a_cold_start_is_called_out(tmp_path):
@@ -679,10 +890,13 @@ def _xvfb_available():
     return bool(shutil.which("Xvfb")) and importlib.util.find_spec("Xlib") is not None
 
 
-@pytest.mark.skipif(not _xvfb_available() or J.find_tool("z3") is None or J.find_tool("sevenzip") is None,
-                    reason="needs Xvfb + python3-xlib + 7z + z3")
-@pytest.mark.parametrize("kind,ops", [("sevenzip", {"compress", "extract"}), ("z3", {None})])
-def test_bench_app_window_drives_the_real_tool(tmp_path, kind, ops):
+@pytest.mark.skipif(not _xvfb_available(), reason="needs Xvfb + python3-xlib")
+@pytest.mark.parametrize("kind,ops,need", [("sevenzip", {"compress", "extract"}, 4), ("z3", {None}, 4),
+                                           ("openssl", {"encrypt", "decrypt", "sign"}, 6), ("tesseract", {None}, 2),
+                                           ("ffmpeg", {None}, 2), ("llama", {None}, 2)])
+def test_bench_app_window_drives_the_real_tool(tmp_path, kind, ops, need):
+    if J.missing(kind):
+        pytest.skip(f"{kind}: {J.missing(kind)}")
     disp = ":%d" % (190 + os.getpid() % 40)
     xvfb = subprocess.Popen(["Xvfb", disp, "-screen", "0", "800x600x24"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     env = dict(os.environ, DISPLAY=disp, PYTHONPATH=REPO)
@@ -693,17 +907,17 @@ def test_bench_app_window_drives_the_real_tool(tmp_path, kind, ops):
         proc = subprocess.Popen([sys.executable, "-m", "cf.linux.bench_app", "--app", "t_" + kind, "--kind", kind,
                                  "--corpus-mb", "1", "--log", log, "--state-file", state, "--work-dir", work], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        deadline = time.time() + 40
+        deadline = time.time() + 90
         jobs = []
-        while time.time() < deadline and (len(jobs) < 4 or not os.path.exists(state)):
+        while time.time() < deadline and (len(jobs) < need or not os.path.exists(state)):
             time.sleep(0.2)
             assert proc.poll() is None, proc.stderr.read().decode()
             jobs = [r for r in B.read_new(log, 0)[0] if r["k"] == "job"]
-        assert len(jobs) >= 4 and all(r["ok"] for r in jobs) and {r.get("op") for r in jobs} == ops
+        assert len(jobs) >= need and all(r["ok"] for r in jobs) and {r.get("op") for r in jobs} == ops
         st = json.load(open(state))
         assert st["pid"] == proc.pid and st["kind"] == kind
         start = B.read_new(log, 0)[0][0]
-        assert start["k"] == "start" and J.find_tool(kind) in start["what"]
+        assert start["k"] == "start" and os.path.basename(J.find_tool(kind)) in start["what"]
         proc.terminate()
         proc.wait(10)
         time.sleep(0.3)
@@ -713,3 +927,12 @@ def test_bench_app_window_drives_the_real_tool(tmp_path, kind, ops):
         if proc and proc.poll() is None:
             proc.kill()
         xvfb.terminate()
+
+
+def test_operations_are_listed_in_a_fixed_order():
+    """A log that happens to start with 'decrypt' (the first job was cut by the warmup) must not
+    reorder the OpenSSL rows of that cell."""
+    ev = [{"op": "decrypt"}, {"op": "sign"}, {"op": "mystery"}, {"op": "encrypt"}, {"op": "decrypt"}]
+    assert C._ops(ev) == ["encrypt", "decrypt", "sign", "mystery"]
+    assert C._ops([{"k": "job"}, {"op": ""}]) == [""]
+    assert C._ops([]) == []
