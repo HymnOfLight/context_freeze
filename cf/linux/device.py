@@ -180,6 +180,12 @@ class LinuxDesktop:
             hits = PR.find_pids(a.match)
         return [p for p in hits if p not in inside and p != os.getpid()]
 
+    def mem_peak_kb(self, id_: str) -> Optional[int]:
+        """The most memory the app's cgroup has held since it was created (memory.peak, kernel >= 5.19;
+        anonymous memory and page cache - what memory.high counts); None when the kernel has no such file."""
+        v = self.tree.read(id_, "memory.peak")
+        return int(v) // 1024 if v.isdigit() else None
+
     def adopt(self, id_: str) -> dict:
         """Move stray processes (and their children) into cf/<app>."""
         stray = PR.children_of(self.stray_pids(id_))

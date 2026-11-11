@@ -403,6 +403,13 @@ class ThrottleExperiment(Experiment):
             smp = s["apps"][app]
             self._work_remember(app, res)        # so the very first return from bg / shrunk is checked too
             self.m_fg[app] = smp.total("pss_kb") + smp.total("swap_pss_kb")
+            if self.kinds.get(app) == "bench":
+                # the tool is started anew for every job, so one sample sees it at a random moment (7-Zip: 15 MB
+                # between two jobs, 85 MB while it packs; a language model: nothing, or the whole model). What
+                # the job needs is the high-water mark of the cgroup - the quantity memory.high limits
+                peak = getattr(dev, "mem_peak_kb", lambda a: None)(app)
+                if peak and peak > self.m_fg[app]:
+                    self.m_fg[app] = peak
             self.a_fg[app] = self.m_fg[app]
             fixed = self.cfg.get("fixed_m_fg_kb") or {}
             if app in fixed:
