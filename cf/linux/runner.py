@@ -246,6 +246,9 @@ class ThrottleExperiment(Experiment):
             tr["schedule"] = [[A.remap_scenario_apps(sc, mapping), share] for sc, share in tr["schedule"]]
         self.cfg["trace"] = tr
         self.log.info(f"apps ({len(used)}): " + ", ".join(f"{display_name(a)}[{self.categories[a][0]}]" for a in used))
+        # a clean slate: limits left behind by a run that crashed (or by another profile) would
+        # otherwise stay on the apps this run never demotes - in a policy-none run, on all of them
+        dev.release_all()
         for app in self.apps:
             dev.tree.ensure(app)
             if self.cfg["adopt_strays"]:
