@@ -244,6 +244,14 @@ def _tiers(ivs: list[dict]) -> str:
     return ", ".join(f"{k}×{n}" for k, n in sorted(c.items(), key=lambda kv: -kv[1]))
 
 
+def _ops(events: list[dict]) -> list[str]:
+    """The operations these jobs name, in a fixed order (that of OP_CN, unknown ones after it in
+    order of appearance): which operation a log happens to start with differs from cell to cell."""
+    seen = list(dict.fromkeys(e.get("op") or "" for e in events))
+    known = list(OP_CN)
+    return sorted(seen, key=lambda op: (known.index(op) if op in known else len(known), seen.index(op)))
+
+
 def compute_rows(run: dict) -> list[dict]:
     """One row per compute app, or per (app, operation) when its jobs name one (7-Zip: compress,
     extract) - then "app" is "<app>:<op>"."""
@@ -251,7 +259,7 @@ def compute_rows(run: dict) -> list[dict]:
     for app in classes_of(run)["compute"]:
         all_ev = [e for e in bench_events(run, app) if e.get("k") == "job"]
         ivs = intervals(run, app)
-        for op in list(dict.fromkeys(e.get("op") or "" for e in all_ev)) or [""]:
+        for op in _ops(all_ev) or [""]:
             ev = [e for e in all_ev if (e.get("op") or "") == op]
             rows.append(_compute_row(run, f"{app}:{op}" if op else app, op, ev, ivs))
     return rows
@@ -598,7 +606,10 @@ def plot_classes(runs: list[dict], path: str, tb: Optional[dict] = None) -> bool
                            label=f"{_label(n)} · {T('前台', 'fg') if k == 0 else T('后台', 'bg')}",
                            yerr=[[0.0] * len(es), es] if ek else None, capsize=2, error_kw={"lw": 0.8})
         ax.set_xticks(range(len(apps)))
-        ax.set_xticklabels([app_l(a) for a in apps], fontsize=9 if len(apps) <= 4 else 7.5)
+        labels = [app_l(a) for a in apps]
+        if len(apps) > 6:                      # "OpenSSL · 签名验签" x 9 runs into its neighbours on one line
+            labels = [x.replace(" · ", "\n") if zh else x.replace(" ", "\n", 1) for x in labels]
+        ax.set_xticklabels(labels, fontsize=9 if len(apps) <= 4 else 7.5)
         ax.set_title(title, fontsize=10)
         ax.set_ylabel(ylabel, fontsize=9)
         ax.grid(axis="y", alpha=0.3)
@@ -677,7 +688,7 @@ def plot_bench(run: dict, path: str) -> bool:
         name = _cn(app) if zh else app
         if app in cl["compute"]:
             jobs = [e for e in ev if e.get("k") == "job"]
-            ops = list(dict.fromkeys(e.get("op") or "" for e in jobs))
+            ops = _ops(jobs)
             for i, op in enumerate(ops):
                 sel = [e for e in jobs if (e.get("op") or "") == op]
                 ax.scatter([e["T"] - t_ref for e in sel], [e["ms"] for e in sel], s=5, color=["#1f77b4", "#ff7f0e", "#9467bd"][i % 3],
