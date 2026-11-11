@@ -426,8 +426,15 @@ class ThrottleExperiment(Experiment):
                 self.log.warn(f"{app}: launch status {res.get('status')} - the window may be behind a dialog")
             if smp.stray_pids:
                 self.log.warn(f"{app}: {len(smp.stray_pids)} matching process(es) outside its cgroup {smp.stray_pids[:5]}")
-        self.B_kb = self.cfg["eta"] * sum(self.m_fg.values())
         fixed = self.cfg.get("fixed_m_fg_kb") or {}
+        fresh = [a for a in self.apps if self.l_cold.get(a) is not None and self.kinds.get(a) == "desktop" and a not in fixed]
+        if fresh:
+            self.log.warn(f"{len(fresh)} app(s) were started by this warmup ({', '.join(display_name(a) for a in fresh)}): "
+                          f"their m_fg is what they held {self.cfg['warmup_dwell_s']:g} s after a cold start, usually well "
+                          f"below what they settle at, and memory.high = frac x m_fg (in this run and in the runs that "
+                          f"reuse its m_fg) is lower than intended. Start the apps first (run_linux.py CONFIG --launch "
+                          f"<ids>, or ONBOARD=1), give them a minute, then run")
+        self.B_kb = self.cfg["eta"] * sum(self.m_fg.values())
         source = "fixed" if fixed and all(p in fixed for p in self.apps) else ("mixed" if fixed else "measured")
         # feasibility: shrunk apps keep memory.high bytes, so the background footprint cannot drop below
         # floor = sum over the other apps of memory.high; a budget under that leaves every budgeted
