@@ -496,7 +496,7 @@ def _label(run_name: str) -> str:
 
 
 def plot_classes(runs: list[dict], path: str, tb: Optional[dict] = None) -> bool:
-    """One figure, three rows (interactive / compute / download), two panels each."""
+    """One figure, a row of two panels per class that has data (interactive / compute / download)."""
     from .plots import _plt, _use_cjk_font
     tb = tb or tables(runs)
     if not any(tb.values()):
@@ -508,7 +508,9 @@ def plot_classes(runs: list[dict], path: str, tb: Optional[dict] = None) -> bool
     colors = ["#9e9e9e", "#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e"]
     col = {n: colors[i % len(colors)] for i, n in enumerate(names)}
     app_l = (lambda a: _cn(a)) if zh else (lambda a: "all" if a == "ALL" else a.replace("bench_", "").replace(":", " "))
-    fig, axes = plt.subplots(3, 2, figsize=(13, 11.5))
+    kinds = [k for k in ("interactive", "compute", "download") if tb[k]]
+    fig, grid = plt.subplots(len(kinds), 2, figsize=(13, 0.4 + 3.7 * len(kinds)), squeeze=False)
+    axes = {k: grid[i] for i, k in enumerate(kinds)}
 
     def grouped(ax, rows, key, err_key=None, title="", ylabel="", log=False):
         apps = list(dict.fromkeys(r["app"] for r in rows))
@@ -580,38 +582,43 @@ def plot_classes(runs: list[dict], path: str, tb: Optional[dict] = None) -> bool
         else:
             ax.text(0.5, 0.5, T("没有数据", "no data"), ha="center", va="center", transform=ax.transAxes, color="#888888")
 
-    grouped(axes[0][0], tb["interactive"], "resp_p50_ms", "resp_p95_ms",
-            T("① 呼叫 / 切换响应时间 (柱 = P50, 须 = P95)", "1. call / switch response (bar P50, whisker P95)"), "ms")
-    smooth_rows = [dict(r, smooth_ms=r["probe_p95_ms"] if r["probe_p95_ms"] is not None else r["echo_p50_ms"],
-                        smooth_hi=r["probe_max_ms"] if r["probe_p95_ms"] is not None else r["echo_max_ms"])
-                   for r in tb["interactive"] if r["app"] != "ALL"]
-    grouped(axes[0][1], smooth_rows, "smooth_ms", "smooth_hi",
-            T("① 切回后是否顺滑: 事件循环应答 P95 (不应答 ping 的应用用输入回读 P50), 须 = 最大",
-              "1. smoothness after the switch: event-loop ping P95 (or input read-back P50), whisker = max"), "ms", log=True)
-    fg_bg(axes[1][0], tb["compute"], "fg_job_p50_ms", "bg_job_p50_ms",
-          T("② 计算型: 单个任务耗时 (柱 = P50, 须 = P95)", "2. compute: time per job (bar P50, whisker P95)"), "ms", log=True,
-          fg_err="fg_job_p95_ms", bg_err="bg_job_p95_ms")
-    fg_bg(axes[1][1], tb["compute"], "fg_jobs_per_min", "bg_jobs_per_min",
-          T("② 计算型: 每分钟完成的任务数", "2. compute: jobs per minute"), T("任务 / 分钟", "jobs / min"))
-    fg_bg(axes[2][0], tb["download"], "fg_mbps", "bg_mbps", T("③ 下载型: 下载速度", "3. download: speed"), "MB/s")
-    rtt_rows = []
-    for r in tb["download"]:
-        who = app_l(r["app"])
-        rtt_rows.append(dict(r, app=f"{who}\n{T('连接往返时延', 'socket rtt')}"))
-        if r.get("fg_ext_rtt_p50_ms") is not None or r.get("bg_ext_rtt_p50_ms") is not None:
-            rtt_rows.append({"run": r["run"], "app": f"{who}\n{T('探针: 外网建连', 'probe: connect')}", "fg_rtt_p50_ms": r["fg_ext_rtt_p50_ms"],
-                             "bg_rtt_p50_ms": r["bg_ext_rtt_p50_ms"], "fg_rtt_p95_ms": r["fg_ext_rtt_p95_ms"],
-                             "bg_rtt_p95_ms": r["bg_ext_rtt_p95_ms"]})
-        if r.get("fg_wake_p50_ms") is not None or r.get("bg_wake_p50_ms") is not None:
-            # a log axis cannot show 0: an app that is never held back wakes up "0.0x ms" late
-            rtt_rows.append({"run": r["run"], "app": f"{who}\n{T('探针: 处理延迟', 'probe: wake-up delay')}",
-                             "fg_rtt_p50_ms": max(r["fg_wake_p50_ms"], 0.01) if r.get("fg_wake_p50_ms") is not None else None,
-                             "bg_rtt_p50_ms": max(r["bg_wake_p50_ms"], 0.01) if r.get("bg_wake_p50_ms") is not None else None,
-                             "fg_rtt_p95_ms": r.get("fg_wake_p95_ms"), "bg_rtt_p95_ms": r.get("bg_wake_p95_ms")})
-    fg_bg(axes[2][1], rtt_rows, "fg_rtt_p50_ms", "bg_rtt_p50_ms",
-          T("③ 下载型: 网络时延与应用的处理延迟 (柱 = P50, 须 = P95)", "3. download: network latency and wake-up delay (bar P50, whisker P95)"),
-          "ms", log=True, fg_err="fg_rtt_p95_ms", bg_err="bg_rtt_p95_ms")
-    fig.suptitle(T("三类应用: 不限制 vs 压制后台资源", "three app classes: unlimited vs limited background"), fontsize=12)
+    if "interactive" in axes:
+        grouped(axes["interactive"][0], tb["interactive"], "resp_p50_ms", "resp_p95_ms",
+                T("① 呼叫 / 切换响应时间 (柱 = P50, 须 = P95)", "1. call / switch response (bar P50, whisker P95)"), "ms")
+        smooth_rows = [dict(r, smooth_ms=r["probe_p95_ms"] if r["probe_p95_ms"] is not None else r["echo_p50_ms"],
+                            smooth_hi=r["probe_max_ms"] if r["probe_p95_ms"] is not None else r["echo_max_ms"])
+                       for r in tb["interactive"] if r["app"] != "ALL"]
+        grouped(axes["interactive"][1], smooth_rows, "smooth_ms", "smooth_hi",
+                T("① 切回后是否顺滑: 事件循环应答 P95 (不应答 ping 的应用用输入回读 P50), 须 = 最大",
+                  "1. smoothness after the switch: event-loop ping P95 (or input read-back P50), whisker = max"), "ms", log=True)
+    if "compute" in axes:
+        fg_bg(axes["compute"][0], tb["compute"], "fg_job_p50_ms", "bg_job_p50_ms",
+              T("② 计算型: 单个任务耗时 (柱 = P50, 须 = P95)", "2. compute: time per job (bar P50, whisker P95)"), "ms", log=True,
+              fg_err="fg_job_p95_ms", bg_err="bg_job_p95_ms")
+        fg_bg(axes["compute"][1], tb["compute"], "fg_jobs_per_min", "bg_jobs_per_min",
+              T("② 计算型: 每分钟完成的任务数", "2. compute: jobs per minute"), T("任务 / 分钟", "jobs / min"))
+    if "download" in axes:
+        fg_bg(axes["download"][0], tb["download"], "fg_mbps", "bg_mbps", T("③ 下载型: 下载速度", "3. download: speed"), "MB/s")
+        rtt_rows = []
+        for r in tb["download"]:
+            who = app_l(r["app"])
+            rtt_rows.append(dict(r, app=f"{who}\n{T('连接往返时延', 'socket rtt')}"))
+            if r.get("fg_ext_rtt_p50_ms") is not None or r.get("bg_ext_rtt_p50_ms") is not None:
+                rtt_rows.append({"run": r["run"], "app": f"{who}\n{T('探针: 外网建连', 'probe: connect')}", "fg_rtt_p50_ms": r["fg_ext_rtt_p50_ms"],
+                                 "bg_rtt_p50_ms": r["bg_ext_rtt_p50_ms"], "fg_rtt_p95_ms": r["fg_ext_rtt_p95_ms"],
+                                 "bg_rtt_p95_ms": r["bg_ext_rtt_p95_ms"]})
+            if r.get("fg_wake_p50_ms") is not None or r.get("bg_wake_p50_ms") is not None:
+                # a log axis cannot show 0: an app that is never held back wakes up "0.0x ms" late
+                rtt_rows.append({"run": r["run"], "app": f"{who}\n{T('探针: 处理延迟', 'probe: wake-up delay')}",
+                                 "fg_rtt_p50_ms": max(r["fg_wake_p50_ms"], 0.01) if r.get("fg_wake_p50_ms") is not None else None,
+                                 "bg_rtt_p50_ms": max(r["bg_wake_p50_ms"], 0.01) if r.get("bg_wake_p50_ms") is not None else None,
+                                 "fg_rtt_p95_ms": r.get("fg_wake_p95_ms"), "bg_rtt_p95_ms": r.get("bg_wake_p95_ms")})
+        fg_bg(axes["download"][1], rtt_rows, "fg_rtt_p50_ms", "bg_rtt_p50_ms",
+              T("③ 下载型: 网络时延与应用的处理延迟 (柱 = P50, 须 = P95)", "3. download: network latency and wake-up delay (bar P50, whisker P95)"),
+              "ms", log=True, fg_err="fg_rtt_p95_ms", bg_err="bg_rtt_p95_ms")
+    what = {"interactive": T("呼叫 / 切换", "call / switch"), "compute": T("计算型", "compute"), "download": T("下载型", "download")}
+    head = T("三类应用", "three app classes") if len(kinds) == 3 else " + ".join(what[k] for k in kinds)
+    fig.suptitle(head + T(": 不限制 vs 压制后台资源", ": unlimited vs limited background"), fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(path, dpi=130)
     plt.close(fig)
