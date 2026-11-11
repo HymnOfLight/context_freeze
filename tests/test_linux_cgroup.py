@@ -1,6 +1,7 @@
 """cgroup v2 tier logic: the knob values each tier writes (pure), the tree on a fake cgroupfs
 (a plain directory), and - when /sys/fs/cgroup/cf is delegated to us - the real thing."""
 import os
+import time
 
 import pytest
 
@@ -109,6 +110,7 @@ def test_tree_on_fake_fs_applies_and_clears_tiers(tmp_path):
 
     res = apply_tier(tree, "wechat", "fg", prof)
     assert (leaf / "cpu.max").read_text() == f"max {PERIOD_US}"
+    assert (leaf / "cpuset.cpus").read_text() == "0-3" and res["limits"]["cpuset.cpus"] == "0-3"   # every CPU again
     assert (leaf / "memory.high").read_text() == "max" and (leaf / "cpu.weight").read_text() == "100"
     assert res["reclaim"] is None
     assert tree.leaves() == ["wechat"]
@@ -152,8 +154,82 @@ def test_real_cgroup_tier_round_trip():
         assert REAL.read(name, "memory.max") == "max"
         apply_tier(REAL, name, "fg", prof)
         assert REAL.read(name, "cpu.max") == f"max {PERIOD_US}" and REAL.read(name, "memory.high") == "max"
+        # pinned to one core in the background, on all of them again in the foreground
+        if "cpuset" in REAL.controllers() and len(REAL.effective_cpus()) > 1:
+            pin = ThrottleProfile(cpu_mode="both", cpuset_cpus="last", cpu_cores=0.1)
+            last = str(REAL.effective_cpus()[-1])
+            apply_tier(REAL, name, "bg", pin)
+            assert REAL.read(name, "cpuset.cpus") == last and REAL.read(name, "cpuset.cpus.effective") == last
+            res = apply_tier(REAL, name, "fg", pin)
+            assert not res["limits"]["cpuset.cpus"].startswith("ERR"), res["limits"]
+            assert REAL.read(name, "cpuset.cpus.effective") == REAL.read("", "cpuset.cpus.effective")
     finally:
         assert REAL.remove(name)
+
+
+def test_an_empty_value_is_written_as_an_empty_line(tmp_path):
+    """open(...).write("") issues no write() at all - the kernel would never see the request."""
+    tree = _fake_cgroupfs(tmp_path)
+    tree.ensure("qq")
+    (tmp_path / "cf" / "qq" / "knob").write_text("old")
+    assert tree.write("qq", "knob", "") is None
+    assert (tmp_path / "cf" / "qq" / "knob").read_text() == "\n"
+
+
+def test_unpin_gives_every_cpu_back_and_falls_back_to_inherit(tmp_path):
+    tree = _fake_cgroupfs(tmp_path)
+    tree.ensure("qq")
+    leaf = tmp_path / "cf" / "qq"
+    assert tree.set_limits("qq", cpuset="3") == {"cpuset.cpus": "3"}
+    assert tree.set_limits("qq", cpuset="") == {"cpuset.cpus": "0-3"} and (leaf / "cpuset.cpus").read_text() == "0-3"
+    assert tree.clear_limits("qq")["cpuset.cpus"] == "0-3"
+
+    class Refusing(CgroupTree):                                   # a kernel that takes no explicit list here
+        def write(self, name, file, value):
+            if file == "cpuset.cpus" and value:
+                self.errors.append("refused")
+                return "x: EINVAL Invalid argument"
+            return super().write(name, file, value)
+    odd = Refusing(str(tmp_path), "cf")
+    assert odd.set_limits("qq", cpuset="") == {"cpuset.cpus": ""} and odd.errors == []
+    assert (leaf / "cpuset.cpus").read_text() == "\n"
+
+
+@pytest.mark.skipif(not real_ok, reason="/sys/fs/cgroup/cf not delegated to this user (scripts/ubuntu/setup_cgroups.sh)")
+def test_real_cgroup_lets_a_running_process_back_on_every_cpu():
+    """The case that matters: the cgroup has a process in it.  The kernel refuses an empty
+    cpuset.cpus there (ENOSPC), so an app that had been pinned to the background's core stayed on
+    it in the foreground.  Needs the test to run inside the tree (source scripts/ubuntu/cf_enter.sh)."""
+    import subprocess
+    if "cpuset" not in REAL.controllers() or len(REAL.effective_cpus()) < 2:
+        pytest.skip("needs the cpuset controller and two CPUs")
+    name = f"pytest_pin_{os.getpid()}"
+    REAL.ensure(name)
+    p = subprocess.Popen(["sleep", "30"])
+    try:
+        ok, failed = REAL.attach(name, [p.pid])
+        if not ok:
+            REAL.errors.clear()
+            pytest.skip(f"cannot move a process into the tree from here ({list(failed.values())[0]})")
+        every, last = set(REAL.effective_cpus()), REAL.effective_cpus()[-1]
+        pin = ThrottleProfile(cpu_mode="both", cpuset_cpus="last", cpu_cores=0.1)
+        apply_tier(REAL, name, "bg", pin)
+        assert os.sched_getaffinity(p.pid) == {last}
+        res = apply_tier(REAL, name, "fg", pin)
+        assert not res["limits"]["cpuset.cpus"].startswith("ERR"), res["limits"]
+        assert os.sched_getaffinity(p.pid) == every
+        assert REAL.read(name, "cpuset.cpus.effective") == REAL.read("", "cpuset.cpus.effective")
+        apply_tier(REAL, name, "shrunk", pin, 64 * MB)
+        assert os.sched_getaffinity(p.pid) == {last}
+        REAL.clear_limits(name)
+        assert os.sched_getaffinity(p.pid) == every and REAL.errors == []
+    finally:
+        p.kill()
+        p.wait()
+        for _ in range(50):
+            if REAL.remove(name):
+                break
+            time.sleep(0.05)
 
 
 def test_squeeze_profile_asks_for_the_whole_cgroup_several_times(tmp_path):

@@ -8,7 +8,12 @@ if [ "$(id -u)" != 0 ]; then echo "run with sudo" >&2; exit 1; fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -y -q xdotool xclip x11-utils x11-xserver-utils python3-xlib python3-pip python3-numpy \
-  python3-matplotlib python3-openpyxl dbus-x11 libnotify-bin util-linux wmctrl procps git
+  python3-matplotlib python3-openpyxl dbus-x11 libnotify-bin util-linux wmctrl procps git iproute2
+# a Chinese font that also has letters and digits, for the figure labels (a minimal install has only
+# Droid Sans Fallback, which has neither; cf/linux/plots.py copes with it, this one looks better)
+apt-get install -y -q fonts-wqy-microhei || echo "!! fonts-wqy-microhei not installed: figures use whatever CJK font there is" >&2
+# the compute apps of the three-class experiment (manual §6.9) drive these real tools
+apt-get install -y -q p7zip-full z3
 for a in "$@"; do
   case "$a" in
     --subs) apt-get install -y -q kdenlive librecad gimp ;;

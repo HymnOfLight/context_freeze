@@ -15,7 +15,8 @@ Adopting processes that already live elsewhere (user.slice, snap scopes) needs r
 
 Knobs used per tier (see ThrottleProfile):
     cpu.max            "quota period": bandwidth of one logical core = "100000 100000"
-    cpuset.cpus        pin to a core set (all throttled apps share it); "" = inherit parent
+    cpuset.cpus        pin to a core set (all throttled apps share it); lifted by writing every CPU
+                       of the tree back (an empty value is refused while the cgroup has processes)
     cpu.weight         share under contention (default 100)
     memory.high        soft limit: the kernel reclaims above it and throttles the allocator - no kill
     memory.max         hard limit (OOM kill above it) - only with mem_hard=true
@@ -182,11 +183,13 @@ class CgroupTree:
             return ""
 
     def write(self, name: str, file: str, value: str) -> Optional[str]:
-        """Returns None on success, else an error string (also appended to self.errors)."""
+        """Returns None on success, else an error string (also appended to self.errors).  An empty
+        value is sent as an empty line: writing zero bytes is no write() at all, the kernel would
+        never see it and the old value would stay."""
         p = os.path.join(self.path(name), file)
         try:
             with open(p, "w") as f:
-                f.write(str(value))
+                f.write(str(value) or "\n")
             return None
         except OSError as e:
             msg = f"{p} <- {value!r}: {errno.errorcode.get(e.errno, e.errno)} {e.strerror}"
@@ -234,15 +237,31 @@ class CgroupTree:
         return self.write(name, "cgroup.procs", str(os.getpid()))
 
     # --------------------------------------------------------------- cpus
-    def effective_cpus(self) -> list[int]:
+    def all_cpus(self) -> str:
+        """The CPUs the tree may use, as the kernel writes them ('0-7')."""
         spec = self.read("", "cpuset.cpus.effective") or self.read("", "cpuset.cpus")
         if not spec:
             try:
                 with open(os.path.join(self.root, "cpuset.cpus.effective")) as f:
                     spec = f.read().strip()
             except OSError:
-                spec = f"0-{max(0, (os.cpu_count() or 1) - 1)}"
-        return parse_cpu_list(spec)
+                spec = ""
+        return spec or f"0-{max(0, (os.cpu_count() or 1) - 1)}"
+
+    def effective_cpus(self) -> list[int]:
+        return parse_cpu_list(self.all_cpus())
+
+    def unpin(self, name: str) -> tuple[Optional[str], str]:
+        """Lift a cpuset.cpus restriction -> (error | None, the value written).  The natural way,
+        an empty cpuset.cpus (= inherit), is refused by the kernel for a cgroup that has processes
+        (ENOSPC), which is exactly when it matters - so the leaf is given every CPU of the tree
+        explicitly; only where that is refused too does it fall back to the empty value."""
+        every = self.all_cpus()
+        err = self.write(name, "cpuset.cpus", every)
+        if err is None:
+            return None, every
+        self.errors.pop()
+        return self.write(name, "cpuset.cpus", ""), ""
 
     def resolve_cpuset(self, spec: str) -> str:
         if spec == "last":
@@ -268,7 +287,10 @@ class CgroupTree:
             if ctrl and need not in ctrl:
                 applied[file] = f"ERR controller {need} not enabled"
                 continue
-            err = self.write(name, file, str(value))
+            if file == "cpuset.cpus" and str(value) == "":
+                err, value = self.unpin(name)
+            else:
+                err = self.write(name, file, str(value))
             applied[file] = str(value) if err is None else "ERR " + err.split(": ", 1)[-1]
         return applied
 

@@ -59,7 +59,8 @@ scripts/ubuntu/cf_onboard.sh --check && python3 run_linux.py configs/ubuntu_cn_d
 python3 run_linux.py configs/ubuntu_cn_desktop.json --scenario office --policy static --T 60
 CONFIG=configs/ubuntu_no_login.json PRESET=night WORK=1 scripts/ubuntu/run_all.sh   # 一个账号都不注册先出数据: 需登录的应用用占位顶替 (placeholder_apps), 其余真跑
 CONFIG=configs/ubuntu_arm64.json ONBOARD=1 PRESET=night WORK=1 scripts/ubuntu/run_all.sh   # arm64 虚拟机实装集合 (微信/QQ/钉钉/腾讯会议/网盘/迅雷/爱奇艺/哔哩哔哩/网易云/Firefox/WPS/中望/石墨), 五场景含 media 娱乐
-scripts/ubuntu/run_classes.sh                                            # 三类应用 (手册 §6.9, 约 9 分钟一格): 交互应用的呼叫 / 切换响应与顺滑度, 计算型 (科学计算 / 压缩解压基准) 前台 vs 后台的任务时延, 下载型的速度与网络时延; none / mild / squeeze 三格
+scripts/ubuntu/run_classes.sh                                            # 三类应用 (手册 §6.9, 约 10 分钟一格), 全部用真实应用: 交互 (微信 / QQ / WPS / Firefox) 的呼叫 / 切换响应与顺滑度, 计算型 (7-Zip 压缩解压 / Z3 约束求解) 前台 vs 后台的任务时延, 下载型 (百度网盘 / 迅雷) 的速度与网络时延; none / mild / squeeze 三格. 先 sudo apt install -y p7zip-full z3, 并在两个下载应用里各开一个大文件下载
+CONFIG=configs/ubuntu_arm64_classes_synthetic.json scripts/ubuntu/run_classes.sh   # 同上的合成版: 计算 / 下载换成自带基准程序 + 本机限速源, 不需要工具 / 账号 / 下载任务
 scripts/ubuntu/run_squeeze.sh                                            # 实验性 (手册 §6.8): office 5 应用、3 格, 按进程统计前/后台 PSS, 激进挤压 (memory.reclaim 整个 cgroup, 10 % 核带宽), 静默期每分钟换出量
 NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40  # 场景 x 策略 x η x 变体 (CPU 档位 / cpuset / swap 上限 / memory.max 对照); FULL=1 全量; PLACEHOLDERS=1 没装的用占位顶替
 WORK=1 NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40   # 每格加 --work: 脚本代替人工点击 (打草稿 / 滚页 / 上滑), 切回时核对内容 -> work_state_ok / work_fail

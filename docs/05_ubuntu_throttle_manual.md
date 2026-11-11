@@ -513,7 +513,7 @@ arm64 包在 ACE 容器里缺 `libc_secshared.so` 启动即退, 由哔哩哔哩�
 | `app_overrides` | `{}` | 对 catalogue 条目的字段覆盖, 或新增应用 (键 = 新 id, 至少 `cmd` `match` `wm_class` `category`, 可加 `name` `notify_names` `arch` `kind` `package` `substitute`) |
 | `never_throttle` | `[]` | 永远 `fg` 的应用 (音乐播放器、录屏) |
 | `policy` / `eta` / `policy_kw` | `static` / 0.3 | 策略与预算系数, 同 Android 版; `static` `none` 忽略 η |
-| `throttle.cpu_mode` | `quota` | `quota`: 每个后台应用各自 `cpu.max` = `cpu_cores` 个核的带宽; `cpuset`: 所有后台应用挤在 `cpuset_cpus` 这 (几) 个核上 (`last` = 编号最大的核); `both`; `none` |
+| `throttle.cpu_mode` | `quota` | `quota`: 每个后台应用各自 `cpu.max` = `cpu_cores` 个核的带宽; `cpuset`: 所有后台应用挤在 `cpuset_cpus` 这 (几) 个核上 (`last` = 编号最大的核); `both`; `none`。**旧数据注意**: 2026-11-11 之前的版本在把应用提回前台时清不掉 `cpuset.cpus` (程序写的是空串: 零字节的写入根本到不了内核; 而且即使到了, 内核也拒绝把有进程的 cgroup 的 `cpuset.cpus` 清空, 报 ENOSPC —— 现在改成把整棵树的全部核显式写回去, 写不进去的限制会在日志里 WARN), 用过 `cpuset` / `both` 档 (§6.8 的 squeeze、§6.9 的 squeeze 格、矩阵的 cpuset 对照) 以后, 被压过的应用**回到前台也仍钉在那一个核上**, 同一次开机里之后跑的格 (包括 `none`) 也带着这个限制; 这些格的前台响应 / 前台任务时延偏慢, 需要重跑。旧结果文件可以直接查: `python3 -m cf.linux.classes 旧结果/*.jsonl --no-plots` 的开头会标出 "前台应用仍被 cpuset 钉在核 N 上" 的格。现在每次运行开始时也会先解除全部遗留限制 |
 | `throttle.cpu_cores` | 1.0 | 可以是 0.5 (半个核) |
 | `throttle.cpu_weight` | 20 | 后台与前台争同一核时的权重 (前台 100) |
 | `throttle.mem_frac` | 0.5 | `shrunk` 应用 `memory.high` = mem_frac × m_fg (m_fg = warmup 时前台 PSS+Swap) |
@@ -677,7 +677,7 @@ CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # 只跑两格;  T=20 DWELL=
 每步记录里 `bg.<app>.reclaim_mb` / `swap_delta_mb` 是这一步停留里从该 cgroup 回收 / 换出的量; `actions.limits.<app>.squeeze` 是切走时那次挤压的前后 `memory.current`。
 `report.md` 的 Per process 一节下面会列出后台仍高于前台 10 % 的进程 (`squeeze_pct` < 90, 前台 ≥ 20 MB): 剩下的就是 `memory.reclaim` 拿不走的 —— 钉住的页 (GPU / 共享缓冲、mlock、内核侧)、应用在后台一直碰的工作集; 看它的 `swap_growth_mb_per_min` 是否一直 > 0 就知道是 "拿不走" 还是 "拿走又被碰回来"。
 
-**换出 / 换入随时间的曲线** `plots/<run>_swapflow.png` (每个有 per-process 数据的 run 一张; 每个应用一行; 装了中文字体 —— Noto Sans CJK / 文泉驿 / 思源黑体 / PingFang 任一 —— 就是中文标注, 没有则自动退回英文): 横轴是**从该应用被切到后台起的秒数**, 左列是每个采样间隔内从它的 cgroup **换出**的量 (`Δpgsteal × 4 KB`, 红) 和它**换回**的量 (`Δmajflt × 4 KB`, 蓝; 都折算成每 `sample_every_s` 秒的量, 缺样本的间隔断开不画), 右列是两者自切走起的累计量 (灰虚线 = 该 cgroup `memory.swap.current` 比切走时多了多少)。一次 sweep 里同一个应用会被切走好几次, 每次 (一个 "episode") 都淡色叠在同一时间轴上, 粗线是各次的均值; 这轮里一次都没被切走过的应用 (如 QQ) 画它从实验开始起的那一段, 标题会注明。黄色底是**暂态**: 从切走到每间隔换出量回落到后半段中位数 2 倍以内的那段, 旁边标出切走瞬间一次性挤出的 MB; 右下角标出最长那次后半段的斜率 (每分钟换出 / 换回 MB 和换回占换出的 %) 并给一句判断: ≥ 80 % "换出 ≈ 换回, 稳态, 内存只是在来回搬"; 20–80 % "换出 > 换回, 稳态, 但一部分被丢掉的页 (文件页经 readahead) 不经缺页就回来了"; < 20 % "几乎不再换回, 后台安静"。两条累计线**平行** = 到了稳态。要看清从暂态到稳态的收敛, 用 `CELLS="none squeeze1" SAMPLE=2` 跑: `squeeze1` 与 `squeeze` 相同但 `squeeze_every_s 0` (只在切走时挤一次, 之后只靠 `memory.high` 顶着), 采样 2 s; 默认的 `squeeze` 格每 10 s 再挤一轮, 曲线是锯齿 (每轮挤出 ~150 MB, 10 s 内又页回), 采样 10 s 也太粗。
+**换出 / 换入随时间的曲线** `plots/<run>_swapflow.png` (每个有 per-process 数据的 run 一张; 每个应用一行; 有中文字体就是中文标注, 没有则自动退回英文; 字体怎么选、图里出现方框怎么办见 §10 "图里的字是方框"): 横轴是**从该应用被切到后台起的秒数**, 左列是每个采样间隔内从它的 cgroup **换出**的量 (`Δpgsteal × 4 KB`, 红) 和它**换回**的量 (`Δmajflt × 4 KB`, 蓝; 都折算成每 `sample_every_s` 秒的量, 缺样本的间隔断开不画), 右列是两者自切走起的累计量 (灰虚线 = 该 cgroup `memory.swap.current` 比切走时多了多少)。一次 sweep 里同一个应用会被切走好几次, 每次 (一个 "episode") 都淡色叠在同一时间轴上, 粗线是各次的均值; 这轮里一次都没被切走过的应用 (如 QQ) 画它从实验开始起的那一段, 标题会注明。黄色底是**暂态**: 从切走到每间隔换出量回落到后半段中位数 2 倍以内的那段, 旁边标出切走瞬间一次性挤出的 MB; 右下角标出最长那次后半段的斜率 (每分钟换出 / 换回 MB 和换回占换出的 %) 并给一句判断: ≥ 80 % "换出 ≈ 换回, 稳态, 内存只是在来回搬"; 20–80 % "换出 > 换回, 稳态, 但一部分被丢掉的页 (文件页经 readahead) 不经缺页就回来了"; < 20 % "几乎不再换回, 后台安静"。两条累计线**平行** = 到了稳态。要看清从暂态到稳态的收敛, 用 `CELLS="none squeeze1" SAMPLE=2` 跑: `squeeze1` 与 `squeeze` 相同但 `squeeze_every_s 0` (只在切走时挤一次, 之后只靠 `memory.high` 顶着), 采样 2 s; 默认的 `squeeze` 格每 10 s 再挤一轮, 曲线是锯齿 (每轮挤出 ~150 MB, 10 s 内又页回), 采样 10 s 也太粗。
 
 **跑之前 (不用重启虚拟机, 不用关这 5 个应用):**
 
@@ -692,15 +692,24 @@ CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # 只跑两格;  T=20 DWELL=
 
 ### 6.9 三类应用实验: 呼叫与切换 / 计算型 / 下载型 (`scripts/ubuntu/run_classes.sh`)
 
-一次短跑 (每格约 9 分钟) 同时回答三个问题 —— 把后台应用的资源压下去, 三类应用各付出什么代价:
+一次短跑 (每格约 10 分钟) 同时回答三个问题 —— 把后台应用的资源压下去, 三类应用各付出什么代价。三类都用**真实应用**:
 
 | 类别 | 应用 | 比什么 | 指标 |
 |---|---|---|---|
-| ① 呼叫 / 切换 (交互型) | 微信、QQ、WPS、Firefox (真实应用, 已登录) | 不限制时被呼叫多久响应 vs 被压制过以后多久响应; 切回后是否顺滑 | **响应** = 窗口激活 + 事件循环第一次应答 (P50 / P95 / 最大); **顺滑** = 切回后 1 s 内连续 5 次 `_NET_WM_PING` 的应答 (P95 / 最大, 超过 100 ms 记一次卡顿) + **输入回读** (全选 + 复制到剪贴板拿到文本的时间, 微信这类不应答 ping 的应用靠它); 内容核对 `work_fail` |
-| ② 计算型 | `bench_numeric` 科学计算 (LU 分解求解 + FFT + n 体积分, 一个工作进程, 每个任务约 0.2 s); `bench_compress` 压缩解压 (zlib -6 压 8 MB 再解压校验, 两个工作进程) | 同一个任务在前台做 vs 在后台做 | **单任务时延** P50 / P95, **每分钟任务数**, 后台 / 前台倍数, 后台做完 100 个任务要多少秒, 任务内 CPU 占比 (低 = 在等配额 / 等缺页) |
-| ③ 下载型 | `bench_download` (HTTP Range 分片下载, 每片 sha256 后写盘) | 在前台下 vs 在后台下 | **下载速度** MB/s (均值 / 最慢 10 %), **建连时延** (TCP connect 往返, 到下载源和到外网各一份), **处理延迟** (包到了以后应用等多久才轮到 CPU) |
+| ① 呼叫 / 切换 (交互型) | 微信、QQ、WPS、Firefox (已登录) | 不限制时被呼叫多久响应 vs 被压制过以后多久响应; 切回后是否顺滑 | **响应** = 窗口激活 + 事件循环第一次应答 (P50 / P95 / 最大); **顺滑** = 切回后 1 s 内连续 5 次 `_NET_WM_PING` 的应答 (P95 / 最大, 超过 100 ms 记一次卡顿) + **输入回读** (全选 + 复制到剪贴板拿到文本的时间, 微信这类不应答 ping 的应用靠它); 内容核对 `work_fail` |
+| ② 计算型 | `sevenzip` **7-Zip** (系统里装的 `7z`: 把约 4 MB 真实文件以默认级别 `-mx=5`、两线程压成 `.7z`, 再解压; 压缩、解压各算一个任务); `z3` **Z3 约束求解器** (系统里装的 `z3`: 每个任务解三个 SMT-LIB 问题 —— 24 皇后 / 9 鸽 8 笼 / 32 位半素数分解, 单线程, 约 1 s) | 同一个任务在前台做 vs 在后台做 | **单任务时延** P50 / P95, **每分钟任务数**, 后台 / 前台倍数, 后台做完 100 个任务要多少秒, 任务内 CPU 占比 (低 = 在等配额 / 等缺页) |
+| ③ 下载型 | **百度网盘**、**迅雷** (已登录, 各带一个正在进行的大文件下载任务) | 在前台下 vs 在后台下 | **下载速度** MB/s (均值 / 最慢 10 %), **连接的往返时延** (内核 srtt), **内核收包积压** (数据已到、应用还没收走), 写盘速度 (旁证), 以及放在应用 cgroup 里的探针量到的**外网建连时延**和**处理延迟** (包到了以后应用等多久才轮到 CPU) |
 
-三个基准程序是仓库自带的 (`cf/linux/bench_app.py`, 应用目录里 kind = `bench`): 一个 X11 窗口 + 工作进程, 不停做同一个固定任务, 每个任务的墙钟 / CPU 时间写进 `/tmp/cf_bench_<id>.jsonl`, runner 每步把新增的记录抄进 step 记录 (`step["bench"]`)。任务自带结果校验 (LU 残差、FFT 往返误差、能量漂移、CRC), 所以 "算得慢" 和 "算错" 分得开。不用装 CAD, 不用账号。
+**计算型怎么量** (`cf/linux/bench_app.py --kind sevenzip|z3` + `cf/linux/tool_jobs.py`, 应用目录里 kind = `bench`): 一个 X11 窗口 (runner 能把它切前台 / 压后台) + 一个循环 —— 每个任务都是**启动一次真实的 `7z` / `z3` 进程**, 它作为窗口进程的子进程跑在该应用的 cgroup 里, 所以 `cpu.max` / `cpuset` / `memory.high` 原样作用在真实程序上。每次运行的墙钟时间和程序自己的 CPU 时间 (`RUSAGE_CHILDREN`) 写进 `/tmp/cf_bench_<id>.jsonl`, runner 每步把新增的记录抄进 step 记录 (`step["bench"]`)。"算得慢" 和 "算错" 分得开: 7z 的退出码 (解压时校验 CRC)、z3 的输出必须是预先知道的 `sat` / `unsat` / `sat`, 否则记 `bad_jobs`。
+- 7-Zip 的输入是从本机 `/usr/share/doc`、python 标准库、`/usr/bin` 等目录按路径顺序拷出来的约 4 MB 真实文件 (文本 / 源码 / 可执行文件各约三分之一, 放在 `/tmp/cf_bench_sevenzip.d/corpus`, 建一次后复用), 所以**同一台机器的三格压的是同一批文件**; 换机器文件不同, 绝对时间不可跨机器比。压缩这 4 MB 时 7z 自己要用约 65 MB 内存 (LZMA 的字典 + 哈希表; 解压只要约 10 MB), 这正是压缩对 `memory.high` 敏感的原因。
+- 三个 Z3 问题由 `tool_jobs.py` 生成 (`/tmp/cf_bench_z3.d/*.smt2`), 分别是整数算术 (sat)、纯命题且对归结很难 (unsat)、位向量乘法 (sat), 合起来在开发用的 x86 云机上约 0.9 s (z3 4.8.12)。
+- 不需要账号。没装工具时脚本会停下并提示 `sudo apt install -y p7zip-full z3` (`install_deps.sh` 已包含)。
+
+**下载型怎么量**: 百度网盘 / 迅雷是闭源应用, 没法在里面记速度, 所以从内核和 cgroup 两头量, 应用本身不做任何改动:
+- **下载速度 / 往返时延 / 收包积压** (`cf/linux/netstat.py`): runner 每秒执行一次 `ss -tin --cgroup -p`, 取出属于该应用的全部 TCP 连接 (按连接所属的 cgroup `/cf/<app>`, 或持有它的进程在该 cgroup 里 —— 应用在被收编进 cgroup 之前建的连接靠后一条), 回环连接 (应用自己的进程间通信) 不算。**速度** = 这一秒各连接 `bytes_received` 增量之和, 是应用真正从网络收到的字节; **往返时延** = 这一秒在收数据的连接的内核平滑 RTT (`rtt:`), 按字节加权取中位 —— 它是 "应用发出的请求多久得到对端应答" (网络路径 + 服务器应答时间), 只在应用发数据时更新; **收包积压** = 各连接 Recv-Q 之和 (数据已经到了内核、应用还没 `read` 走)。
+- **外网建连时延 / 处理延迟** (`cf/linux/net_probe.py`): runner 在每个下载应用的 cgroup 下面建一个子 cgroup `/cf/<app>/cfprobe` (不开控制器, 所以应用的 CPU / 内存限制原样罩着它, 而应用自己的 `cgroup.procs` 里没有它), 放进去一个约 4 MB 的小探针进程, 每 0.5 s 做两件事: 记下自己比预定时刻**晚了多久**才被调度到 (= 处理延迟: 一个发给这个应用的包到了以后, 应用的线程要等这么久才轮到 CPU), 再向 `RTT_HOST` (默认 `www.baidu.com:443`) 发起一次 TCP 建连并计时 (= 一次 SYN / SYN-ACK 往返)。应用实际感受到的网络时延 ≈ 往返时延 + 处理延迟。`RTT_HOST=""` 不放探针。
+- **写盘** = 同一时段该应用 cgroup 的磁盘写入量 / 时长 (runner 本来就记), 是独立于网络统计的旁证: 两者应大致相等; 迅雷走 UDP 的 P2P 流量 `ss -t` 看不到, 只会出现在这一列。
+- **无流量的秒** = 速度低于 10 KB/s 的采样占比。高说明下载任务中途下完 / 暂停 / 被服务器掐了, 那一格的速度不可比。
 
 **三格** (同一份配置 `configs/ubuntu_arm64_classes.json`, 走完全相同的访问顺序):
 
@@ -708,35 +717,57 @@ CELLS="none squeeze" scripts/ubuntu/run_squeeze.sh  # 只跑两格;  T=20 DWELL=
 |---|---|
 | `none` | 不限制 —— 基准, 表里 "相对不限制" 的列都以它为分母 |
 | `mild` | 1 核 `cpu.max` 配额 + `cpu.weight` 20, `memory.high` = 0.5 × m_fg, 回收一次 (夜间矩阵的档位) |
-| `squeeze` | 全部后台应用钉在最后一个核, `cpu.max` = 该核的 10 %, `cpu.weight` 1, `memory.high` = 0.1 × m_fg, 切走时 `memory.reclaim` × 3 (§6.8 的激进档, 但不做周期性再回收) |
+| `squeeze` | 全部后台应用钉在最后一个核, `cpu.max` = 该核的 10 %, `cpu.weight` 1, `memory.high` = 0.1 × m_fg (不低于 32 MB), 切走时 `memory.reclaim` × 3 (§6.8 的激进档, 但不做周期性再回收) |
 
-**访问顺序** (trace kind `pattern`, 不是随机轨迹, 所以短跑也可比): 每轮 11 步 `微信 → 科学计算 → WPS → 下载 → Firefox → 压缩解压 → QQ → 微信 → WPS → Firefox → QQ`, 默认 2 轮 = 22 步, 每步停留 15 s。每个交互应用每轮被呼叫 2 次 (两次之间在后台待 1–2 分钟); 每个基准应用每轮在前台 1 步、在后台 10 步 —— 前台 / 后台两种位置的任务时延都有足够样本。
+**访问顺序** (trace kind `pattern`, 不是随机轨迹, 所以短跑也可比): 每轮 12 步 `微信 → 7-Zip → WPS → 迅雷 → Firefox → Z3 → QQ → 百度网盘 → 微信 → WPS → Firefox → QQ`, 默认 2 轮 = 24 步, 每步停留 15 s。每个交互应用每轮被呼叫 2 次 (两次之间在后台待 1–2 分钟); 每个计算 / 下载应用每轮在前台 1 步、在后台 11 步 —— 前台 / 后台两种位置都有样本。
+
+**跑之前**:
+
+1. `sudo apt install -y p7zip-full z3` (或重跑 `sudo scripts/ubuntu/install_deps.sh`)。
+2. 百度网盘、迅雷已登录, **各自开始一个大文件的下载并让它一直下着**: 量要够整个实验 (三格约 35 分钟, 例如限速 2 MB/s 就要 4–5 GB 以上的任务, 多排几个文件也行); 应用设置里有限速选项的话建议限到 2–5 MB/s —— 速度稳定, 三格才可比, 磁盘也不会被写满 (`df -h ~` 先看一眼, 脚本在剩余不足 10 GB 时会提醒)。脚本开跑前会用 `python3 -m cf.linux.netstat CONFIG --watch 6` 看 6 秒: 哪个下载应用没在跑、或者收流量不到 50 KB/s, 就停下来提示 (`DL_MIN_KBPS=0` 或 `STRICT=0` 跳过)。这条命令也可以随时手动跑, 确认采样看得到应用的连接。
+3. 其余同 §6.8 的第 1–5 条 —— 交互应用已登录且 `python3 run_linux.py configs/ubuntu_arm64_classes.json --onboard-check` 全部 ready (或 `ONBOARD=1`); 退出实验之外的应用 (脚本会检查 `/cf` 下还有谁在跑, `STRICT=0` 可跳过); zram 用量过半先重置; 不能和别的矩阵同时跑; 跑的时候不要碰虚拟机。7-Zip / Z3 的窗口和探针由 runner 自己启动, 脚本结束时一起停掉; 百度网盘 / 迅雷不会被关, 下载任务在格与格之间继续。没装某个应用时可以 `EXTRA="--placeholders"` 先用占位程序顶替着把流程跑通 (占位的下载应用没有下载数据)。
 
 ```bash
-scripts/ubuntu/run_classes.sh                        # none + mild + squeeze, 约 27 分钟; 结果在 results/arm64_classes
-CELLS="none squeeze" scripts/ubuntu/run_classes.sh    # 只要 "不限制 vs 压制" 两格, 约 18 分钟
+scripts/ubuntu/run_classes.sh                        # none + mild + squeeze, 约 30 分钟; 结果在 results/arm64_classes
+CELLS="none squeeze" scripts/ubuntu/run_classes.sh    # 只要 "不限制 vs 压制" 两格, 约 20 分钟
 ROUNDS=3 DWELL=20 scripts/ubuntu/run_classes.sh       # 每个应用多呼叫几次 / 后台段更长 (时间按比例增加)
-ONBOARD=1 scripts/ubuntu/run_classes.sh               # 先过一遍 4 个交互应用的登录向导
-DL_URL=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.5-desktop-amd64.iso scripts/ubuntu/run_classes.sh
-                                                      # 改成下载一个真实的大文件 (要支持 Range); 默认用本机限速源
-DL_RATE_MBPS=10 RTT_HOST=223.5.5.5:443 scripts/ubuntu/run_classes.sh   # 本机源的限速 (默认 20 MB/s ≈ 160 Mbit/s 宽带); 外网时延探测的目标 (默认 www.baidu.com:443, 设成空串则不测)
+SEEDS="1 2" scripts/ubuntu/run_classes.sh             # 重复一遍 (真实下载的速度会随网络波动, 有余力时建议)
+ONBOARD=1 scripts/ubuntu/run_classes.sh               # 先过一遍需要账号的应用的登录向导
+RTT_HOST=223.5.5.5:443 scripts/ubuntu/run_classes.sh  # 探针建连的目标 (默认 www.baidu.com:443; 空串 = 不放探针)
+python3 -m cf.linux.netstat configs/ubuntu_arm64_classes.json --watch 10   # 只看下载应用此刻的连接数 / 速度 / 往返时延
 python3 -m cf.linux.classes results/arm64_classes/*.jsonl --out results/arm64_classes   # 只重新出表 / 出图, 不重跑
 ```
 
-**上机时间**: 预热 7 个应用约 1.5 分钟 + 22 步 × (停留 15 s + 切换 / 探测 / 内容核对约 5 s) ≈ **9 分钟一格**; 三格约 27 分钟, 两格约 18 分钟。中断后同一条命令续跑, 已完成的格跳过。
+**上机时间**: 预热 8 个应用约 1.5 分钟 + 24 步 × (停留 15 s + 切换 / 探测 / 内容核对约 5 s) ≈ **10 分钟一格**; 三格约 30 分钟, 两格约 20 分钟。中断后同一条命令续跑, 已完成的格跳过。
 
-**下载源**: 默认由脚本在本机起一个限速的 HTTP 源 (`python3 -m cf.linux.bench_app --serve 18080 --rate-mbps 20`, 跑在脚本自己的 `/cf/host` 里, 不受限制), 速度上限固定、不依赖外网, 三格之间可比; 这时 "到下载源" 的建连时延是回环 (≈ 0.1 ms), 真实网络的往返时延看 "外网时延" 那两列 (`RTT_HOST`)。想量真实下载就给 `DL_URL=`, 但速度会随网络波动, 最好 `SEEDS="1 2"` 多跑一遍。下载的数据循环写进 `/tmp` 下一个 256 MB 的临时文件 (退出时删除), 20 MB/s 时每格累计写约 10 GB。
-
-**输出** (`$OUT/`): `classes_report.md` (三张表, 直接可读), `classes_tables.xlsx` (三个 sheet + 说明, 中文表头), `classes_interactive.csv` / `classes_compute.csv` / `classes_download.csv` (完整的列), `plots/classes.png` (3 行 × 2 列: 响应时间 / 顺滑度, 单任务时延 / 每分钟任务数, 下载速度 / 网络时延), `plots/<run>_bench.png` (每个基准应用随时间的单任务时延 / 下载速度, 绿色底 = 它在前台), 以及通常的 `summary.csv` 和每格的 jsonl / log。运行时每步的日志行末尾也有 `| bench numeric 58 jobs 262 ms, download 19.9 MB/s rtt 0.1 ms`。
+**输出** (`$OUT/`): `classes_report.md` (三张表, 直接可读; 整列为空的列不显示), `classes_tables.xlsx` (三个 sheet + 说明, 中文表头), `classes_interactive.csv` / `classes_compute.csv` / `classes_download.csv` (完整的列; 计算型每个 (应用, 操作) 一行, 如 `sevenzip:compress` / `sevenzip:extract`), `plots/classes.png` (每类一行, 没有数据的类不画 —— 配置里去掉了下载型就只有两行: 响应时间 / 顺滑度, 单任务时延 / 每分钟任务数, 下载速度 / 网络时延与处理延迟), `plots/<run>_bench.png` (每个计算 / 下载应用随时间的单任务时延 / 下载速度 / 时延, 绿色底 = 它在前台), 以及通常的 `summary.csv` 和每格的 jsonl / log。运行时每步的日志行末尾也有 `| bench sevenzip 27 jobs compress 465 ms / extract 79 ms, z3 16 jobs 897 ms, xunlei 2.0 MB/s rtt 31.0 ms wake 0.1 ms`。
 
 **怎么读**:
 
 - ① 里 "响应" 是在限制**已经解除之后**量的 (runner 先把被请求的应用提回 fg 档再激活窗口), 所以它回答的是 "被压过的应用醒过来要多久" —— 被换出的页要缺页换回, 正卡在 `memory.high` 惩罚性休眠里的线程要等休眠结束。`n_limited` 是其中有几次是从受限的后台切回的; 第 0 步 (预热后的第一次切换, 那时还没有任何应用被限制) 和冷启动不计入。
-- ② 里前台列在各格应该基本相同 (前台不受限), 它是这个任务本来的速度; 后台列除以前台列就是限制的代价。`squeeze` 下 CPU 配额是单核的 10 %, 所以科学计算的后台单任务时延的理论值就是前台的约 10 倍 —— 明显高于 10 倍的部分来自 `cpu.weight 1` (前台应用恰好也在用最后那个核时, 后台几乎拿不到时间片) 和 `memory.high` (工作集装不下时反复缺页); 压缩解压有两个工作进程和 32 MB 的输入缓冲, 对这两点都更敏感。P95 远大于 P50 就是这种 "偶尔被饿住" 的任务。
-- ③ 里**建连时延** (网络本身) 在各格几乎不变 —— cgroup 限制不改变链路; 变的是**下载速度** (收包、校验、写盘都要 CPU, 页缓存也记在 `memory.high` 里) 和**处理延迟** (`cpu.max` 10 ms / 100 ms 时, 一个包最多要等约 90 ms 应用才被调度到)。应用实际感受到的网络时延 = 建连时延 + 处理延迟。
-- 判读用的三个不变量仍然是: `state_lost` 为空、`work_fail` = 0、`n_cold` = 0 (被压制只是慢, 不能丢状态); 基准程序的 `bad_jobs` (结果校验失败) 也应为 0。
+- ② 里前台列是这个任务不受限时的速度; 后台列除以前台列就是限制的代价。前台列在各格**不一定相同**: `none` 格里前台任务要和同样不受限的后台计算 / 下载应用抢核, 压制的格里后台被赶到一个核的 10 % 上, 前台反而更快 (开发用的 4 核 x86 云机上 7-Zip 压缩前台 P50: none 779 ms, squeeze 439 ms; 核多的机器差别小) —— 这是压制后台给前台带来的好处, 也是表里另有 "后台相对不限制" 一列的原因 (和 none 格的同一任务比, 不受前台列变化的影响)。如果压制格的前台列反而**明显变慢**, 先看报告开头有没有 "前台应用仍被 cpuset 钉在核 N 上" 的提示和日志里的 `was not applied`。`squeeze` 下 CPU 配额是单核的 10 %: **Z3** 是纯 CPU 任务 (工作集约 40 MB), 后台时延的理论值就是前台的约 10 倍; **7-Zip 解压**只要约 10 MB 内存, 也是约 10 倍; **7-Zip 压缩**要约 65 MB, 超过 `memory.high` (32 MB) 以后每次分配都要先把别的页换出去, 时延会远高于 10 倍 —— 多出来的部分就是内存限制的代价, `任务内 CPU 占比` 掉到个位数说明时间几乎都花在等配额和等换页上。P95 远大于 P50 是 "偶尔被饿住" 的任务 (前台应用恰好也在用最后那个核, `cpu.weight 1` 的后台拿不到时间片)。压缩任务在 `squeeze` 下一个可能要几十秒, 一个后台段 (约 4 分钟) 只能做完几个, 样本少时看 `bg_jobs` 列, 需要更多样本就 `ROUNDS=3`。
+- ③ 里**往返时延** (连接本身) 和**外网建连时延**的网络部分在各格应基本不变 —— cgroup 限制不改变链路; 变的是**下载速度** (收包、解密、校验、写盘都要 CPU, 页缓存也记在 `memory.high` 里)、**收包积压** (应用来不及收, 数据堆在内核里, 积压顶到接收窗口以后对端就被 TCP 流控压慢) 和**处理延迟** (`cpu.max` 10 ms / 100 ms 时, 一个包最多要等约 90 ms 应用才被调度到; 探针自己的页被换出时还要加上缺页的时间)。下载限速 (例如 2 MB/s) 低于应用在 10 % 核下的处理能力时, 后台速度可以不掉, 这时代价只体现在处理延迟和积压上 —— 这本身就是一个结论。
+- **先看报告开头每格下面有没有 "注意"**, 以及日志里的 WARN —— 它们说的是这一格的数据能不能用:
+  - "**X 的内存限制在这一格没有生效**": X 被压到后台时仍留着远多于 `memory.high` 的匿名内存, 而它的 cgroup 只记着几 MB。cgroup v2 里内存记在**分配它的时候进程所在的 cgroup** 上, 进程后来被移进 `/cf/<app>` 时账不跟着走, 所以 `memory.high` / `memory.reclaim` 够不着这些页。典型原因是应用启动时真正干活的进程离开了它的 cgroup (snap 包、交给桌面环境启动的包装脚本; 日志 `N matching process(es) outside its cgroup` / `had left its cgroup while it started`), 事后才被收养回来。这一格对 X 只有 CPU 限制, 它的响应时间不能写成 "内存被压过以后" 的结果; 处理办法见 §10 "应用的进程不在它的 cgroup 里"。
+  - 日志 "**N app(s) were started by this warmup**": 应用是这次运行冷启动的, `m_fg` 是它启动后 `warmup_dwell_s` 秒时的占用, 通常远小于稳定后的占用 (一次实测: 微信冷启动后 6 s 是 252 MB, 用了几分钟后约 590 MB), 于是 `memory.high = 比例 × m_fg` 比设想的紧得多 (那次 `mild` 格的 "0.5 × m_fg" 实际只有稳定占用的约 21 %), 后面几格沿用第一格的 `m_fg` 也一样。**先把交互应用启动好** (`python3 run_linux.py <配置> --launch wechat qq wps firefox`, 或 `ONBOARD=1`), 用一两分钟、让它们稳定下来再跑; 这样它们也一定是在各自的 cgroup 里启动的。
+- 判读用的不变量仍然是: `state_lost` 为空、`work_fail` = 0、`n_cold` = 0 (被压制只是慢, 不能丢状态); 计算型的 `bad_jobs` (程序报错或答案不对) 应为 0; 下载型的 `无流量的秒` 应接近 0。
 
-**跑之前**: 同 §6.8 的第 1–5 条 —— 4 个交互应用已登录且 `python3 run_linux.py configs/ubuntu_arm64_classes.json --onboard-check` 全部 ready (或 `ONBOARD=1`); 退出实验之外的应用 (脚本会检查 `/cf` 下还有谁在跑, `STRICT=0` 可跳过); zram 用量过半先重置; 不能和别的矩阵同时跑; 跑的时候不要碰虚拟机。基准程序由 runner 自己启动, 脚本结束时会把它们和本机下载源一起停掉。没装某个交互应用时可以 `EXTRA="--placeholders"` 先用占位程序顶替着把流程跑通。
+**局限** (写报告时要交代):
+
+- 下载速度只统计 TCP。迅雷的 P2P / uTP 走 UDP 的部分不在 "下载速度" 里, 看 "写盘" 列; 想让两列对得上, 选 HTTP / 网盘类的下载源。一个连接在两次采样之间收完数据并关闭时, 最后不到 1 s 的字节会漏掉 (长连接下载影响很小)。
+- "往返时延" 是内核对**应用发出的数据**的估计 (srtt), 下载连接上应用只偶尔发请求, 所以它更新得慢, 且包含服务器的应答时间; 网络本身的时延以探针的 "外网建连时延" 为准 (目标是固定主机, 不是下载服务器)。
+- 探针占用应用 cgroup 约 4 MB 内存和可忽略的 CPU; `memory.high` 只有 32 MB 的小应用会因此略紧一点, 三格都一样。
+- 真实下载的速度随网络和服务器波动 (百度网盘非会员本身限速), 前台 / 后台的差别小于格内波动时不要下结论: 看 `速度 P10`、多跑一个 `SEEDS`, 或用下面的合成版做对照。
+
+**合成版** (`configs/ubuntu_arm64_classes_synthetic.json`): 计算型和下载型换成仓库自带的可控程序 —— `bench_numeric` (LU 分解求解 + FFT + n 体积分, 一个工作进程)、`bench_compress` (zlib -6 压 8 MB 再解压校验, 两个工作进程)、`bench_download` (从本机限速源做 HTTP Range 分片下载, 每片 sha256 后写盘, 自带建连探测)。不用装工具、不用账号、不用准备下载任务, 下载速度上限固定 (默认 20 MB/s), 可以作为真实应用结果的对照或在外网不稳时使用:
+
+```bash
+CONFIG=configs/ubuntu_arm64_classes_synthetic.json OUT=results/arm64_classes_syn scripts/ubuntu/run_classes.sh   # 约 9 分钟一格
+DL_RATE_MBPS=10 RTT_HOST=223.5.5.5:443 CONFIG=configs/ubuntu_arm64_classes_synthetic.json scripts/ubuntu/run_classes.sh
+DL_URL=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.5-desktop-amd64.iso CONFIG=configs/ubuntu_arm64_classes_synthetic.json scripts/ubuntu/run_classes.sh
+```
+
+本机限速源 (`python3 -m cf.linux.bench_app --serve 18080 --rate-mbps 20`) 由脚本启动, 跑在脚本自己的 `/cf/host` 里, 不受限制; 这时 "往返时延" 是 `bench_download` 自己向下载源 TCP 建连的耗时 (回环 ≈ 0.1 ms), 处理延迟由它自己的探测线程量。给 `DL_URL=` 则下载一个真实的大文件 (要支持 Range)。下载的数据循环写进 `/tmp` 下一个 256 MB 的临时文件 (退出时删除)。
 
 ### 6.7 日常使用: `focusd`
 
@@ -841,6 +872,11 @@ tmux 里要在 **每个 pane** 做。
 (a) snap 包: snapd 把每个 snap 应用放进自己的 systemd scope, 用户移不动 → 用 deb 版 (Firefox: Mozilla APT 仓库; Chromium:
 ppa:xtradeb/apps); (b) 通过 D-Bus 激活或桌面图标启动的应用在 `user.slice` 里 → 用 `cf_launch.sh` 启动, 或配置
 `sudo_adopt=true` + sudoers 免密 (见 `scripts/ubuntu/cf_adopt.sh` 头部); (c) 应用自己 fork 出的 daemon 一般会继承 cgroup, 没问题。
+runner 在每次冷启动之后**立刻**再找一遍并把跑出去的进程移回来 (日志 `had left its cgroup while it started`), 这样 `m_fg`
+和 CPU 限制是对的; 但它们在移回来之前分配的内存仍记在原来的 cgroup 上, `memory.high` 管不到 (三类实验的报告会写
+"内存限制在这一格没有生效", §6.9)。要让内存限制也生效, 只能让进程**从一开始**就在 cgroup 里: 先查它为什么跑出去 ——
+`snap list firefox`、`readlink -f "$(command -v firefox)"`、`cat /proc/<pid>/cgroup` (在 `snap.firefox...scope` 或
+`app-gnome-...scope` 里就是 (a) / (b)), 换成 deb 版后重跑。
 
 **没有 swap: `memory.high can only drop file pages`** — 匿名页没地方去, 内核只能在应用每次分配时让它停下来等
 (allocation throttling): 应用更慢、`notify-send` 之类的子进程启动也可能被卡住几秒, 但依旧不会被杀。做 `sudo scripts/ubuntu/setup_zram.sh 4096`。
@@ -947,6 +983,22 @@ sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubunt
 **`--work`: 浏览器 / 哔哩哔哩的 `work_fail` 偶发** — 页面自己换了标题 (视频自动连播、标签页标题带未读数)。把那个应用的 oracle 改成 `screen`
 并放大 `tolerance`, 或 `kind: none` + `oracle: title` 只看窗口还在不在; 真正的上下文丢失通常伴随 `n_cold > 0` 或 `ping` 很长。
 
+**图里的字是方框 (数字、字母、图例全是 □)** — 系统里只有 `Droid Sans Fallback` 这一种中文字体 (最小安装的 Ubuntu 常见),
+它只有汉字、没有拉丁字母和数字; 旧版出图代码把它排在字体列表最前面, 而 matplotlib 对一个通用字体族只用第一个匹配的字体,
+不会逐字回退, 于是所有 ASCII 字符都成了方框 (日志里是一串 `Glyph 100 (d) missing from font(s) Droid Sans Fallback`)。
+现在的规则 (`cf/linux/plots.py`): 逐个检查字体**实际有哪些字**, 优先用汉字和拉丁字符都有的 (Noto Sans CJK / 思源黑体 /
+文泉驿 / PingFang / 微软雅黑 …, 以及任何不在名单里但字全的字体); 只有 "只有汉字" 的字体时, 字母数字用 matplotlib 自带的
+DejaVu Sans、汉字用它 (逐字回退, 需要 matplotlib ≥ 3.6; 更旧的版本退回英文标注); 一个中文字体都没有就是英文标注。
+装完字体不用清缓存 (出图时会把 matplotlib 还不认识的字体文件登记进来)。**已经跑完的结果不用重跑, 重画即可**:
+
+```bash
+git pull
+sudo apt install -y fonts-wqy-microhei                 # 可选: 字形更好看 (install_deps.sh 现在会装); 或 fonts-noto-cjk
+python3 -m cf.linux.classes results/arm64_classes_ci/*.jsonl --out results/arm64_classes_ci      # §6.9 的表和图
+python3 -m cf.linux.analyze results/arm64_night/*.jsonl --plots-dir results/arm64_night/plots     # 其它实验的图同理 (§7)
+CF_PLOT_FONT="Noto Sans CJK JP" python3 -m cf.linux.classes ...                                   # 指定用哪个字体 (fc-list :lang=zh family)
+```
+
 **macOS 侧** — 跑矩阵时关闭 Spotlight 索引新建的结果目录 (如果是共享目录), 关闭 Time Machine; UTM 不要开 "Balloon" 内存气球。
 
 **微信 / 钉钉 / 中望 每次切到都报 `ping-timeout`, 每步多等 15 s** — 它们的 Qt 无边框窗口在 `WM_PROTOCOLS` 里声明了 `_NET_WM_PING`
@@ -966,13 +1018,18 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # /sys/fs/cgroup/cf 已委托给当前用户时自动加跑一次真实 cgroup 的档位读写
                                                    # 三类应用实验 (§6.9): 基准任务自校验 / 任务日志增量读取 / 本机下载源 + 下载 + 建连探测 /
                                                    # pattern 轨迹 / 伪桌面上的 bench 记录、顺滑探测、前后台区间与三张表、CLI 出表出图
+                                                   # 真实应用 (tests/test_linux_realapps.py): ss 输出解析 / 连接计数器 -> 每应用速率 / 真实 ss 量一次本机下载 /
+                                                   # cgroup 内探针 / 语料构建 / 装了 7z、z3 时真跑一遍并核对答案 / 按操作分行的计算表、套接字来源的下载表
+                                                   # 冷启动后立刻收养跑出 cgroup 的进程 / "m_fg 是冷启动后量的" 与 "内存限制没有生效" 的提示 / 图只画有数据的类
+                                                   # 出图字体 (tests/test_linux_plot_fonts.py): 字全的字体优先 / 只有汉字的字体配 DejaVu 逐字回退 /
+                                                   # 装了 Droid Sans Fallback 时真画一张中英混排 + 对数轴的图, 不许有缺字告警
 ```
 
 ## 12. 脚本与文件清单
 
 | 文件 | 何时用 | 作用 |
 |---|---|---|
-| `scripts/ubuntu/install_deps.sh [--hwe] [--subs]` | 一次 | apt 依赖 (xdotool, xclip, x11-utils, python3-xlib, dbus-x11, libnotify-bin, numpy, matplotlib …); `--hwe` 6.x 内核 (memory.reclaim); `--subs` 开源替代品 |
+| `scripts/ubuntu/install_deps.sh [--hwe] [--subs]` | 一次 | apt 依赖 (xdotool, xclip, x11-utils, python3-xlib, dbus-x11, libnotify-bin, numpy, matplotlib, iproute2, §6.9 的 p7zip-full / z3 …); `--hwe` 6.x 内核 (memory.reclaim); `--subs` 开源替代品 |
 | `scripts/ubuntu/check_env.sh` | 随时 | 一页体检: 会话类型 / 工具 (含 xclip) / cgroup v2 委托 / 本 shell 是否在 /cf / memory.reclaim / zram / snap 浏览器; 退出码 0 = 可以跑 |
 | `scripts/ubuntu/setup_cgroups.sh [--pid P] [--no-enter]` | 每次开机 (sudo) | 建 `/sys/fs/cgroup/cf`, 开 cpu/cpuset/memory/io 控制器, chown 给当前用户, 把 shell 移进 `cf/host` |
 | `scripts/ubuntu/cf_enter.sh` | 每个新终端 (`source`) | 等价于上一条, 显式传当前 shell 的 pid (tmux / VS Code 终端用这个) |
@@ -989,9 +1046,10 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `cf/linux/work.py` (`WorkDriver`: `X11WorkDriver` + `AdbWorkDriver`) | `--work` 内部 | 每类应用的默认脚本 (打草稿 / 滚动 / 缩放 / 上滑) 与内容 oracle (clipboard / title / screen / statefile / ui), 比较规则; `work_overrides` 按 id 覆盖 |
 | `scripts/ubuntu/run_matrix.sh [CONFIG] [T]` + 环境变量 | 批量 | 场景 × 策略 × η × seed × 变体 (PROFILES / CPU_MODES / RESIDENT / SWAP_CAPS / MEM_HARD / MEM_FRAC); 预设 QUICK / NIGHT / FULL; PLACEHOLDERS / WORK (+ WORK_S) / DRY; 跳过已完成的格, 未完成的续跑; 结束后出全部表 / 图 / report.md |
 | `scripts/ubuntu/run_squeeze.sh` + `CELLS= T= DWELL= SEEDS= SAMPLE= ONBOARD= SWAPPINESS= STRICT= DRY= OUT=` | 实验性 | §6.8: office 5 应用, none / squeeze (激进: cpuset+10 % 带宽+weight 1, memory.high 10 %, memory.reclaim 整个 cgroup ×3 并周期重复) / mild 三格 (+ 可选 `squeeze1`: 不周期重挤, 配 `SAMPLE=2` 看换出 / 换入收敛曲线), 长停留, 按进程统计 + 静默期换出速率; 出 `squeeze_apps.csv` / `plots/squeeze_apps.png` / `plots/<run>_swapflow.png` / `per_process.csv` |
-| `scripts/ubuntu/run_classes.sh` + `CELLS= ROUNDS= DWELL= SEEDS= DL_URL= DL_RATE_MBPS= RTT_HOST= ONBOARD= EXTRA= SWAPPINESS= STRICT= DRY= OUT=` | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (`bench_numeric` / `bench_compress`: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 1 个 (`bench_download`: 下载速度、建连时延、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 9 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png` |
+| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= ONBOARD= EXTRA= SWAPPINESS= STRICT= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
 | `python3 -m cf.linux.classes FILES… --out DIR [--no-plots]` | 分析 | §6.9 的三张表 (CSV / Markdown / Excel) 和图; 不重跑实验 |
-| `python3 -m cf.linux.bench_app --app ID --kind numeric\|compress\|download [--workers k --scale f --url U --rtt-host H:P]` / `--serve PORT --rate-mbps n` / `--check-url U` | §6.9 内部 | 内置基准程序: X11 窗口 + 工作进程循环做固定任务, 每个任务的时延写到 `/tmp/cf_bench_<id>.jsonl`; `--serve` 是本机限速下载源 |
+| `python3 -m cf.linux.bench_app --app ID --kind sevenzip\|z3\|numeric\|compress\|download [--corpus-mb n --level n --threads n --workers k --scale f --url U --rtt-host H:P]` / `--serve PORT --rate-mbps n` / `--check-url U` | §6.9 内部 | 可度量的计算 / 下载应用: X11 窗口 + 循环做固定任务 (`sevenzip` / `z3` 每个任务启动一次真实程序), 每个任务的时延写到 `/tmp/cf_bench_<id>.jsonl`; `--serve` 是合成版的本机限速下载源 |
+| `python3 -m cf.linux.netstat CONFIG [--apps ID…] [--watch S] [--min-kbps K]` | §6.9 检查 | 看 S 秒配置里下载应用的 TCP 连接: 是否在跑、连接数、MB/s、往返时延 (内核 `ss` 统计); 低于 K 时退出码 1 |
 | `scripts/ubuntu/run_all.sh` + `PRESET= OUT= T= ONBOARD= PLACEHOLDERS= WORK= WORK_S= SKIP_SMOKE= ZRAM_MB= EXTRA= MEM_FRAC=` | 一键 | 开机后一条命令: cgroup + zram → check_env → (`ONBOARD=1`: 登录向导 + `--check`, 不全就绪即停) → probe / catalog / mobile (/ work_plan) 快照 → 冒烟 (检查 state_lost / oom / COLD / work_fail = 0) → 矩阵 → 分析; 日志在 `OUT/run_all.log` |
 | `python3 -m cf.linux.analyze FILES… [--csv] [--agg] [--per-app] [--per-proc] [--squeeze-apps] [--xlsx] [--pareto] [--plot] [--plots-dir] [--md]` | 分析 | 每格表 / 复本聚合 / 每应用表 / 每进程表 / 每应用 squeeze 五项表 / Excel 工作簿 (`per_process` 的跑法) / Pareto 点 / 图 / Markdown 报告 |
 | `python3 -m cf.linux.focusd --config CONFIG [--policy --eta --delay --log --dry-run]` | 日常使用 | 焦点变化守护进程: 切走就限流, 切回就放开 |

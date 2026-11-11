@@ -3,20 +3,31 @@
 # "what does limiting the background cost?"
 #   1. interactive (wechat / qq / wps / firefox): how long a call / switch takes to answer and whether the
 #      app is smooth right afterwards
-#   2. compute (bench_numeric, bench_compress): time per job and jobs per minute, foreground vs background
-#   3. download (bench_download): MB/s and TCP connect time, foreground vs background
+#   2. compute (sevenzip, z3 - the installed 7-Zip and Z3 doing a fixed job over and over): time per job and
+#      jobs per minute, foreground vs background
+#   3. download (baidunetdisk, xunlei - each with a download task running): MB/s, network round trip and
+#      receive backlog, read every second from the kernel's TCP statistics of the app's sockets
 #
-#   scripts/ubuntu/run_classes.sh                        # none + mild + squeeze, 2 rounds, ~9 min per cell
-#   CELLS="none squeeze" scripts/ubuntu/run_classes.sh    # subset: none | mild | squeeze  (~18 min)
+# Before the first run:   sudo apt install -y p7zip-full z3
+#                         start a big download in 百度网盘 and in 迅雷 (enough for 40 min; a speed limit of a few
+#                         MB/s in the app keeps the rate steady and the disk from filling) and leave both running
+#
+#   scripts/ubuntu/run_classes.sh                        # none + mild + squeeze, 2 rounds, ~10 min per cell
+#   CELLS="none squeeze" scripts/ubuntu/run_classes.sh    # subset: none | mild | squeeze  (~20 min)
 #   ROUNDS=3 DWELL=20 scripts/ubuntu/run_classes.sh       # more calls per app / longer background stretches
 #   SEEDS="1 2" scripts/ubuntu/run_classes.sh             # replicates (the visiting order is fixed; the seed only names the run)
-#   DL_URL=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.5-desktop-amd64.iso \
-#     scripts/ubuntu/run_classes.sh                       # download a real file instead of the local rate-limited source
-#   DL_RATE_MBPS=10 scripts/ubuntu/run_classes.sh         # local source: MB/s per connection (default 20 = a 160 Mbit/s line)
-#   RTT_HOST=223.5.5.5:443 scripts/ubuntu/run_classes.sh  # extra host for the connect-time probe ("" = none)
-#   ONBOARD=1 scripts/ubuntu/run_classes.sh               # walk the 4 interactive apps through login / prep first
-#   EXTRA="--placeholders" scripts/ubuntu/run_classes.sh  # interactive apps that are not installed run as the bundled stand-in
+#   ONBOARD=1 scripts/ubuntu/run_classes.sh               # walk the apps that need an account through login / prep first
+#   EXTRA="--placeholders" scripts/ubuntu/run_classes.sh  # apps that are not installed run as the bundled stand-in
+#   DL_MIN_KBPS=0 scripts/ubuntu/run_classes.sh           # do not insist that the download apps are downloading right now
+#   RTT_HOST=223.5.5.5:443 scripts/ubuntu/run_classes.sh  # host the latency probe inside the download apps' cgroups connects to
+#                                                         # (default www.baidu.com:443; "" = no probe)
 #   STRICT=0 / SWAPPINESS=60 / DRY=1                      # as in run_squeeze.sh
+#
+# Synthetic variant (no tools, accounts or download tasks needed: bundled numeric / zlib / downloader apps and a
+# local rate-limited source):
+#   CONFIG=configs/ubuntu_arm64_classes_synthetic.json OUT=results/arm64_classes_syn scripts/ubuntu/run_classes.sh
+#   DL_URL=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.5-desktop-amd64.iso   # real file instead
+#   DL_RATE_MBPS=10                                       # local source: MB/s per connection (default 20)
 #
 # cells (configs/ubuntu_arm64_classes.json):
 #   none     policy none: nothing limited - the baseline every "x" / "%" column refers to
@@ -50,6 +61,7 @@ PAT=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['trace
 T=$((ROUNDS * PAT))
 echo "== run_classes $(date -Is): config=$CONFIG rounds=$ROUNDS (T=$T) dwell=${DWELL}s seeds=$SEEDS cells=$CELLS out=$OUT"
 
+has_app() { python3 -c "import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))['apps'] else 1)" "$CONFIG" "$1"; }
 SRV_PID=""
 old_swappiness=""
 cleanup() {
@@ -74,6 +86,13 @@ if [ "$DRY" != 1 ]; then
   python3 run_linux.py "$CONFIG" --scenario list > "$OUT/apps_resolved.txt" || true
   if grep -q '^missing:' "$OUT/apps_resolved.txt"; then
     echo "!! not installed: $(grep '^missing:' "$OUT/apps_resolved.txt" | tr '\n' ' ')  (EXTRA=\"--placeholders\" runs them as the stand-in)"; fi
+  tools=""
+  has_app sevenzip && ! command -v 7z >/dev/null && ! command -v 7zz >/dev/null && ! command -v 7za >/dev/null && tools+=" p7zip-full"
+  has_app z3 && ! command -v z3 >/dev/null && tools+=" z3"
+  if [ -n "$tools" ]; then
+    echo "!! the compute apps drive the real tools, which are not installed:  sudo apt install -y$tools" >&2
+    [ "${STRICT:-1}" = 1 ] && exit 2
+  fi
   want=$(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['apps']))" "$CONFIG")
   others=""
   for leaf in /sys/fs/cgroup/cf/*/; do
@@ -96,9 +115,10 @@ if [ "$DRY" != 1 ]; then
     sudo sysctl -q -w vm.swappiness="$SWAPPINESS" && old_swappiness="$cur"
     echo "  vm.swappiness $cur -> $(cat /proc/sys/vm/swappiness) for the run"
   fi
-  # the download source: a real URL, or the bundled rate-limited one on the loopback (it runs in this
-  # script's cgroup /cf/host, which is never limited)
-  if [ -z "$DL_URL" ]; then
+  # bundled downloader only - its source: a real URL, or the bundled rate-limited one on the loopback
+  # (it runs in this script's cgroup /cf/host, which is never limited)
+  if ! has_app bench_download; then :
+  elif [ -z "$DL_URL" ]; then
     DL_URL="http://127.0.0.1:${DL_PORT}/stream"
     if ! python3 -m cf.linux.bench_app --check-url "$DL_URL" >/dev/null 2>&1; then
       python3 -m cf.linux.bench_app --serve "$DL_PORT" --rate-mbps "$DL_RATE_MBPS" >> "$OUT/download_source.log" 2>&1 &
@@ -109,9 +129,13 @@ if [ "$DRY" != 1 ]; then
   else
     echo "  download source: $DL_URL"
   fi
-  why=$(python3 -m cf.linux.bench_app --check-url "$DL_URL" 2>&1) || { echo "!! download source not reachable: $why" >&2; exit 2; }
-  export CF_BENCH_URL="$DL_URL" CF_BENCH_RTT_HOST="$RTT_HOST"
-  [ -n "$RTT_HOST" ] && echo "  connect-time probe also to: $RTT_HOST"
+  if has_app bench_download; then
+    why=$(python3 -m cf.linux.bench_app --check-url "$DL_URL" 2>&1) || { echo "!! download source not reachable: $why" >&2; exit 2; }
+    export CF_BENCH_URL="$DL_URL"
+  fi
+  # the latency probe of the download apps (inside each app's cgroup) connects to this host twice a second
+  export CF_BENCH_RTT_HOST="$RTT_HOST"
+  [ -n "$RTT_HOST" ] && echo "  latency probe of the download apps: TCP connect to $RTT_HOST"
   if [ "${ONBOARD:-0}" = 1 ]; then
     python3 -m cf.linux.blankdoc --reset >/dev/null
     CONFIG="$CONFIG" scripts/ubuntu/cf_onboard.sh || true
@@ -119,6 +143,14 @@ if [ "$DRY" != 1 ]; then
   # shellcheck disable=SC2086
   python3 run_linux.py "$CONFIG" --onboard-check $EXTRA | tee "$OUT/onboard.txt" \
     || echo "  note: some apps are not ready - ONBOARD=1 (or scripts/ubuntu/cf_onboard.sh) first"
+  # real download apps: they must be downloading now - nothing else is measured for them
+  if ! python3 -m cf.linux.netstat "$CONFIG" --watch 6 --min-kbps "${DL_MIN_KBPS:-50}"; then
+    echo "   start a big download (enough for $(( (T * (DWELL + 6) / 60 + 2) * $(echo $CELLS | wc -w) * $(echo $SEEDS | wc -w) )) min) in each of these apps, leave it running and re-run;"
+    echo "   DL_MIN_KBPS=0 or STRICT=0 runs anyway (their download columns will be empty or low)"
+    [ "${STRICT:-1}" = 1 ] && exit 2
+  fi
+  free_gb=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc 0-9)
+  [ "${free_gb:-99}" -lt 10 ] && echo "!! only ${free_gb} GB free in $HOME - the downloads keep writing during the run"
 fi
 
 M_FG_FROM=""

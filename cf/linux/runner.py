@@ -52,6 +52,13 @@ DEFAULTS = {
     # every_s seconds, inside the settle time (n = 0: off) -> launch["smooth"]
     "classes": {},
     "smooth_probe": {"n": 0, "every_s": 0.2, "timeout_s": 1.0},
+    # download-class apps that are real programs (百度网盘, 迅雷 ...) cannot log their own speed: their
+    # TCP sockets are sampled from the kernel instead (cf.linux.netstat) -> step["bench"][app] in the
+    # bench apps' record format.  by: auto | cgroup | pid; loopback: count sockets to 127.0.0.1 too.
+    # probe_host: a latency probe inside each of these apps' cgroups (cf.linux.net_probe) connects to
+    # it every probe_every_s seconds ("" = no probe; $CF_BENCH_RTT_HOST overrides)
+    "net_probe": {"every_s": 1.0, "loopback": False, "by": "auto", "probe_host": "www.baidu.com:443",
+                  "probe_every_s": 0.5},
     # apps that are not installed (desktop, nor an allowed substitute) run as the bundled placeholder
     # program under their own id, so the whole matrix can be run before the vendor apps are in place
     "placeholder_fill": False,
@@ -100,6 +107,7 @@ class ThrottleExperiment(Experiment):
         self.throttled: set[str] = set()     # tier bg or shrunk (CPU-limited)
         self.shrunk: set[str] = set()        # tier shrunk (memory.high)
         self.tiers: dict[str, str] = {}
+        self._limit_errs: set[tuple[str, str]] = set()
         self.mem_high: dict[str, int] = {}   # app -> memory.high bytes raised by the thrash guard (else profile)
         self.substitutions: list[tuple[str, str]] = []
         self.categories: dict[str, str] = {}
@@ -167,10 +175,11 @@ class ThrottleExperiment(Experiment):
         for app in self.apps:
             tier = self.tiers.get(app, "fg") if app in alive else "fg"
             if tier != "fg":
-                dev.set_tier(app, tier, self.m_fg.get(app, 0) * 1024, memory_high_bytes=self.mem_high.get(app))
+                self._set_tier(app, tier, self.m_fg.get(app, 0) * 1024, memory_high_bytes=self.mem_high.get(app))
             self.tiers[app] = tier
         self.log.info(f"resume: re-applied tiers - throttled {len(self.throttled)}, shrunk {len(self.shrunk)}, "
                       f"running {len(alive)}/{len(self.apps)}")
+        self._net_start()
         self._bench_collect(None)            # jobs logged while the runner was away belong to no step
 
     # ------------------------------------------------------------- lifecycle
@@ -246,6 +255,9 @@ class ThrottleExperiment(Experiment):
             tr["schedule"] = [[A.remap_scenario_apps(sc, mapping), share] for sc, share in tr["schedule"]]
         self.cfg["trace"] = tr
         self.log.info(f"apps ({len(used)}): " + ", ".join(f"{display_name(a)}[{self.categories[a][0]}]" for a in used))
+        # a clean slate: limits left behind by a run that crashed (or by another profile) would
+        # otherwise stay on the apps this run never demotes - in a policy-none run, on all of them
+        dev.release_all()
         for app in self.apps:
             dev.tree.ensure(app)
             if self.cfg["adopt_strays"]:
@@ -256,6 +268,7 @@ class ThrottleExperiment(Experiment):
                     self.log.warn(f"{app}: processes outside its cgroup could not be moved {r['failed']} - "
                                   f"limits will not apply to them (snap? started before setup? see manual §6)")
         self._setup_work()
+        self._net_start()
         self.emit({"type": "meta", "config": self.cfg, "apps": self.apps, "caps": dev.caps_dict(),
                    "backend": "linux", "categories": self.categories, "substitutions": self.substitutions,
                    "kinds": self.kinds, "placeholders": self.placeholders, "profile": self.profile.to_dict(),
@@ -352,6 +365,28 @@ class ThrottleExperiment(Experiment):
             raise PreflightError(f"{len(blocking)} blocking preflight problem(s) for mobile apps; fix them, "
                                  f"drop the apps, or use --no-strict")
 
+    def _adopt_escaped(self, app: str) -> None:
+        """Right after a launch: processes of the app that are not in its cgroup - the launcher handed
+        the real program to a snap scope / the desktop's app scope, or a helper was D-Bus activated -
+        are moved in now.  Left outside they are not limited at all and the app's m_fg is measured
+        without them; moved in late (at the start of the next run) their memory stays charged to
+        the cgroup they grew up in, where the app's memory.high does not reach it."""
+        if not self.cfg["adopt_strays"] or self.kinds.get(app) == "mobile":      # mobile: sample() adopts
+            return
+        try:
+            r = self.dev.adopt(app)
+        except Exception as e:    # noqa: BLE001 - the stray warning of the warmup still reports them
+            self.log.warn(f"{app}: could not look for processes outside its cgroup ({type(e).__name__}: {e})")
+            return
+        if r.get("moved"):
+            self.log.warn(f"{display_name(app)}: {len(r['moved'])} process(es) had left its cgroup while it started "
+                          f"{r['moved'][:5]} - moved back into {self.dev.tree.path(app)}; what they allocated before "
+                          f"the move stays outside the app's memory.high (snap package? started by the desktop? "
+                          f"manual §10)")
+        if r.get("failed"):
+            self.log.warn(f"{display_name(app)}: processes outside its cgroup could not be moved {r['failed']} - "
+                          f"limits will not apply to them (snap? see manual §6)")
+
     def warmup(self) -> float:
         dev = self.dev
         self.log.head(f"warmup: bring up {len(self.apps)} apps (no restarts - logins are kept), dwell "
@@ -359,6 +394,7 @@ class ThrottleExperiment(Experiment):
         t0 = time.time()
         for i, app in enumerate(self.apps):
             res = dev.launch(app)
+            self._adopt_escaped(app)
             self.tiers[app] = "fg"
             t_dwell = time.time()
             work = self._work_do(app, res, -1, None)        # first draft / first scroll, not capped by the dwell
@@ -390,8 +426,15 @@ class ThrottleExperiment(Experiment):
                 self.log.warn(f"{app}: launch status {res.get('status')} - the window may be behind a dialog")
             if smp.stray_pids:
                 self.log.warn(f"{app}: {len(smp.stray_pids)} matching process(es) outside its cgroup {smp.stray_pids[:5]}")
-        self.B_kb = self.cfg["eta"] * sum(self.m_fg.values())
         fixed = self.cfg.get("fixed_m_fg_kb") or {}
+        fresh = [a for a in self.apps if self.l_cold.get(a) is not None and self.kinds.get(a) == "desktop" and a not in fixed]
+        if fresh:
+            self.log.warn(f"{len(fresh)} app(s) were started by this warmup ({', '.join(display_name(a) for a in fresh)}): "
+                          f"their m_fg is what they held {self.cfg['warmup_dwell_s']:g} s after a cold start, usually well "
+                          f"below what they settle at, and memory.high = frac x m_fg (in this run and in the runs that "
+                          f"reuse its m_fg) is lower than intended. Start the apps first (run_linux.py CONFIG --launch "
+                          f"<ids>, or ONBOARD=1), give them a minute, then run")
+        self.B_kb = self.cfg["eta"] * sum(self.m_fg.values())
         source = "fixed" if fixed and all(p in fixed for p in self.apps) else ("mixed" if fixed else "measured")
         # feasibility: shrunk apps keep memory.high bytes, so the background footprint cannot drop below
         # floor = sum over the other apps of memory.high; a budget under that leaves every budgeted
@@ -474,7 +517,7 @@ class ThrottleExperiment(Experiment):
             if new <= cur:
                 continue
             self.mem_high[app] = new
-            r = self.dev.set_tier(app, "shrunk", cap, memory_high_bytes=new)
+            r = self._set_tier(app, "shrunk", cap, memory_high_bytes=new)
             actions.setdefault("limits", {})[app] = r.get("limits")
             raised[app] = new >> 20
             self.log.warn(f"{display_name(app)}: memory.high thrash ({rate:.0f} high events/s, "
@@ -489,6 +532,16 @@ class ThrottleExperiment(Experiment):
             return "bg" if self.cfg["cpu_throttle_resident"] else "fg"
         return "shrunk"
 
+    def _set_tier(self, app: str, tier: str, *args, **kw) -> dict:
+        """dev.set_tier, but a knob the kernel refused is said out loud (once per app and knob): a
+        limit that silently stays on - or never goes on - changes what the whole run measures."""
+        r = self.dev.set_tier(app, tier, *args, **kw)
+        for knob, val in ((r or {}).get("limits") or {}).items():
+            if str(val).startswith("ERR") and (app, knob) not in self._limit_errs:
+                self._limit_errs.add((app, knob))
+                self.log.warn(f"{display_name(app)}: {knob} for tier {tier} was not applied - {str(val)[4:]}")
+        return r
+
     def _apply(self, req: str, S: set[str], sample: dict, infos: dict[str, AppInfo]) -> dict:
         dev = self.dev
         actions = {"freeze": [], "unfreeze": [], "reclaim": {}, "tiers": {}, "limits": {}}
@@ -498,7 +551,7 @@ class ThrottleExperiment(Experiment):
             tier = self._tier_for(app, app in S)
             cur = self.tiers.get(app, "fg")
             if tier != cur or (tier == "shrunk" and app not in self.shrunk):
-                r = dev.set_tier(app, tier, self.m_fg[app] * 1024, memory_high_bytes=self.mem_high.get(app))
+                r = self._set_tier(app, tier, self.m_fg[app] * 1024, memory_high_bytes=self.mem_high.get(app))
                 actions["tiers"][app] = tier
                 actions["limits"][app] = r.get("limits")
                 if tier == "shrunk":
@@ -546,11 +599,13 @@ class ThrottleExperiment(Experiment):
         was_shrunk = req in self.shrunk
         was_throttled = req in self.throttled
         if self.tiers.get(req, "fg") != "fg":
-            self.dev.set_tier(req, "fg")
+            self._set_tier(req, "fg")
         self.tiers[req] = "fg"
         self.throttled.discard(req)
         self.shrunk.discard(req)
         launch = self.dev.launch(req)
+        if launch.get("launch_state") == "COLD":
+            self._adopt_escaped(req)
         if was_shrunk and launch.get("launch_state") == "HOT":
             # process never left memory, but came back from a memory.high-shrunk tier (page-ins expected)
             launch["launch_state"] = "WARM"
@@ -620,15 +675,37 @@ class ThrottleExperiment(Experiment):
         return rec
 
     # ------------------------------------------------- bench apps / responsiveness probe
+    def net_apps(self) -> list[str]:
+        """Real apps of the download class: measured through their sockets (cf.linux.netstat)."""
+        dl = (self.cfg.get("classes") or {}).get("download") or []
+        return [a for a in self.apps if a in dl and self.kinds.get(a) not in ("bench", "placeholder", "mobile")]
+
+    def _net_start(self) -> None:
+        apps = self.net_apps()
+        if not apps or not hasattr(self.dev, "net_start"):
+            return
+        p = {**DEFAULTS["net_probe"], **(self.cfg.get("net_probe") or {})}
+        host = os.environ.get("CF_BENCH_RTT_HOST", p["probe_host"]) or ""
+        try:
+            self.dev.net_start(apps, every_s=float(p["every_s"]), loopback=bool(p["loopback"]), by=str(p["by"]),
+                               probe_host=host, probe_every_s=float(p["probe_every_s"]))
+            self.log.info(f"download speed / latency of {', '.join(display_name(a) for a in apps)}: "
+                          f"kernel TCP statistics of their sockets (ss), every {p['every_s']:g} s"
+                          + (f"; latency probe inside each app's cgroup -> {host}" if host else ""))
+        except Exception as e:    # noqa: BLE001 - the run is still worth having without it
+            self.log.warn(f"socket sampler not started ({type(e).__name__}: {e}) - no download figures")
+
     def _bench_collect(self, t_dwell: Optional[float]) -> dict:
-        """What the bench apps (kind "bench", cf.linux.bench_app) logged since the last call:
+        """What the bench apps (kind "bench", cf.linux.bench_app) logged, and what the socket
+        sampler saw of the real download apps, since the last call:
         {app: [{"dt": seconds since the dwell began (negative = during the switch), "k": job | dl |
         rtt | err, ...}]}.  With t_dwell None the records are only consumed."""
         out: dict = {}
         if not hasattr(self.dev, "bench_read"):
             return out
+        net = set(self.net_apps())
         for app in self.apps:
-            if self.kinds.get(app) != "bench":
+            if self.kinds.get(app) != "bench" and app not in net:
                 continue
             try:
                 recs = self.dev.bench_read(app)
@@ -653,19 +730,29 @@ class ThrottleExperiment(Experiment):
 
     @staticmethod
     def _bench_note(bench: dict) -> str:
-        """' | bench numeric 58 jobs 262 ms, download 38.1 MB/s rtt 0.4 ms' for the step line."""
+        """' | bench sevenzip 27 jobs compress 465 ms / extract 79 ms, xunlei 2.1 MB/s rtt 31.0 ms wake 0.1 ms'
+        for the step line (wake = how late the latency probe / probe thread was scheduled)."""
         parts = []
         for app, recs in bench.items():
-            jobs = sorted(r["ms"] for r in recs if r.get("k") == "job" and r["dt"] - r["ms"] / 1000 >= 0)
+            ops: dict = {}
+            for r in recs:
+                if r.get("k") == "job" and r["dt"] - r["ms"] / 1000 >= 0:
+                    ops.setdefault(r.get("op") or "", []).append(r["ms"])
             dl = [r for r in recs if r.get("k") == "dl" and r["dt"] - r["s"] >= 0]
             rtt = sorted(r["ms"] for r in recs if r.get("k") == "rtt" and r.get("to") == "dl" and r.get("ms") is not None
                          and r["dt"] >= 0)
+            late = [r for r in recs if r.get("k") == "rtt" and r.get("late") is not None and r["dt"] >= 0]
+            who = "dl" if any(r.get("to") == "dl" for r in late) else "ext"
+            late = sorted(r["late"] for r in late if r.get("to") == who)
             name = app[len("bench_"):] if app.startswith("bench_") else app
-            if jobs:
-                parts.append(f"{name} {len(jobs)} jobs {jobs[len(jobs) // 2]:.0f} ms")
+            if ops:
+                parts.append(f"{name} {max(len(v) for v in ops.values())} jobs "
+                             + " / ".join(f"{op + ' ' if op else ''}{sorted(v)[len(v) // 2]:.0f} ms"
+                                          for op, v in sorted(ops.items())))
             if dl:
                 parts.append(f"{name} {sum(r['b'] for r in dl) / 2 ** 20 / max(1e-6, sum(r['s'] for r in dl)):.1f} MB/s"
-                             + (f" rtt {rtt[len(rtt) // 2]:.1f} ms" if rtt else ""))
+                             + (f" rtt {rtt[len(rtt) // 2]:.1f} ms" if rtt else "")
+                             + (f" wake {late[len(late) // 2]:.1f} ms" if late else ""))
         return (" | bench " + ", ".join(parts)) if parts else ""
 
     # ------------------------------------------------------------ scripted work

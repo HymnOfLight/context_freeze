@@ -1,13 +1,19 @@
-"""Bundled benchmark apps for the three-class experiment (manual §6.9): a window that keeps doing
-one fixed, repeatable job and logs how long every job took, so the very same work can be compared
-in the foreground, in the background, and in the background under CPU / memory limits.
+"""Measurable compute / download apps for the three-class experiment (manual §6.9): a window that
+keeps doing one fixed, repeatable job and logs how long every job took, so the very same work can
+be compared in the foreground, in the background, and in the background under CPU / memory limits.
 
+    python3 -m cf.linux.bench_app --app sevenzip --kind sevenzip                  # real 7-Zip: pack + unpack real files
+    python3 -m cf.linux.bench_app --app z3 --kind z3                              # real Z3: three constraint problems
     python3 -m cf.linux.bench_app --app bench_numeric  --kind numeric             # 科学计算: LU solve + FFT + n-body
     python3 -m cf.linux.bench_app --app bench_compress --kind compress --workers 2  # 压缩 / 解压: zlib -6 of 8 MB, inflate, CRC
     python3 -m cf.linux.bench_app --app bench_download --kind download            # 下载: HTTP range requests + TCP connect RTT
     python3 -m cf.linux.bench_app --serve 18080 --rate-mbps 40                    # the local download source
 
 Kinds
+  sevenzip  the installed 7-Zip (`7z`) compresses a folder of real files and extracts it again
+  z3        the installed Z3 solver decides three SMT-LIB problems with known answers
+            (both: cf.linux.tool_jobs - the tool runs as a child process of the window, in the
+            app's cgroup; the log has its wall time and its own CPU time)
   numeric   single-threaded pure-python kernels (LINPACK-style LU solve with partial pivoting,
             radix-2 FFT and its inverse, n-body integration); one job = one pass over the three, ~0.25 s.
   compress  `--workers` worker processes (two by default in the catalogue: the app really uses two
@@ -22,7 +28,7 @@ Kinds
 
 Log (`/tmp/cf_bench_<app>.jsonl`, truncated at start, one JSON object per line; the runner copies
 the new lines into every step record):
-    {"t": epoch, "k": "job", "ms": wall, "cpu": thread CPU ms, "w": worker, "ok": true}
+    {"t": epoch, "k": "job", "ms": wall, "cpu": CPU ms, "w": worker, "ok": true[, "op": "compress" | "extract"]}
     {"t": epoch, "k": "dl",  "b": bytes received, "s": seconds they took}
     {"t": epoch, "k": "rtt", "ms": connect time or null (timeout), "to": "dl" | "ext", "late": wake-up delay ms}
     {"t": epoch, "k": "err", "msg": "..."}
@@ -52,7 +58,7 @@ from urllib.parse import urlsplit
 
 DEFAULT_PORT = 18080
 DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_PORT}/stream"
-KINDS = ("numeric", "compress", "download")
+KINDS = ("numeric", "compress", "download", "sevenzip", "z3")
 
 
 def log_path(app: str) -> str:
@@ -556,7 +562,12 @@ def main(argv=None) -> int:
     ap.add_argument("--workers", type=int, default=1, help="compress: worker processes (each really uses a core)")
     ap.add_argument("--scale", type=float, default=1.0, help="numeric: job size factor (1 = ~0.25 s)")
     ap.add_argument("--slice-mb", type=int, default=8, help="compress: MB deflated per job")
-    ap.add_argument("--corpus-mb", type=int, default=32, help="compress: MB of input kept in memory")
+    ap.add_argument("--corpus-mb", type=float, default=None,
+                    help="compress: MB of input kept in memory (32); sevenzip: MB of real files packed per job (4)")
+    ap.add_argument("--level", type=int, default=5, help="sevenzip: -mx (5 = 7-Zip's default)")
+    ap.add_argument("--threads", type=int, default=2, help="sevenzip: -mmt")
+    ap.add_argument("--tool", default=None, help="sevenzip / z3: path of the binary (default: found on PATH)")
+    ap.add_argument("--work-dir", default=None, help="sevenzip / z3: scratch folder (default /tmp/cf_bench_<app>.d)")
     ap.add_argument("--url", default=None, help=f"download: source (env CF_BENCH_URL, default {DEFAULT_URL})")
     ap.add_argument("--chunk-mb", type=int, default=8, help="download: MB per Range request")
     ap.add_argument("--rtt-host", default=None, help="download: extra host:port for the connect RTT (env CF_BENCH_RTT_HOST)")
@@ -594,11 +605,20 @@ def main(argv=None) -> int:
         return 2
     from .placeholder_app import window_loop
 
+    tool = None
+    if args.kind in ("sevenzip", "z3"):
+        from . import tool_jobs
+        tool = args.tool or tool_jobs.find_tool(args.kind)
+        if not tool:
+            print(f"{'/'.join(tool_jobs.TOOLS[args.kind])} not found: {tool_jobs.INSTALL[args.kind]}", file=sys.stderr)
+            return 3
+        work = args.work_dir or os.path.join(tempfile.gettempdir(), f"cf_bench_{app}.d")
+        os.makedirs(work, exist_ok=True)
     log = BenchLog(args.log or log_path(app))
     started = time.time()
-    workers: list[ProcWorker] = []
+    workers: list = []
     stop = threading.Event()
-    if args.kind != "download":
+    if args.kind in ("numeric", "compress"):
         import multiprocessing
         stop = multiprocessing.get_context("fork").Event()
     dl: Optional[Downloader] = None
@@ -607,10 +627,18 @@ def main(argv=None) -> int:
         workers = [ProcWorker(0, lambda n: numeric_job(args.scale), log.path, stop)]
         what = f"numeric: LU + FFT + n-body, scale {args.scale:g}, 1 worker process"
     elif args.kind == "compress":
-        corpus = make_corpus(args.corpus_mb)
+        corpus = make_corpus(int(args.corpus_mb or 32))
         workers = [ProcWorker(i, lambda n: compress_job(corpus, n, args.slice_mb), log.path, stop)
                    for i in range(max(1, args.workers))]
         what = f"compress: zlib -6 of {args.slice_mb} MB + inflate + crc, {len(workers)} worker process(es)"
+    elif args.kind == "sevenzip":
+        size, n = tool_jobs.build_corpus(os.path.join(work, "corpus"), args.corpus_mb or 4)
+        workers = [tool_jobs.ToolWorker(tool_jobs.sevenzip_steps(tool, work, args.level, args.threads), log, stop)]
+        what = f"{tool} a -mx={args.level} -mmt={args.threads} + x: {n} files, {size / 2 ** 20:.1f} MB"
+    elif args.kind == "z3":
+        steps = tool_jobs.z3_steps(tool, work)
+        workers = [tool_jobs.ToolWorker(steps, log, stop, per_op=False)]
+        what = f"{tool}: " + ", ".join(f"{s.op} ({s.expect})" for s in steps)
     else:
         url = args.url or os.environ.get("CF_BENCH_URL") or DEFAULT_URL
         u = urlsplit(url)
@@ -636,7 +664,9 @@ def main(argv=None) -> int:
     def lines(pings: int) -> list[str]:
         out = [f"{title}   (cf bench, pid {os.getpid()})", what[:86]]
         if workers:
-            out.append(f"jobs done {counter()}   last {', '.join(f'{w.last_ms:.0f} ms' for w in workers)}"
+            last = ", ".join(", ".join(f"{op} {ms:.0f} ms" for op, ms in w.last.items()) if getattr(w, "last", None)
+                             else f"{w.last_ms:.0f} ms" for w in workers)
+            out.append(f"jobs done {counter()}   last {last}"
                        + (f"   FAILED {sum(w.bad for w in workers)}" if any(w.bad for w in workers) else ""))
         if dl is not None and probe is not None:
             out.append(f"received {dl.total >> 20} MB   now {dl.last_mbps:.1f} MB/s   errors {dl.errors}")
@@ -649,6 +679,8 @@ def main(argv=None) -> int:
     def on_exit() -> None:
         stop.set()
         for w in workers:
+            if hasattr(w, "kill"):
+                w.kill()               # the tool's current run: nobody waits for its result any more
             w.join(3.0)
         log.close()
 

@@ -142,7 +142,7 @@ def test_pattern_trace_repeats_the_given_order():
 
 
 def test_classes_config_resolves_and_its_pattern_only_names_its_apps():
-    cfg = json.load(open(os.path.join(REPO, "configs", "ubuntu_arm64_classes.json")))
+    cfg = json.load(open(os.path.join(REPO, "configs", "ubuntu_arm64_classes_synthetic.json")))
     apps = set(cfg["apps"])
     cl = cfg["classes"]
     assert set(cl["interactive"]) | set(cl["compute"]) | set(cl["download"]) == apps
