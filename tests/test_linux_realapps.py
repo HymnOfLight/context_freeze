@@ -492,6 +492,91 @@ def test_a_limit_the_kernel_refused_is_reported(tmp_path):
     assert len(hits) == len(set(hits))                                    # once per app and knob
 
 
+def _short_cfg(tmp_path, name, policy="static"):
+    return {"apps": APPS, "app_overrides": {**{a: OVERRIDES[a] for a in INTER + ["fake_browser"]}, **REAL_OV},
+            "policy": policy, "eta": 0.0, "trace": {"kind": "pattern", "pattern": PATTERN, "T": 3, "seed": 1},
+            "dwell_s": 0.1, "settle_s": 0, "warmup_dwell_s": 0, "out_dir": str(tmp_path), "name": name,
+            "min_ram_mb": 1024}
+
+
+def test_processes_that_left_the_cgroup_at_launch_are_moved_back_before_m_fg_is_taken(tmp_path):
+    """A launcher that hands the real program to a snap / desktop scope leaves the app's cgroup with
+    a shell in it: m_fg came out as 0 and the limits reached nothing until the next run adopted
+    the processes - too late for their memory, which stays charged where it was allocated."""
+    dev = FakeLinuxDesktop(APPS, seed=3)
+    order = []
+    launch, sample = dev.launch, dev.sample
+
+    def spy_launch(id_):
+        order.append(("launch", id_))
+        return launch(id_)
+
+    def spy_sample(ids, *a, **kw):
+        order.append(("sample", None))
+        return sample(ids, *a, **kw)
+
+    def adopt(id_):
+        escaped = id_ == "fake_browser" and order[-1] == ("launch", id_) and order.count(("launch", id_)) == 1
+        order.append(("adopt", id_))
+        return {"moved": [4242, 4243] if escaped else [], "failed": {}}
+
+    dev.launch, dev.sample, dev.adopt = spy_launch, spy_sample, adopt
+    lines = []
+    ThrottleExperiment(_short_cfg(tmp_path, "escaped"), dev, log=lambda *a: lines.append(" ".join(str(x) for x in a))).run()
+    i = order.index(("launch", "fake_browser"))
+    assert order[i + 1] == ("adopt", "fake_browser")                     # at once: before the work, the dwell, the sample
+    assert ("sample", None) in order[i + 2:]
+    hits = [ln for ln in lines if "had left its cgroup" in ln]
+    assert len(hits) == 1 and "2 process(es)" in hits[0] and "[4242, 4243]" in hits[0]
+
+
+def test_m_fg_taken_right_after_a_cold_start_is_called_out(tmp_path):
+    lines = []
+    ThrottleExperiment(_short_cfg(tmp_path, "coldstart"), FakeLinuxDesktop(APPS, seed=3),
+                       log=lambda *a: lines.append(" ".join(str(x) for x in a))).run()
+    hits = [ln for ln in lines if "were started by this warmup" in ln]
+    assert len(hits) == 1 and "--launch" in hits[0]
+    assert "假7z" not in hits[0]                                          # bench apps always start with the run
+
+    dev = FakeLinuxDesktop(APPS, seed=3)
+    exp = ThrottleExperiment(_short_cfg(tmp_path, "running"), dev, log=lambda *a: lines.append(" ".join(str(x) for x in a)))
+    for a in INTER + ["fake_browser"]:                                    # already up before the run: nothing to say
+        dev.launch(a)
+    lines.clear()
+    exp.run()
+    assert not [ln for ln in lines if "were started by this warmup" in ln]
+
+
+def test_report_flags_an_app_whose_memory_limit_did_not_bite(real_runs):
+    """Moved into its cgroup after it had allocated its memory, an app keeps all of it while 'shrunk'."""
+    _, none, sq, _ = real_runs
+    assert C.mem_unbounded(none) == [] and C.mem_unbounded(sq) == [] and "内存限制在这一格没有生效" not in C.report_md([none, sq])
+    odd = json.loads(json.dumps({k: sq[k] for k in ("meta", "steps", "path")}))
+    n = 0
+    for s in odd["steps"]:
+        a = s["after_dwell"]["apps"]["fake_office"]
+        if s["req"] != "fake_office" and a.get("tier") == "shrunk":
+            a.update(pss_anon_kb=540 * 1024, cg_mem_mb=6.0)
+            a["cg_limits"] = {**(a.get("cg_limits") or {}), "memory_high": str(32 << 20)}
+            n += 1
+    assert n >= 2
+    assert C.mem_unbounded(odd) == [("fake_office", 540, 32, 6)]
+    rep = C.report_md([none, odd])
+    assert "的内存限制在这一格没有生效" in rep and "约 540 MB 匿名内存 (memory.high = 32 MB, 它的 cgroup 只记着 6 MB)" in rep
+
+
+def test_figure_has_a_row_per_class_that_has_data(real_runs, tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+    _, none, sq, _ = real_runs
+    seen = []
+    real = plt.subplots
+    monkeypatch.setattr(plt, "subplots", lambda *a, **kw: seen.append(a[:2]) or real(*a, **kw))
+    tb = C.tables([none, sq])
+    assert C.plot_classes([none, sq], str(tmp_path / "all.png"), tb) and seen[-1] == (3, 2)
+    assert C.plot_classes([none, sq], str(tmp_path / "two.png"), dict(tb, download=[])) and seen[-1] == (2, 2)
+    assert os.path.getsize(tmp_path / "two.png") > 10000
+
+
 def test_runner_samples_the_sockets_of_real_download_apps(real_runs):
     _, none, sq, dev = real_runs
     # only the real download app is watched (bench apps log for themselves), with the config's settings
