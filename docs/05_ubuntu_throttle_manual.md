@@ -239,9 +239,30 @@ ss -tn | awk 'NR>1{print $5}' | grep -c '^198\.1[89]\.'      # 本机有多少�
 - **跑实验时把代理的 TUN / 虚拟网卡模式关掉** (Clash Verge: 设置 → 虚拟网卡模式; ClashX Pro / Surge: 增强模式), 只留 "系统代理" (它不影响虚拟机);
   虚拟机里需要代理的命令继续用上面的环境变量 (端口 7897)。关掉后在虚拟机里 `sudo resolvectl flush-caches`, 并把迅雷等应用退出重开 (它们缓存了旧地址)。
 - **把虚拟机的网卡改成桥接**: UTM → 虚拟机设置 → 网络 → Network Mode: Bridged (Advanced), 选 Mac 正在上网的网卡 → 重启虚拟机。虚拟机直接从路由器拿地址,
-  不再经过 macOS 的代理 (ssh 用的 IP 会变, `ip -4 addr` 看新地址)。
+  不再经过 macOS 的代理 (ssh 用的 IP 会变, `ip -4 addr` 看新地址)。**只适合家里那种 "连上就能用" 的路由器**, 改完上不了网见下面一段。
 - 留着 TUN 模式: 在代理的规则里把 `xunlei.com`、`sandai.net` 和下载源的域名设为 DIRECT, 并加进 fake-ip-filter (这样它们解析到真实地址), 同时放行 UDP ——
   规则写法随代理软件不同, 不如前两种省事。
+
+**改成桥接 (或换了网络模式) 之后连网页都打不开**。桥接后虚拟机在网络看来是一台**新设备** (自己的网卡地址, 自己向路由器要 IP),
+Mac 上已经做过的登录 / 认证不算它的; 同时共享网络时那个 "宿主 = 192.168.64.1" 的地址不存在了。一条命令看是卡在哪一跳
+(不需要配置文件, 也不走任何代理设置; 没网拉不了新代码时用下面表里右列的命令手工查):
+
+```bash
+python3 -m cf.linux.netcheck         # 地址 -> 网关 -> 网关之外 -> 登录页 -> 域名解析 -> 代理, 停在第一处不通的地方并给出处理办法; 退出码 0 = 通
+```
+
+| `netcheck` 的结论 | 含义 | 处理 (括号里是手工核对的命令) |
+|---|---|---|
+| `no IPv4 address` | 没拿到地址 (`ip -4 addr` 里网卡没有 `inet`): 路由器没理它的 DHCP 请求 | UTM 的 Bridged Interface 别用 Automatic, 选 Mac 正在上网的那块 (Wi-Fi 一般是 `en0`); 校园网 / 公司网 (802.1X、一人一设备、AP 隔离) 根本不接受这第二台设备 → **改回 Shared Network** |
+| `the gateway … does not answer` | 有地址但网关不通 (`ping -c 2 $(ip route \| awk '/default/{print $3}')`): 地址是上一个网络留下的, 或桥到了一块没上网的网卡 | 重启虚拟机 / `sudo nmcli device reapply enp0s1`; 核对 UTM 里选的网卡 |
+| `the gateway answers but nothing beyond it does` | 网关通, 外面不通 (`ping -c 2 223.5.5.5`): 网络不放行这台没登记 / 没登录的设备 | 能登记就登记它的网卡地址 (`ip link show enp0s1` 的 `link/ether`), 不能就改回 Shared Network |
+| `the network answers with its own page …` | 打开任何 http 网页都被换成登录页 (校园网 / 酒店网的 Web 认证) | 在虚拟机的 Firefox 里打开 `http://connect.rom.miui.com/generate_204` 登录一次; 账号只许一台设备在线的改回 Shared Network |
+| `addresses are reachable but names do not resolve` | `ping 223.5.5.5` 通, `getent hosts www.baidu.com` 没结果: DNS 还指着旧网络 (`resolvectl status`) | `sudo resolvectl dns enp0s1 223.5.5.5` (到下次重启为止); 手写过 DNS 的改 netplan / NetworkManager |
+| `proxy 192.168.64.1:7897 does not answer, and it is set in …` | **网络本身是通的**, 但本节开头写进 `/etc/environment`、`/etc/apt/apt.conf.d/95proxy` (或 GNOME "网络代理") 的代理地址是共享网络下的宿主, 桥接后没有这台机器: 读这些设置的程序 (apt、curl、git、pip、用 "系统代理" 的浏览器) 全都连不上 | 注释掉 `/etc/environment` 里那几行后重新登录, `sudo rm /etc/apt/apt.conf.d/95proxy`, `gsettings set org.gnome.system.proxy mode none`, 当前终端 `unset http_proxy https_proxy all_proxy`; 还想走代理就把地址换成 Mac 在局域网里的 IP (Clash 开 Allow LAN) |
+| `… resolve into 198.18.x.x` (警告) | 还在宿主的 fake-IP 代理后面 (上一段) | 关 TUN 模式 |
+
+桥接后**不经过 Mac 的代理**, 所以 GitHub 之类原来靠代理才快的站点会变慢或打不开 —— 这是桥接的本意, 不是故障; 需要时按上表 `proxy …` 那一行把代理地址换成 Mac 的局域网 IP。
+实验本身不需要桥接: 回到 Shared Network、在 Mac 上关掉代理的 TUN 模式 (上面第一种办法) 是最省事的组合。
 
 ## 3. 每次开机: cgroup 委托 + zram
 
@@ -1163,6 +1184,9 @@ sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubunt
 被覆盖会弹出模态的 "文件已修改, 是否重新加载" 对话框抢走焦点, 演练就成了 `not-active`; 想要干净文档先退出 WPS 再 reset)。
 `apt` 走代理 `Could not connect to x.x.x.2:7897 Connection refused` — VMware NAT 的宿主是 `.1` 不是网关 `.2` (§2.5); 删掉 `/etc/apt/apt.conf.d/95proxy`。
 
+**虚拟机网卡改成桥接 (或换了网络) 后上不了网** — `python3 -m cf.linux.netcheck` 指出卡在哪一跳: 没拿到地址 / 网络要这台新设备单独登录 /
+代理设置还指着共享网络下的宿主 `192.168.64.1:7897`; 对照表和处理办法在 §2.5 末尾。校园网、公司网下桥接通常行不通, 改回 Shared Network 并关掉宿主代理的 TUN 模式。
+
 **`--work`: 所有 step 的 `work.status` 都是 `not-active`** — `xdotool` 发键前核对的是 `_NET_ACTIVE_WINDOW`, 它不是该应用的窗口:
 焦点保护 (见 `activate` 失败一条) 或该应用弹了对话框; `--discover` 看当前活动窗口。Wayland 会话下也是这个现象 (只支持 X11)。
 
@@ -1220,6 +1244,8 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 同目录别的文件和只读打开的文件不动、临时名和带进度文件的不动、宽限时间、dry-run; 打洞后文件长度不变、
                                                    # 盘上占用归零、客户端接着写; 镜像目录页解析、按大小筛选去重、不够时加 ?n=K 重复、只留真给明文 http 的;
                                                    # 下载型缩到一个应用后的配置 (访问顺序相邻重复合并) 和 DL_APPS 的 DRY 运行; 应用身上残留的限制能被指出来;
+                                                   # 网络自检 (tests/test_linux_netcheck.py): ip 输出解析、各处代理设置的收集、每一跳不通时只报第一处、
+                                                   # 登录页、代理地址失效 / 仍有效 / fake-IP 的区分 (探测全部注入, 不碰真实网络);
                                                    # 域名解析到 198.18.x.x / 应用的连接落在 198.18.x.x 时认出中间的 fake-IP 代理
                                                    # 冷启动后立刻收养跑出 cgroup 的进程 / "m_fg 是冷启动后量的" 与 "内存限制没有生效" 的提示 / 图只画有数据的类
                                                    # 出图字体 (tests/test_linux_plot_fonts.py): 字全的字体优先 / 只有汉字的字体配 DejaVu 逐字回退 /
@@ -1253,6 +1279,7 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `python3 -m cf.linux.dl_trim CONFIG [--list] [--dry-run] [--punch] [--apps …] [--every s] [--grace s] [--min-mb n] [--dir D] [--for s]` | `run_classes.sh` 在 `DL_TRIM=1 / punch` 时启动 | §6.9 边下边删: 下载应用下完的文件 (只限亲眼见到它在写的) 随下随删; `--punch` 连正在下的文件已写的部分也还给文件系统; `--list` 看应用此刻在写哪些文件, `--dry-run` 只报告不删 |
 | `python3 -m cf.linux.subset CONFIG [--download APP… \| none] [--drop APP…] --out FILE` | `run_classes.sh` 在 `DL_APPS=…` 时调用 | 去掉若干应用后的配置 (应用表 / 三类表 / 访问顺序一起改), 例如下载型只留迅雷 |
 | `python3 -m cf.linux.dl_files [--gb n \| --rate-mbps r --minutes M] [--min-gb a --max-gb b] [--mirror URL] [--http] [--skip N] [--plain]` | §6.9 准备下载任务 | 从清华 / 北外镜像站的目录页现查一批 0.7–3.3 GB、此刻能下的安装镜像链接 (够数为止, 不够就加 `?n=K` 重复), 用来粘进迅雷 / 百度网盘离线下载 |
+| `python3 -m cf.linux.netcheck` | §2.5 上不了网时 | 从地址、网关、网关之外、登录页、域名解析到代理设置逐跳检查, 停在第一处不通的地方并给出处理办法; 不需要配置文件, 探测不走代理; 退出码 0 = 通 |
 | `python3 -m cf.linux.netstat CONFIG [--watch s] [--min-kbps n] [--minutes M]` | §6.9 检查 | 真实下载应用此刻的连接数 / 速度 / 往返时延; `--min-kbps` 有应用没在下时退出码 1; `--minutes` 按看到的速度算这么多分钟要写多少盘, 放不下退出码 3 |
 | `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= DL_APPS= DL_DISK_CHECK= DL_TRIM= DL_TRIM_ARGS= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
 | `python3 -m cf.linux.classes FILES… --out DIR [--no-plots]` | 分析 | §6.9 的三张表 (CSV / Markdown / Excel) 和图; 不重跑实验 |
