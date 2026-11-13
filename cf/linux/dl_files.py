@@ -6,6 +6,8 @@ the directories do not) and checked one by one (HEAD: the file answers and says 
     python3 -m cf.linux.dl_files --rate-mbps 1 --minutes 360 # as many as an app needs at 1 MB/s for 6 hours
     python3 -m cf.linux.dl_files --gb 21 --plain             # links only, one per line (to paste into 迅雷)
     python3 -m cf.linux.dl_files --mirror https://mirrors.bfsu.edu.cn --skip 8    # other mirror, other files
+    python3 -m cf.linux.dl_files --mirror https://repo.huaweicloud.com --http     # another host, plain http links: for a
+                                                             # client that never gets past "looking for resources"
 
 When the distinct files do not add up to what is asked for, the list starts over with "?n=2",
 "?n=3" ... appended: the mirrors ignore the query string and serve the same file, a download
@@ -21,7 +23,7 @@ from typing import Callable, Optional, Sequence
 
 from .browser_dl import probe_source
 
-MIRRORS = ("https://mirrors.tuna.tsinghua.edu.cn", "https://mirrors.bfsu.edu.cn")
+MIRRORS = ("https://mirrors.tuna.tsinghua.edu.cn", "https://mirrors.bfsu.edu.cn", "https://repo.huaweicloud.com")
 DIRS = (
     "ubuntu-releases/20.04", "ubuntu-releases/22.04", "ubuntu-releases/24.04", "ubuntu-releases/26.04",
     "debian-cd/current/amd64/iso-cd", "debian-cd/current/amd64/iso-dvd", "archlinux/iso/latest", "kali-images/current",
@@ -70,6 +72,21 @@ def collect(mirror: str, dirs: Sequence[str] = DIRS, lo_gb: float = 0.7, hi_gb: 
     return out, notes
 
 
+def plain_http(files: Sequence[tuple], probe: Callable = probe_source, workers: int = 8) -> tuple[list, list]:
+    """The same files as http:// links, where the server really serves them that way (no redirect
+    back to https): for download clients whose TLS does not get along with the mirror."""
+    urls = ["http://" + u.split("://", 1)[1] for u, _ in files]
+    with concurrent.futures.ThreadPoolExecutor(max(1, workers)) as ex:
+        res = list(ex.map(lambda u: probe(u, 20), urls))
+    out, notes = [], []
+    for u, (_, size), (got, final) in zip(urls, files, res):
+        if got == size and str(final).startswith("http://"):
+            out.append((u, size))
+        else:
+            notes.append(f"{u}: {'redirects to ' + str(final) if got else final}")
+    return out, notes
+
+
 def plan(files: Sequence[tuple], gb: float = 0.0, skip: int = 0, max_rounds: int = 50) -> list[tuple]:
     """The links to queue: the files from `skip` on (wrapping around), repeated with ?n=K until
     they add up to `gb` (0: every file once)."""
@@ -102,12 +119,15 @@ def main(argv=None) -> int:
     ap.add_argument("--max-gb", type=float, default=3.3, help="largest file to list (default 3.3)")
     ap.add_argument("--mirror", help=f"default: the first of {', '.join(MIRRORS)} that answers")
     ap.add_argument("--skip", type=int, default=0, metavar="N", help="start with the N-th file (give two apps different files)")
+    ap.add_argument("--http", action="store_true", help="plain http:// links (only the files the mirror serves that way)")
     ap.add_argument("--plain", action="store_true", help="links only")
     args = ap.parse_args(argv)
     gb = args.gb or (args.rate_mbps * args.minutes * 60 / 1024 * 1.1)
     files: list = []
     for m in ([args.mirror.rstrip("/")] if args.mirror else MIRRORS):
         files, notes = collect(m, lo_gb=args.min_gb, hi_gb=args.max_gb)
+        if files and args.http:
+            files, notes = plain_http(files)
         if files:
             break
         print(f"!! {m}: no file answered" + (f" ({notes[0]})" if notes else ""), file=sys.stderr)
