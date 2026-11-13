@@ -356,3 +356,26 @@ def test_limits_left_on_an_app_are_named(tmp_path):
     (leaf / "cpu.max").write_text("10000 100000\n")
     (leaf / "memory.high").write_text(str(32 * 2 ** 20) + "\n")
     assert N.limits_now(tree, "xunlei") == "cpu.max 10 % of a core, memory.high 32 MB"
+
+
+def test_a_fake_ip_proxy_in_the_path_is_recognised():
+    """What a VM behind Clash's TUN mode sees: every name resolves into 198.18.0.0/15 and every
+    connection of the download client ends there."""
+    from cf.linux import netstat as N
+    assert N.is_fake_ip("198.18.0.151:443") and N.is_fake_ip("198.19.255.1") and N.is_fake_ip("198.18.0.140:1883")
+    assert not N.is_fake_ip("198.20.0.1:443") and not N.is_fake_ip("101.6.15.130:443") and not N.is_fake_ip("[2402:f000::1]:443")
+    assert not N.is_fake_ip("not-an-address")
+    table = {"www.baidu.com": ["198.18.0.7"], "mirrors.tuna.tsinghua.edu.cn": ["101.6.15.130"]}
+
+    def resolve(h):
+        if h not in table:
+            raise OSError("no such host")
+        return table[h]
+    assert N.proxy_note(["mirrors.tuna.tsinghua.edu.cn", "nowhere.invalid"], resolve=resolve) == ""
+    note = N.proxy_note(["www.baidu.com", "mirrors.tuna.tsinghua.edu.cn"],
+                        ["198.18.0.151:443", "198.18.0.127:80", "101.6.15.130:443"], resolve=resolve)
+    assert note == "www.baidu.com resolves to 198.18.0.7; 2 of the apps' 3 connections end in 198.18.x.x"
+
+    smp = N.SockSampler(lambda: {})
+    smp._prev = {"xunlei": {"a": {"peer": "198.18.0.151:443"}, "b": {"peer": "198.18.0.140:1883"}}}
+    assert smp.peers("xunlei") == ["198.18.0.151:443", "198.18.0.140:1883"] and smp.peers("other") == []

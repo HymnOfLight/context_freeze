@@ -27,7 +27,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 _HEAD = re.compile(r"^\s*(?:tcp\s+)?([A-Z][A-Z0-9-]*)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)")
 _PID = re.compile(r"pid=(\d+)")
@@ -201,6 +201,10 @@ class SockSampler(threading.Thread):
         with self._lock:
             return self._out.pop(app, [])
 
+    def peers(self, app: str) -> list[str]:
+        """The remote ends ("addr:port") of the app's sockets at the last look."""
+        return [s["peer"] for s in (self._prev.get(app) or {}).values()]
+
     # -- thread
     def run(self) -> None:
         due = time.monotonic()
@@ -278,6 +282,13 @@ def main(argv=None) -> int:
             if kbps < args.min_kbps:
                 low.append((a, "not running" if not pids else
                             "no TCP sockets seen for it" if not r["sockets"] else f"{kbps:.0f} KB/s"))
+        hosts = [h for h in [(os.environ.get("CF_BENCH_RTT_HOST", probe.get("probe_host") or "") or "").rsplit(":", 1)[0],
+                             "mirrors.tuna.tsinghua.edu.cn"] if h]
+        note = proxy_note(hosts, [p for a in ids for p in dev.net.peers(a)])
+        if note:
+            print(f"!! a proxy in fake-IP (TUN / enhanced) mode sits between this machine and the network: {note}.\n"
+                  f"   The download and latency figures then describe the proxy, and 迅雷 may never find its sources. Switch "
+                  f"the proxy's TUN mode off on the host,\n   or put the VM on a bridged network (manual §2.5).", file=sys.stderr)
         for a in ids:
             why = limits_now(dev.tree, a)
             if why:
@@ -303,6 +314,43 @@ def main(argv=None) -> int:
                   f"(DL_TRIM=1, cf.linux.dl_trim)", file=sys.stderr)
             return 3
     return 0
+
+
+def is_fake_ip(addr: str) -> bool:
+    """198.18.0.0/15: reserved for benchmarking, never a real server - and what proxies in fake-IP
+    mode (Clash / Mihomo / Surge / sing-box with TUN or "enhanced mode") answer DNS queries with.
+    `addr` may carry a port ("198.18.0.151:443")."""
+    import ipaddress
+    host = addr.strip()
+    if host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    try:
+        return ipaddress.ip_address(host.strip("[]")) in ipaddress.ip_network("198.18.0.0/15")
+    except ValueError:
+        return False
+
+
+def proxy_note(hosts: Sequence[str], peers: Sequence[str] = (), resolve: Optional[Callable] = None) -> str:
+    """"" or what gives a transparent proxy away: a host name that resolves into the fake-IP range,
+    or sockets of the apps that end there.  With such a proxy between this machine and the network
+    the download figures describe the proxy, the latency probe times the proxy's own handshake,
+    and clients with protocols of their own (迅雷) may never find their sources."""
+    import socket
+    if resolve is None:
+        def resolve(h):
+            return [ai[4][0] for ai in socket.getaddrinfo(h, None, socket.AF_INET, socket.SOCK_STREAM)]
+    seen = []
+    for h in hosts:
+        try:
+            hit = next((a for a in resolve(h) if is_fake_ip(a)), None)
+        except OSError:
+            hit = None
+        if hit:
+            seen.append(f"{h} resolves to {hit}")
+    n = sum(1 for p in peers if is_fake_ip(p))
+    if n:
+        seen.append(f"{n} of the apps' {len(peers)} connections end in 198.18.x.x")
+    return "; ".join(seen)
 
 
 def limits_now(tree, app: str) -> str:
