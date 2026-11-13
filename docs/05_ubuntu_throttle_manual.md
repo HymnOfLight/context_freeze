@@ -798,7 +798,7 @@ python3 -m cf.linux.netstat configs/ubuntu_arm64_full.json --watch 10 --minutes 
 
 **下载型三个应用怎么配置** (一次配好, 以后每次跑之前只要确认任务还在下):
 
-*磁盘先算账.* 百度网盘和迅雷是真的把文件写到盘上: **要写的量 (GB) ≈ 速度 (MB/s) × 小时数 × 3.5**。6 小时: 0.5 MB/s → 约 11 GB, 1 MB/s → 约 21 GB, 2 MB/s → 约 42 GB。浏览器下载只占一个文件 (4.8 GB, 下完即删)。先 `df -h ~` 看剩多少, 再决定两个应用各限速多少; 60 GB 的盘 (系统 + 应用占掉二十来 GB) 建议两个应用**各限到 0.5–1 MB/s**。任务量也按这个数准备: 实验期间任务下完了, 那个应用后面的格就没有数据 (报告里 "无流量的秒" 会很高)。脚本开跑前会看 6 秒三个应用的实际速度, 按本次运行的总时长算出要写多少, 放不下 (留 5 GB 余量) 就停下并说明 (`DL_DISK_CHECK=0` 跳过)。
+*磁盘先算账.* 百度网盘和迅雷是真的把文件写到盘上: **要写的量 (GB) ≈ 速度 (MB/s) × 小时数 × 3.5**。6 小时: 0.5 MB/s → 约 11 GB, 1 MB/s → 约 21 GB, 2 MB/s → 约 42 GB。浏览器下载只占一个文件 (4.8 GB, 下完即删)。先 `df -h ~` 看剩多少, 再决定两个应用各限速多少; 60 GB 的盘 (系统 + 应用占掉二十来 GB) 建议两个应用**各限到 0.5–1 MB/s**。任务量也按这个数准备: 实验期间任务下完了, 那个应用后面的格就没有数据 (报告里 "无流量的秒" 会很高)。脚本开跑前会看 6 秒三个应用的实际速度, 按本次运行的总时长算出要写多少, 放不下 (留 5 GB 余量) 就停下并说明 (`DL_DISK_CHECK=0` 跳过)。**不想留这么多盘**: 用下面的 "边下边删" (`DL_TRIM=1`), 盘上只放正在下的文件; 要下的文件用下面的 `dl_files` 现查。
 
 *启动方式.* 实验里的应用都要**用 runner 启动** (这样进程才在各自的 cgroup `/cf/<id>` 里), 不要点桌面图标:
 
@@ -845,6 +845,55 @@ python3 run_linux.py configs/ubuntu_arm64_full.json --launch wechat qq wps firef
    # at these speeds, in the 360 min of the run: baidunetdisk writes about 10.8 GB, xunlei writes about 21.2 GB, browser_dl re-uses one file (4.8 GB); 41 GB free in /home/u
    ```
    `running` 是 `NO` = 应用不在它的 cgroup 里 (是点图标启动的: 退出后用上面的 `--launch` 重开); `sockets` 是 0 或速度是 0 = 任务没在下 (暂停了 / 下完了 / 走的是 P2P)。`browser_dl` 没在跑时这条命令看不到它, 先 `--launch browser_dl` 等半分钟。
+
+**下载用的测试文件** (`python3 -m cf.linux.dl_files`): 迅雷和百度网盘都需要 "够下一整晚" 的文件。这个命令读清华 / 北外镜像站的目录页 (发行版的版本号会变, 目录不变), 把里面 0.7–3.3 GB 的安装镜像逐个问一遍 (HEAD: 文件在、多大), 列出此刻确实能下的链接:
+
+```bash
+python3 -m cf.linux.dl_files                                   # 全部 (写这一节时 15 个文件, 共 33 GB), 小的在前
+python3 -m cf.linux.dl_files --rate-mbps 1 --minutes 360       # 1 MB/s 下 6 小时需要的量 (多给 10 %)
+python3 -m cf.linux.dl_files --gb 21 --plain                   # 只要链接, 一行一个 (整段粘进迅雷)
+python3 -m cf.linux.dl_files --mirror https://mirrors.bfsu.edu.cn --skip 8 --gb 12 --plain    # 换镜像站、从第 8 个文件开始: 给第二个应用不一样的文件
+#  0.74 GB  https://mirrors.tuna.tsinghua.edu.cn/debian-cd/current/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso
+#  1.23 GB  https://mirrors.tuna.tsinghua.edu.cn/archlinux/iso/latest/archlinux-2026.11.01-x86_64.iso
+#  1.39 GB  https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/20.04/ubuntu-20.04.6-live-server-amd64.iso
+#  1.99 GB  https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.5-live-server-amd64.iso
+#  2.72 GB  https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/26.04/ubuntu-26.04-live-server-amd64.iso
+#  ...
+# 12 links, 23.7 GB in total (15 different files, 33.2 GB); largest 3.08 GB; asked for 23.2 GB
+```
+
+要的总量超过全部不同文件之和时, 列表从头再来一遍, 链接后面加 `?n=2`、`?n=3` …: 镜像站不看查询串, 给的是同一个文件; 对下载软件来说是另一个链接。`--max-gb` 决定单个文件最大多大 (边下边删时, 盘上同时最多就是这么大的一个文件)。
+
+- **放进迅雷**: 新建任务 → 把 `--plain` 的输出整段粘进去 (一行一个链接, 迅雷会识别成多个任务) → 立即下载。设置里 "同时下载的最大任务数" 是 1 时, 它们一个接一个下。同一个文件名第二次出现 (`?n=2` 那几条) 时迅雷若提示任务已存在 / 文件重名, 选 "重新下载" 或 "重命名"; 实在加不进去就等前面的下完 (边下边删会把文件删掉) 再加一遍。
+- **放进百度网盘 (离线下载)**: 不用自己上传 —— 让百度的服务器去镜像站取。网页版 `pan.baidu.com` 或客户端里找 **离线下载** (新版在左侧 / "更多" 菜单里; 旧版在 "上传" 按钮旁边) → **新建链接任务** → 粘贴**一条** http(s) 链接 → 选保存到网盘里的一个新文件夹 (例如 `cf_test`) → 确定; 一条一条加完。服务器取完后 (镜像站的常见文件多半是 "秒离", 立刻完成), 在虚拟机的客户端里选中 `cf_test` 整个文件夹 → 下载。离线下载对普通账号有每天的任务数 / 单文件大小之类的限额, 各时期不同; 加不进去时的替代办法: 在 Mac 上把这些链接下下来再用网页版上传, 或者把别人分享的大文件 "保存到我的网盘"。同一个文件想多下几遍: 在网页版里把它复制几份 (复制不占流量, 占网盘容量)。
+- 两个应用最好用**不同的文件** (上面的 `--skip` / `--mirror`): 迅雷直接从镜像站下, 百度网盘从百度的服务器下, 互不相干, 但文件不同可以避免你在下载目录里分不清是谁的。
+
+(离线下载和迅雷的 "重复链接" 两处是按客户端的通常行为写的, 没有在真实客户端上验证; 链接本身每次由命令现查。)
+
+**磁盘不够大: 边下边删 (`DL_TRIM`)**。百度网盘和迅雷下完的文件, 实验并不需要 —— 需要的只是 "应用一直在收数据、写盘"。`DL_TRIM=1` 时 `run_classes.sh` 在实验期间开一个清理进程 (`cf/linux/dl_trim.py`, 跑在应用的 cgroup 之外, 它的 CPU 不记在被测应用头上), 每 15 秒看一眼这两个应用的进程打开着哪些文件:
+
+- 只跟踪**亲眼见到该应用正在写**的文件 (≥ 64 MB; 不在隐藏目录 / 系统目录里 —— 那是配置、缓存、数据库)。按 inode 跟踪, 所以下载结束时客户端把 `x.iso.xltd` / `x.iso.baiduyun.p.downloading` 改名成 `x.iso` 也跟得住。
+- 一个被跟踪的文件, 该应用的所有进程都已经 30 秒没有打开它, 名字又不再是 "下载中" 的临时名 (`.xltd` `.td` `.downloading` `.part` `.crdownload` `.tmp` …, 旁边也没有 `x.iso.td.cfg` / `x.iso.aria2` 这类进度文件) → 下完了, **删掉**。暂停的任务 (文件关了, 名字还是临时名) 不动。
+- **下载目录里你自己的文件不会被碰**: 没被它看到 "正在被该应用写" 的文件 (实验开始前就下完的、别的程序放进去的) 永远不删。
+
+这样盘上只需要放得下**正在下的那几个文件**, 而不是 "速度 × 时间": 两个应用各自 "同时下载任务数 1"、单个文件 ≤ 3.3 GB 时, 一共不到 7 GB (加上浏览器下载的那一个文件); 总下载量不变, 只是不留在盘上。所以任务要**多而小** (上面 `dl_files` 列的就是), 不要一个几十 GB 的大文件。开了 `DL_TRIM` 后开跑前的磁盘检查不再按 "速度 × 时间" 算。
+
+```bash
+python3 -m cf.linux.dl_trim configs/ubuntu_arm64_full.json --list       # 现在两个应用各在写哪个文件 (= 它认到的下载文件; 没有就是没在下, 或下载目录是隐藏目录: --dir)
+python3 -m cf.linux.dl_trim configs/ubuntu_arm64_full.json --dry-run    # 先空跑看几分钟: 只报告 "would be removed", 什么都不删 (Ctrl+C 结束)
+DL_TRIM=1 ROUNDS=6 SEEDS="1 2 3" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_night scripts/ubuntu/run_classes.sh
+tail -f results/arm64_full_night/dl_trim.log                            # 每删一个文件一行, 每 10 分钟一行合计和剩余空间
+```
+
+`DL_TRIM=punch` 更进一步: **正在下的文件**已经写下去的部分也每 15 秒还给文件系统 (`fallocate` 打洞: 文件长度不变, 客户端照常在它的偏移上接着写, 盘上只留最近十几秒收到的数据), 这时连 "一个文件" 的空间都不需要, 浏览器下载的 4.8 GB 也一并省掉。代价: 写过的部分再读出来是全零 —— 客户端如果在任务结束时校验文件, 会判它损坏 (报错、重下, 或者照样算完成, 取决于客户端)。**长跑之前先用一个任务试 10 分钟**, 看任务结束时客户端怎么反应:
+
+```bash
+python3 -m cf.linux.dl_trim configs/ubuntu_arm64_full.json --apps xunlei --punch --for 600      # 只对迅雷, 10 分钟; 同时 watch -n5 du -sh ~/下载目录
+```
+
+验证过的和没验证的: 在云主机上用 aria2 当下载客户端放进 `/cf/xunlei` (三个文件顺序下载), `DL_TRIM=1` 时每个文件下完约 6 秒 (当时 grace 设的 6 秒) 被删、目录里别的文件原样留着; `punch` 时盘上占用多数时候是十几 MB (aria2 给下一个文件预分配空间的那一下除外); 真实的 Firefox (`browser_dl`) 在 `punch` 下照常下完、接着下一个, 下载目录一直不超过 24 MB。**百度网盘和迅雷的真实客户端没有试过** —— 它们的临时文件名、下完后是否还要读文件 (校验 / 做种)、文件被删后任务列表怎么显示, 都以你虚拟机上 `--list` / `--dry-run` 看到的为准; 临时名不在上面的清单里时, 清理进程会把 "暂停后关闭的未完成文件" 当成下完的删掉 (任务会从头再下), 这时把后缀告诉我或加进 `TEMP_SUFFIXES`。
+
+对测量的影响: 下载速度、网络时延、"写盘" 列都不变 (数据照收照写)。删文件 / 打洞会顺带丢掉这些文件的页缓存, 应用 cgroup 里记着的文件缓存少一些 —— 对 `memory.high` 来说这部分本来就是最先被回收的, 预期影响很小, 但没有单独量过; 要严格对比的两次运行请用同一个 `DL_TRIM` 设置。清理进程只管**它运行期间**见到的文件: 中断后重跑, 中间那段时间下完的文件会留在盘上, 手工删一下。
 
 **两个 Firefox 是怎么分开的**: 进程正则分不开它们 (内容进程的命令行里没有 profile), 所以 (a) 窗口按类名区分 —— 交互型的 `firefox` 只认类名 `firefox` (每个 Firefox 窗口的实例名都是 `Navigator`, 不能用它), 下载用的那个启动时带 `--class cf-browser_dl`; (b) 进程按 cgroup 和父子关系区分 —— 已经在别的应用的 cgroup 里的进程不会被 "收养" 走, 带 `--class cf-…` 的进程及其全部子进程也永远不算 `firefox` 的 (目录条目的 `not_under`)。
 
@@ -1115,6 +1164,9 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 浏览器下载 (tests/test_linux_browser_dl.py): snap 版 Firefox 判为不可用 / 选第一个答应的下载源 / CONNECT 中继
                                                    # 把两条隧道合计限在给定速度 / 说明页把链接交给浏览器 / 下完删掉重下、卡住换源、盘满不下 / 两个 Firefox
                                                    # 互不收养 / 磁盘预算 / configs/ubuntu_arm64_full.json 的结构; 装了 deb 版 Firefox 且有 X 时真下一次本机文件
+                                                   # 边下边删 (tests/test_linux_dl_trim.py): 一个真实的 "客户端" 进程写文件 / 改名 / 关闭 -> 下完的被删、
+                                                   # 同目录别的文件和只读打开的文件不动、临时名和带进度文件的不动、宽限时间、dry-run; 打洞后文件长度不变、
+                                                   # 盘上占用归零、客户端接着写; 镜像目录页解析、按大小筛选去重、不够时加 ?n=K 重复
                                                    # 冷启动后立刻收养跑出 cgroup 的进程 / "m_fg 是冷启动后量的" 与 "内存限制没有生效" 的提示 / 图只画有数据的类
                                                    # 出图字体 (tests/test_linux_plot_fonts.py): 字全的字体优先 / 只有汉字的字体配 DejaVu 逐字回退 /
                                                    # 装了 Droid Sans Fallback 时真画一张中英混排 + 对数轴的图, 不许有缺字告警
@@ -1144,8 +1196,10 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `scripts/ubuntu/install_compute_apps.sh [--llama] [--check]` + `LLAMA_TAG= LLAMA_REPO= MODEL_URL= CF_DATA_HOME=` | 一次 | §6.9 计算应用背后的真实程序: apt 装 7-Zip / Z3 / OpenSSL / Tesseract / FFmpeg; `--llama` 源码编译 llama.cpp 的 `llama-completion` 并下载一个 GGUF 模型到 `~/.local/share/context_freeze/llama`; `--check` 每个任务试做一遍 |
 | `python3 -m cf.linux.tool_jobs [KIND…] [--check [--cycles n]] [--config CONFIG]` / `--missing CONFIG` | §6.9 检查 | 计算应用的工具装没装、缺什么、怎么装; `--check` 试做并打印每个操作的墙钟 / CPU 时间; `--missing` 列出某个配置里工具没就绪的计算应用 (有则退出码 1) |
 | `python3 -m cf.linux.browser_dl --app ID [--url URL …] [--rate-mbps n] [--dir D] [--min-free-gb n]` / `--check` + `CF_BROWSER_DL_URL= CF_BROWSER_DL_RATE_MBPS= CF_BROWSER=` | 由 runner 启动 | §6.9 下载应用 `browser_dl`: 第二个 Firefox (独立 profile / 窗口类), 用浏览器自己的下载管理器反复下载同一个大文件, 下完即删; 默认经进程内的 CONNECT 中继限速 2 MB/s (0 = 不限速); `--check` 报告用哪个 Firefox、哪个源、限速多少 |
+| `python3 -m cf.linux.dl_trim CONFIG [--list] [--dry-run] [--punch] [--apps …] [--every s] [--grace s] [--min-mb n] [--dir D] [--for s]` | `run_classes.sh` 在 `DL_TRIM=1 / punch` 时启动 | §6.9 边下边删: 下载应用下完的文件 (只限亲眼见到它在写的) 随下随删; `--punch` 连正在下的文件已写的部分也还给文件系统; `--list` 看应用此刻在写哪些文件, `--dry-run` 只报告不删 |
+| `python3 -m cf.linux.dl_files [--gb n \| --rate-mbps r --minutes M] [--min-gb a --max-gb b] [--mirror URL] [--skip N] [--plain]` | §6.9 准备下载任务 | 从清华 / 北外镜像站的目录页现查一批 0.7–3.3 GB、此刻能下的安装镜像链接 (够数为止, 不够就加 `?n=K` 重复), 用来粘进迅雷 / 百度网盘离线下载 |
 | `python3 -m cf.linux.netstat CONFIG [--watch s] [--min-kbps n] [--minutes M]` | §6.9 检查 | 真实下载应用此刻的连接数 / 速度 / 往返时延; `--min-kbps` 有应用没在下时退出码 1; `--minutes` 按看到的速度算这么多分钟要写多少盘, 放不下退出码 3 |
-| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= DL_DISK_CHECK= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
+| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= DL_DISK_CHECK= DL_TRIM= DL_TRIM_ARGS= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
 | `python3 -m cf.linux.classes FILES… --out DIR [--no-plots]` | 分析 | §6.9 的三张表 (CSV / Markdown / Excel) 和图; 不重跑实验 |
 | `python3 -m cf.linux.bench_app --app ID --kind sevenzip\|z3\|openssl\|llama\|tesseract\|ffmpeg\|numeric\|compress\|download [--corpus-mb n --level n --threads n --model F --tokens n --workers k --scale f --url U --rtt-host H:P]` / `--serve PORT --rate-mbps n` / `--check-url U` | §6.9 内部 | 可度量的计算 / 下载应用: X11 窗口 + 循环做固定任务 (`sevenzip` / `z3` 每个任务启动一次真实程序), 每个任务的时延写到 `/tmp/cf_bench_<id>.jsonl`; `--serve` 是合成版的本机限速下载源 |
 | `python3 -m cf.linux.netstat CONFIG [--apps ID…] [--watch S] [--min-kbps K]` | §6.9 检查 | 看 S 秒配置里下载应用的 TCP 连接: 是否在跑、连接数、MB/s、往返时延 (内核 `ss` 统计); 低于 K 时退出码 1 |
