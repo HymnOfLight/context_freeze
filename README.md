@@ -65,7 +65,7 @@ CONFIG=configs/ubuntu_arm64_compute.json OUT=results/arm64_compute scripts/ubunt
 CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full scripts/ubuntu/run_classes.sh         # 三类全量, 13 个真实应用: 交互 4 + 计算 6 + 下载 3 (百度网盘 / 迅雷 / 浏览器下载 browser_dl: 第二个 Firefox 自己反复下一个大文件, 限速 2 MB/s, 不用账号); 约 15 分钟一格, 过夜加 ROUNDS=6 SEEDS="1 2 3" (约 6 小时). 三个下载应用怎么配置、磁盘怎么算: 手册 §6.9
 python3 -m cf.linux.dl_files --rate-mbps 1 --minutes 360 --plain          # 给迅雷 / 百度网盘离线下载用的测试文件: 镜像站上此刻能下的 0.7–3.3 GB 安装镜像链接, 够 1 MB/s 下 6 小时
 DL_TRIM=1 ROUNDS=6 SEEDS="1 2 3" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_night scripts/ubuntu/run_classes.sh   # 同上过夜, 边下边删: 百度网盘 / 迅雷下完的文件随下随删 (只删亲眼见到它们写的), 盘上只需放正在下的几个文件; DL_TRIM=punch 连正在下的也释放 (先试, 手册 §6.9)
-DL_APPS="xunlei" DL_TRIM=1 CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_xunlei scripts/ubuntu/run_classes.sh   # 下载型只测迅雷 (DL_APPS: xunlei / browser_dl / "xunlei browser_dl" / none); 迅雷 "一直寻找资源" 的排查顺序见手册 §6.9
+DL_APPS="xunlei browser_dl" DL_TRIM=1 CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_xf scripts/ubuntu/run_classes.sh   # 下载型 = 迅雷 + 浏览器下载 (第二个 Firefox), 不测百度网盘 (DL_APPS: 任选 xunlei / browser_dl / baidunetdisk, 或 none); 迅雷 "一直寻找资源" 的排查顺序见手册 §6.9
 CONFIG=configs/ubuntu_arm64_classes_synthetic.json scripts/ubuntu/run_classes.sh   # 同上的合成版: 计算 / 下载换成自带基准程序 + 本机限速源, 不需要工具 / 账号 / 下载任务
 scripts/ubuntu/run_squeeze.sh                                            # 实验性 (手册 §6.8): office 5 应用、3 格, 按进程统计前/后台 PSS, 激进挤压 (memory.reclaim 整个 cgroup, 10 % 核带宽), 静默期每分钟换出量
 NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40  # 场景 x 策略 x η x 变体 (CPU 档位 / cpuset / swap 上限 / memory.max 对照); FULL=1 全量; PLACEHOLDERS=1 没装的用占位顶替

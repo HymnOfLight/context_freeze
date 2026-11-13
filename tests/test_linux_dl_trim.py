@@ -306,6 +306,11 @@ def test_subset_reduces_the_download_class_and_the_visiting_order():
     assert out["trace"]["T"] == 30 and out["throttle"] == cfg["throttle"]
     assert cfg["classes"]["download"] == ["baidunetdisk", "xunlei", "browser_dl"]          # the original is not touched
 
+    two, gone = S.subset(cfg, download=["xunlei", "browser_dl"])                           # 迅雷 + the Firefox download
+    assert gone == ["baidunetdisk"] and two["classes"]["download"] == ["xunlei", "browser_dl"]
+    assert len(two["apps"]) == 12 and len(two["trace"]["pattern"]) == 16 and two["trace"]["T"] == 32
+    assert two["trace"]["pattern"].count("browser_dl") == 1 and two["trace"]["pattern"].count("firefox") == 2
+
     none, gone = S.subset(cfg, download=[])
     assert none["classes"]["download"] == [] and len(none["trace"]["pattern"]) == 14 and len(gone) == 3
     same, gone = S.subset(cfg, download=["baidunetdisk", "xunlei", "browser_dl"])

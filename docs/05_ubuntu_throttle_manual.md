@@ -898,8 +898,8 @@ python3 -m cf.linux.dl_trim configs/ubuntu_arm64_full.json --apps xunlei --punch
 **下载型只用其中一两个应用 (`DL_APPS`)**: 三个下载应用不必都配。`DL_APPS` 把下载型缩到指定的应用, 其余的从应用表、三类表和访问顺序里一起拿掉 (`cf/linux/subset.py`; 缩减后的配置写到 `$OUT/config.json`, 限制、停留时间等都不变):
 
 ```bash
-DL_APPS="xunlei" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_xunlei scripts/ubuntu/run_classes.sh        # 下载型只有迅雷: 11 个应用, 每轮 15 步, 约 13 分钟一格
-DL_APPS="xunlei browser_dl" …      # 迅雷 + 浏览器下载        DL_APPS="browser_dl" …      # 只有浏览器下载 (不用账号)        DL_APPS="none" …      # 不要下载型
+DL_APPS="xunlei browser_dl" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_xf scripts/ubuntu/run_classes.sh   # 下载型 = 迅雷 + 浏览器下载 (第二个 Firefox): 12 个应用, 每轮 16 步, 约 13 分钟一格
+DL_APPS="xunlei" …      # 只有迅雷 (11 个应用, 每轮 15 步)        DL_APPS="browser_dl" …      # 只有浏览器下载 (不用账号)        DL_APPS="none" …      # 不要下载型
 ```
 
 被拿掉的应用如果还开着 (比如百度网盘), 脚本会说 "running but not part of this experiment" 并停下: 先把它退出。同一个 `OUT` 续跑时要带同样的 `DL_APPS`。**百度网盘没有限速选项**时两条路: 不管它 (普通账号的速度本来就被服务器限着; 配 `DL_TRIM=1` 不占盘), 或者用 `DL_APPS` 不测它。

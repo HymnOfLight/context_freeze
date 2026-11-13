@@ -37,8 +37,8 @@
 #   CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full scripts/ubuntu/run_classes.sh
 #   ROUNDS=6 SEEDS="1 2 3" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_night scripts/ubuntu/run_classes.sh   # ~6 h
 #   CF_BROWSER_DL_RATE_MBPS=4 / CF_BROWSER_DL_URL=https://...   # browser_dl: speed to hold (0 = unlimited), file to fetch
-#   DL_APPS="xunlei"                                      # download class reduced to these apps (of the config's three);
-#                                                         # "xunlei browser_dl", "browser_dl", or "none" for no download apps.
+#   DL_APPS="xunlei browser_dl"                           # download class reduced to these apps (of the config's three): here
+#                                                         # 迅雷 + the Firefox download; "xunlei", "browser_dl", or "none".
 #                                                         # The reduced config is written to $OUT/config.json (cf.linux.subset)
 #   DL_DISK_CHECK=0                                       # do not stop when the downloads would not fit on the disk
 #   DL_TRIM=1                                             # delete every file 百度网盘 / 迅雷 finish while the run goes on (cf.linux.dl_trim:
