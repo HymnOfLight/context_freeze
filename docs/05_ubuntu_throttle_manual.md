@@ -223,6 +223,26 @@ curl -sI https://github.com | head -1          # HTTP/2 200
 代理会把下载应用的流量整形成 Clash 的速率, `download_mbps` 量的就不再是 "后台被限到 1 核后还能下多快"。
 `run_all.sh` 发现代理变量时会提示。`snap` 不读这些变量 (这也是 §0 第 4 步先装 Mozilla deb 的原因之一)。
 
+**更隐蔽的一种: 宿主上的代理开着 TUN / 虚拟网卡 / 增强模式 (fake-IP)**。这时虚拟机里什么变量都不用设, 所有流量 (UTM 共享网络经 macOS 转发)
+都被代理接管, 关掉环境变量也没用。认法: 域名解析出来是 `198.18.x.x` (一段保留地址, 真实服务器不会用; 代理的 fake-IP 模式拿它当占位):
+
+```bash
+getent hosts www.baidu.com mirrors.tuna.tsinghua.edu.cn      # 198.18.0.x = 中间有 fake-IP 代理; 正常是 110.x / 101.6.x 之类的公网地址
+ss -tn | awk 'NR>1{print $5}' | grep -c '^198\.1[89]\.'      # 本机有多少条连接的对端是这种地址
+```
+
+后果有三: (a) 下载速度 / 网络往返时延量到的是代理这一段, "外网时延" 探针量的是宿主上代理的握手 (零点几毫秒), 不是外网; (b) **迅雷**之类
+用自己协议的客户端 (查资源走它自己的服务器、有 UDP) 过不了代理, 任务一直停在 "正在寻找资源", 而 curl / 浏览器下同一个链接完全正常;
+(c) 微信 / QQ 的长连接也都绕了一圈。`python3 -m cf.linux.netstat CONFIG` (`run_classes.sh` 开跑前会调用) 发现这种情况会打印
+"a proxy in fake-IP (TUN / enhanced) mode sits between this machine and the network"。解决 (任选):
+
+- **跑实验时把代理的 TUN / 虚拟网卡模式关掉** (Clash Verge: 设置 → 虚拟网卡模式; ClashX Pro / Surge: 增强模式), 只留 "系统代理" (它不影响虚拟机);
+  虚拟机里需要代理的命令继续用上面的环境变量 (端口 7897)。关掉后在虚拟机里 `sudo resolvectl flush-caches`, 并把迅雷等应用退出重开 (它们缓存了旧地址)。
+- **把虚拟机的网卡改成桥接**: UTM → 虚拟机设置 → 网络 → Network Mode: Bridged (Advanced), 选 Mac 正在上网的网卡 → 重启虚拟机。虚拟机直接从路由器拿地址,
+  不再经过 macOS 的代理 (ssh 用的 IP 会变, `ip -4 addr` 看新地址)。
+- 留着 TUN 模式: 在代理的规则里把 `xunlei.com`、`sandai.net` 和下载源的域名设为 DIRECT, 并加进 fake-ip-filter (这样它们解析到真实地址), 同时放行 UDP ——
+  规则写法随代理软件不同, 不如前两种省事。
+
 ## 3. 每次开机: cgroup 委托 + zram
 
 ```bash
@@ -913,13 +933,16 @@ python3 -m cf.linux.netstat configs/ubuntu_arm64_full.json --apps xunlei --watch
 #   "xunlei is limited right now (cpu.max 10 % of a core, memory.high 32 MB)"
 #                              ③ 上一次实验被强行中断, 限制还留在它身上 (只剩 10 % 的一个核, 迅雷连资源都找不动):
 python3 run_linux.py configs/ubuntu_arm64_full.json --release            #    解除全部限制 (run_classes.sh 正常 / 异常结束时都会自己做这一步)
-#   sockets 0                  ④ 它一条 TCP 连接都没建起来: 网络问题, 见下
-#   sockets > 0, MB/s 0        ⑤ 连上了但没有数据: 多半是源站不给 / 任务在排队, 换链接
-curl -L -o /dev/null -m 20 -w '%{http_code} %{speed_download} B/s\n' "<任务的链接>"      # ④ 虚拟机自己能不能下这个文件: 应是 200 和一个不小的速度
+#   "!! a proxy in fake-IP (TUN / enhanced) mode sits between this machine and the network"
+#                              ④ 宿主上的代理开着 TUN / 增强模式, 迅雷的连接全都进了代理 (对端是 198.18.x.x): curl 正常而迅雷找不到资源
+#                                 的典型原因 -> §2.5 末尾: 关掉 TUN 模式或把虚拟机网卡改成桥接, 然后退出重开迅雷
+#   sockets 0                  ⑤ 它一条 TCP 连接都没建起来: 网络问题, 见下
+#   sockets > 0, MB/s 0        ⑥ 连上了但没有数据: 多半是源站不给 / 任务在排队, 换链接
+curl -L -o /dev/null -m 20 -w '%{http_code} %{speed_download} B/s\n' "<任务的链接>"      # ⑤ 虚拟机自己能不能下这个文件: 应是 200 和一个不小的速度
 ```
 
 - curl 也下不动: 是虚拟机的网络 (DNS / 网关 / 只有走代理才能出去)。**迅雷不读 `http_proxy` 之类的环境变量**, 虚拟机必须能直连外网。
-- curl 能下、迅雷找不到资源: 是客户端这一侧。Linux 版迅雷加任务后先去问迅雷自己的资源服务器, 再连原始地址; 校园网 / 公司网常把迅雷的服务器或 P2P 端口封掉, 这时任务就停在 "寻找资源"。可以试: (a) 同一个文件换成 **http://** 链接、换一个站 —— `python3 -m cf.linux.dl_files --mirror https://repo.huaweicloud.com --http --plain` (华为云镜像, 明文 http; 只列出确实不会被跳回 https 的文件); (b) 先只加**一个**任务看它能不能开始, 不要一次粘十几条; (c) 换一个你确知迅雷下得动的文件 (内容是什么不影响实验); (d) 确认已登录。
+- curl 能下、迅雷找不到资源: 先看是不是上面的 fake-IP 代理 (`ss -tnp | grep -i thunder` 里对端是 `198.18.x.x`); 不是的话就是客户端这一侧。Linux 版迅雷加任务后先去问迅雷自己的资源服务器, 再连原始地址; 校园网 / 公司网常把迅雷的服务器或 P2P 端口封掉, 这时任务就停在 "寻找资源"。可以试: (a) 同一个文件换成 **http://** 链接、换一个站 —— `python3 -m cf.linux.dl_files --mirror https://repo.huaweicloud.com --http --plain` (华为云镜像, 明文 http; 只列出确实不会被跳回 https 的文件); (b) 先只加**一个**任务看它能不能开始, 不要一次粘十几条; (c) 换一个你确知迅雷下得动的文件 (内容是什么不影响实验); (d) 确认已登录。
 - 都不行: 下载型改用 `DL_APPS="browser_dl"` (浏览器下载不依赖任何客户端的服务器), 迅雷以后再说。
 
 (以上是按现象列的排查顺序; 我们没有在真实的迅雷客户端上复现过 "寻找资源", 哪一步命中请以你机器上这几条命令的输出为准。)
@@ -1196,7 +1219,8 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 边下边删 (tests/test_linux_dl_trim.py): 一个真实的 "客户端" 进程写文件 / 改名 / 关闭 -> 下完的被删、
                                                    # 同目录别的文件和只读打开的文件不动、临时名和带进度文件的不动、宽限时间、dry-run; 打洞后文件长度不变、
                                                    # 盘上占用归零、客户端接着写; 镜像目录页解析、按大小筛选去重、不够时加 ?n=K 重复、只留真给明文 http 的;
-                                                   # 下载型缩到一个应用后的配置 (访问顺序相邻重复合并) 和 DL_APPS 的 DRY 运行; 应用身上残留的限制能被指出来
+                                                   # 下载型缩到一个应用后的配置 (访问顺序相邻重复合并) 和 DL_APPS 的 DRY 运行; 应用身上残留的限制能被指出来;
+                                                   # 域名解析到 198.18.x.x / 应用的连接落在 198.18.x.x 时认出中间的 fake-IP 代理
                                                    # 冷启动后立刻收养跑出 cgroup 的进程 / "m_fg 是冷启动后量的" 与 "内存限制没有生效" 的提示 / 图只画有数据的类
                                                    # 出图字体 (tests/test_linux_plot_fonts.py): 字全的字体优先 / 只有汉字的字体配 DejaVu 逐字回退 /
                                                    # 装了 Droid Sans Fallback 时真画一张中英混排 + 对数轴的图, 不许有缺字告警
