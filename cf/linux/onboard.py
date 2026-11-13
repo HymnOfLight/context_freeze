@@ -97,6 +97,8 @@ LOGIN: dict[str, dict] = {
     "edge": {"method": "none", "main": (700, 480), "needs": "不需要账号", "prep": "打开一个长网页"},
     "firefox": {"method": "none", "main": (700, 480), "needs": "不需要账号", "prep": "打开一个长网页"},
     "chromium": {"method": "none", "main": (700, 480), "needs": "不需要账号", "prep": "打开一个长网页"},
+    "browser_dl": {"method": "none", "main": (0, 0), "needs": "不需要账号",
+                   "prep": "无需准备: 启动后自己开始下载 (窗口里的说明页不要关)"},
     "zwcad": {"method": "account", "main": (800, 500),
               "needs": "中望账号 (官网用实验手机号注册, 申请 Linux 试用授权), 启动后登录 / 激活",
               "prep": "打开或新建一张图纸, 画几条线, 鼠标停在绘图区 (view 脚本用滚轮缩放)"},
@@ -170,6 +172,12 @@ def save_state(state: dict, path: str = STATE_FILE) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=1, sort_keys=True)
     os.replace(tmp, path)
+
+
+def self_managed(a: LinuxApp) -> bool:
+    """A real program that one of our own modules starts and drives (cf.linux.browser_dl: a Firefox
+    that downloads by itself): no account, nothing to prepare by hand, so nothing to onboard."""
+    return "cf.linux.browser_dl" in (a.cmd or "")
 
 
 def not_ready(apps: list[str], state: Optional[dict] = None) -> tuple[list[str], list[str]]:
@@ -513,6 +521,8 @@ def check(dev, apps: list[str], cfg: Optional[dict] = None, out=print) -> int:
         win = main_window(dev, a, spec) if inst and (pids or ap.is_mobile) else None
         rec = st.get(a) or {}
         ready = bool(rec.get("ready")) and (win is not None or not inst) and not (stray and not pids)
+        if self_managed(ap):
+            ready = True                     # the runner starts it; there is nothing to log in to or to rehearse
         why = ""
         if inst and not ready:
             bad += 1
