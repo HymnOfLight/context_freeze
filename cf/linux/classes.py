@@ -9,7 +9,7 @@ what does limiting the background cost?
                unpacking real files, Z3 solving constraint problems) or the bundled numeric / zlib
                kernels: time per job and jobs per minute, app in the foreground vs in the background
   download     the same for a download: MB/s and the network round trip, foreground vs background -
-               real apps (百度网盘, 迅雷) through the kernel's TCP statistics of their sockets
+               real apps (百度网盘, 迅雷, a browser) through the kernel's TCP statistics of their sockets
                (cf.linux.netstat), the bundled downloader through its own log
 
 One row per (run, app[, operation]); runs with policy `none` are the baseline the `x` / `%` columns refer to.
@@ -93,13 +93,16 @@ NOTES = [
     "视频转码 = FFmpeg 把 4 s 的 720p 视频缩到 540p 并用 libx264 重新编码. (合成配置里: 科学计算 = LU + FFT + n 体, "
     "压缩解压 = zlib.) 前台 = 该应用是当前请求的应用的停留期; 后台 = 其它应用在前台的停留期 (只统计至少 90 % 的时间落在同一档位里的任务). "
     "任务内 CPU 占比 = 该程序的 CPU 时间 / 任务墙钟时间 (两线程的 7z 压缩不受限时约 180 %), 低说明任务大部分时间在等 CPU 配额或等缺页.",
-    "下载型 (真实应用: 百度网盘 / 迅雷, 数据来源 = sockets): 每秒从内核读一次该应用全部 TCP 连接的统计 (ss -tin, 按 cgroup / 进程归属), "
+    "下载型 (真实应用: 百度网盘 / 迅雷 / 浏览器下载, 数据来源 = sockets): 每秒从内核读一次该应用全部 TCP 连接的统计 (ss -tin, 按 cgroup / 进程归属), "
     "速度 = 这一秒各连接 bytes_received 的增量之和 (应用真正从网络收到的字节, 不含 UDP), P10 = 最慢的 10 % 的秒. "
     "网络往返时延 = 这一秒在收数据的连接的内核平滑 RTT (srtt), 按字节加权取中位: 应用发出的请求多久得到对端应答 (网络路径 + 服务器应答时间), "
     "只在应用发数据时更新 —— 它是连接本身的属性, 压后台的 CPU 不应改变它. 应用 '来不及收' 体现在: 内核收包积压 "
     "(数据已到、应用还没 read 走的字节, 被压时变大) 和速度下降. "
     "写盘 = 同一时段该应用 cgroup 的磁盘写入量 / 时长, 是独立于网络统计的旁证 (迅雷走 UDP 的 P2P 流量只会出现在这一列). "
     "无流量的秒 = 速度低于 10 KB/s 的采样占比, 高说明下载任务中途结束 / 暂停了, 这一格的速度不可比.",
+    "浏览器下载 (browser_dl) 默认经它自己 cgroup 里的一个限速中继取数据 (CF_BROWSER_DL_RATE_MBPS, 默认 2 MB/s; 0 = 不经中继): "
+    "这时它的往返时延 / 收包积压是中继那条外网连接的 —— 限速靠 '收得慢' 实现, 积压本来就一直接近接收窗口 —— 各格之间只比速度 "
+    "(不受限时应等于限速值, 低于它就是被压慢了) 和处理延迟.",
     "下载型的 '外网时延' 和 '处理延迟' 来自放在该应用 cgroup 里的一个小探针进程 (cf.linux.net_probe, 和应用的线程受同样的 CPU / 内存限制): "
     "每 0.5 s 向 RTT_HOST 发起一次 TCP 建连, 外网时延 = 建连耗时 (一次 SYN / SYN-ACK 往返, 即网络本身的时延, 加上探针被限制时多等的时间); "
     "处理延迟 = 探针比预定时刻晚了多久才被调度到 —— 一个发给后台应用的包到了以后, 应用的线程要等这么久才轮到 CPU 去处理它 "
