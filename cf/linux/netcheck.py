@@ -36,6 +36,7 @@ PORTAL_URLS = ("http://connect.rom.miui.com/generate_204",
 PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy")
 PROXY_FILES = ("/etc/environment", "/etc/apt/apt.conf", "/etc/profile.d", "/etc/apt/apt.conf.d")
 UTM_SHARED = ipaddress.ip_network("192.168.64.0/24")
+UNSET = "unset {http,https,ftp,all}_proxy {HTTP,HTTPS,FTP,ALL}_PROXY"
 
 _ADDR = re.compile(r"^\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)")
 _VIA = re.compile(r"\bvia\s+(\S+)")
@@ -87,7 +88,7 @@ def proxy_settings(env: Mapping[str, str], files: Mapping[str, str], gnome: Mapp
 
     for k, v in env.items():
         if k.lower() in PROXY_VARS and v:
-            add(proxy_target(v), f"${k}")
+            add(proxy_target(v), "the environment")
     for path, text in files.items():
         for line in text.splitlines():
             if line.lstrip().startswith(("#", "//")):
@@ -153,8 +154,12 @@ def _run(cmd: Sequence[str], timeout: float = 8.0) -> tuple[int, str]:
 
 
 def _physical(dev: str) -> bool:
-    # bridges of docker / waydroid / lxc have no device behind them
-    return os.path.exists(f"/sys/class/net/{dev}/device")
+    """Could this interface be the way out?  Not the loopback, not the bridges docker / waydroid /
+    lxc make, not the ports of such bridges, not a tunnel."""
+    d = f"/sys/class/net/{dev}"
+    if os.path.exists(f"{d}/device"):
+        return True
+    return dev != "lo" and os.path.isdir(d) and not any(os.path.exists(f"{d}/{x}") for x in ("bridge", "brport", "tun_flags"))
 
 
 def _devices() -> list[str]:
@@ -162,6 +167,15 @@ def _devices() -> list[str]:
         return sorted(d for d in os.listdir("/sys/class/net") if _physical(d))
     except OSError:
         return []
+
+
+def _link(dev: str) -> dict:
+    """{"carrier": is there a cable (None: the interface is down)}"""
+    try:
+        with open(f"/sys/class/net/{dev}/carrier") as f:
+            return {"carrier": f.read().strip() == "1"}
+    except OSError:
+        return {"carrier": None}
 
 
 def _read_proxy_files(paths: Sequence[str] = PROXY_FILES) -> dict[str, str]:
@@ -189,9 +203,24 @@ def _gnome(run: Callable) -> dict[str, str]:
     return out
 
 
-def gateway_answers(gw: str, run: Callable) -> bool:
-    """A ping, or - for a gateway that drops pings - its hardware address in the neighbour table."""
-    if run(["ping", "-c", "2", "-W", "2", gw], timeout=8)[0] == 0:
+def knock(host: str, ports: Sequence[int] = (53, 80), timeout: float = 1.5) -> bool:
+    """Did the host react to a connection attempt?  A refusal is a reaction too."""
+    for port in ports:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except ConnectionRefusedError:
+            return True
+        except OSError:
+            pass
+    return False
+
+
+def gateway_answers(gw: str, run: Callable, knock: Callable = knock) -> bool:
+    """A ping where there is one (a minimal Ubuntu has none), else a knock on its ports; for a
+    gateway that ignores both, its hardware address in the neighbour table, which the attempts
+    above have filled in when it is there at all."""
+    if run(["ping", "-c", "2", "-W", "2", gw], timeout=8)[0] == 0 or knock(gw):
         return True
     neigh = run(["ip", "neigh", "show", gw])[1]
     return "lladdr" in neigh and not re.search(r"\b(FAILED|INCOMPLETE)\b", neigh)
@@ -199,7 +228,8 @@ def gateway_answers(gw: str, run: Callable) -> bool:
 
 def gather(run: Callable = _run, *, env: Optional[Mapping[str, str]] = None, physical: Callable = _physical,
            connect: Callable = tcp_ok, lookup: Callable = resolve, get: Callable = http_status,
-           files: Optional[Mapping[str, str]] = None, devices: Callable = _devices) -> dict:
+           files: Optional[Mapping[str, str]] = None, devices: Callable = _devices,
+           knock: Callable = knock, link: Optional[Callable] = None) -> dict:
     """Everything `diagnose` needs, each probe independent of the others."""
     env = os.environ if env is None else env
     route = parse_default(run(["ip", "-4", "route", "show", "default"])[1])
@@ -207,7 +237,12 @@ def gather(run: Callable = _run, *, env: Optional[Mapping[str, str]] = None, phy
              if physical(a[0]) or (route and a[0] == route[1])]
     facts: dict = {"addrs": addrs, "route": route, "gateway_ok": None, "devs": list(devices())}
     if route and route[0]:
-        facts["gateway_ok"] = gateway_answers(route[0], run)
+        facts["gateway_ok"] = gateway_answers(route[0], run, knock)
+    facts["links"] = {d: (link or _link)(d) for d in facts["devs"]}
+    for line in run(["nmcli", "-t", "-f", "DEVICE,STATE", "device"])[1].splitlines():
+        d, _, state = line.partition(":")
+        if d in facts["links"]:
+            facts["links"][d]["nm"] = state
     with ThreadPoolExecutor(max_workers=12) as pool:
         outside = [pool.submit(connect, h, p) for h, p in OUTSIDE]
         names = [pool.submit(lookup, n) for n in NAMES]
@@ -233,9 +268,34 @@ def portal(web: Mapping[str, Optional[tuple[int, str]]]) -> Optional[str]:
 def diagnose(f: dict) -> list[tuple[str, str, str]]:
     """[(level, finding, what to do)], level "FAIL" (traffic stops here; later hops are not
     judged) or "WARN" (traffic flows, but not the way the experiment assumes).  [] = clean."""
+    found = _hops(f)
+    if any(what.startswith("proxy ") for _, what, _ in found):
+        return found
+    # the path stops before a proxy could be judged: say what will be wrong with it once the path is mended
+    on_shared = any(ipaddress.ip_address(ip) in UTM_SHARED for _, ip, _ in f["addrs"])
+    for (host, port), p in sorted(f["proxies"].items()):
+        try:
+            host_is_shared = ipaddress.ip_address(host) in UTM_SHARED
+        except ValueError:
+            continue
+        if host_is_shared and not on_shared:
+            found.append(("WARN", f"proxy {host}:{port} (set in {', '.join(p['where'])}) is the host on UTM's shared "
+                                  "network; this machine is not on that network now",
+                          "on a bridged network nobody is at that address: everything that reads the setting will "
+                          "fail even once the network works. Back on Shared Network it works again"))
+    return found
+
+
+def _hops(f: dict) -> list[tuple[str, str, str]]:
     addrs, route = f["addrs"], f["route"]
     dev = route[1] if route else (addrs[0][0] if addrs else next(iter(f.get("devs") or ()), "<dev>"))
     if not addrs:
+        links = f.get("links") or {}
+        if links and all(v.get("carrier") is not True for v in links.values()):
+            return [("FAIL", "no IPv4 address and no link on " + ", ".join(sorted(links)) + ": the VM's network cable is unplugged",
+                     "UTM: the VM's network device is missing or its bridged interface is not active on the Mac "
+                     "(pick the one the Mac is online with, usually en0 = Wi-Fi), then start the VM again; "
+                     f"inside the VM: sudo nmcli device connect {dev}")]
         return [("FAIL", "no IPv4 address: nobody answered the DHCP request",
                  "on a bridged network: the network does not hand this VM an address. Pick the interface the Mac is online "
                  "with (UTM > Network > Bridged Interface, usually en0 = Wi-Fi) instead of Automatic. A campus or "
@@ -284,12 +344,13 @@ def diagnose(f: dict) -> list[tuple[str, str, str]]:
                         "everything that reads the setting (apt, curl, git, pip, browsers on 'system proxy') "
                         "reaches nothing while the network itself is fine. Remove the setting (comment the lines in "
                         "/etc/environment and log in again; sudo rm /etc/apt/apt.conf.d/95proxy; "
-                        "gsettings set org.gnome.system.proxy mode none; unset http_proxy https_proxy all_proxy) "
+                        "gsettings set org.gnome.system.proxy mode none; in this shell: " + UNSET + ") "
                         "or point it at the address the host has now (bridged: the Mac's own LAN address, "
                         "with Allow LAN on in the proxy)"))
         else:
             out.append(("WARN", f"proxy {host}:{port} is set in {where}",
-                        "fine for apt / git; for the download class unset it, or the figures describe the proxy"))
+                        "fine for apt / git. Apps started from this shell inherit it: before a run of the download "
+                        "class, " + UNSET + ", or the figures describe the proxy"))
     return out
 
 
@@ -300,6 +361,9 @@ def report(f: dict) -> list[str]:
         lines.append(f"address   {dev} {ip}/{plen}{shared}")
     if not f["addrs"]:
         lines.append("address   none")
+        for d, v in sorted((f.get("links") or {}).items()):
+            cable = {True: "link up", False: "NO LINK", None: "interface down"}[v.get("carrier")]
+            lines.append(f"          {d}: {cable}" + (f", NetworkManager: {v['nm']}" if v.get("nm") else ""))
     if f["route"]:
         state = {True: "answers", False: "NO ANSWER", None: "not probed"}[f["gateway_ok"]]
         lines.append(f"gateway   {f['route'][0] or '(on-link)'} via {f['route'][1]}: {state}")

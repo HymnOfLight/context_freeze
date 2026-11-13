@@ -36,7 +36,7 @@ def test_proxy_settings_are_collected_from_everywhere():
          "/etc/apt/apt.conf.d/95proxy": 'Acquire::http::Proxy "http://192.168.64.1:7897";\n',
          "/etc/apt/apt.conf.d/50unattended": '// see http://example.org/proxy for details\nUnattended "true";\n'},
         {"mode": "manual", "http": "192.168.1.8:7890"})
-    assert found == {("192.168.64.1", 7897): ["$https_proxy", "$ALL_PROXY", "/etc/environment", "/etc/apt/apt.conf.d/95proxy"],
+    assert found == {("192.168.64.1", 7897): ["the environment", "/etc/environment", "/etc/apt/apt.conf.d/95proxy"],
                      ("192.168.1.8", 7890): ["GNOME system proxy (http)"]}
     assert N.proxy_settings({}, {}, {"mode": "none", "http": "192.168.1.8:7890"}) == {}
     assert N.proxy_target("192.168.64.1:7897") == ("192.168.64.1", 7897)
@@ -81,13 +81,13 @@ def test_a_login_page_in_the_way_is_recognised():
 
 
 def test_proxies_dead_alive_and_fake_ip():
-    dead = {("192.168.64.1", 7897): {"where": ["$http_proxy", "/etc/environment"], "ok": False}}
+    dead = {("192.168.64.1", 7897): {"where": ["the environment", "/etc/environment"], "ok": False}}
     got = N.diagnose(facts(proxies=dead))
     assert [(lv, what) for lv, what, _ in got] == [
-        ("FAIL", "proxy 192.168.64.1:7897 does not answer, and it is set in $http_proxy, /etc/environment")]
-    assert "95proxy" in got[0][2] and "Allow LAN" in got[0][2]
-    alive = {("192.168.64.1", 7897): {"where": ["$http_proxy"], "ok": True}}
-    assert levels(facts(proxies=alive)) == [("WARN", "proxy 192.168.64.1:7897 is set in $http_proxy")]
+        ("FAIL", "proxy 192.168.64.1:7897 does not answer, and it is set in the environment, /etc/environment")]
+    assert "95proxy" in got[0][2] and "Allow LAN" in got[0][2] and "{HTTP,HTTPS,FTP,ALL}_PROXY" in got[0][2]
+    alive = {("192.168.64.1", 7897): {"where": ["the environment"], "ok": True}}
+    assert levels(facts(proxies=alive)) == [("WARN", "proxy 192.168.64.1:7897 is set in the environment")]
     got = levels(facts(dns={"www.baidu.com": ["198.18.0.7"], "mirrors.tuna.tsinghua.edu.cn": ["198.18.0.9"]}, proxies=alive))
     assert [lv for lv, _ in got] == ["WARN", "WARN"] and "198.18.x.x" in got[0][1]
 
@@ -102,23 +102,64 @@ def test_gather_probes_without_touching_the_network(monkeypatch):
         if cmd[:2] == ["ip", "-4"] and "route" in cmd:
             return (0, ROUTE)
         if cmd[0] == "ping":
-            return (1, "")
+            return (127, "")                                                # not installed
         if cmd[:2] == ["ip", "neigh"]:
             return (0, "192.168.64.1 dev enp0s1 lladdr 5a:94:ef:e4:0c:ee REACHABLE\n")
+        if cmd[0] == "nmcli":
+            return (0, "enp0s1:connected\nlo:unmanaged\n")
         if cmd[0] == "gsettings":
             return (0, "'none'\n")
         return (127, "")
 
     f = N.gather(run, env={"http_proxy": "http://192.168.64.1:7897"}, physical=lambda dev: dev == "enp0s1",
                  connect=lambda h, p, timeout=3.0: h == "223.5.5.5", lookup=lambda n: ["110.242.68.3"],
-                 get=lambda u: (204, ""), files={}, devices=lambda: ["enp0s1"])
+                 get=lambda u: (204, ""), files={}, devices=lambda: ["enp0s1"],
+                 knock=lambda gw: False, link=lambda dev: {"carrier": True})
     assert f["addrs"] == [("enp0s1", "192.168.64.5", 24)]                   # waydroid's bridge is not an uplink
-    assert f["route"] == ("192.168.64.1", "enp0s1") and f["gateway_ok"] is True   # no ping answer, but it is a neighbour
+    assert f["route"] == ("192.168.64.1", "enp0s1") and f["gateway_ok"] is True   # no ping, no open port, but a neighbour
+    assert f["links"] == {"enp0s1": {"carrier": True, "nm": "connected"}}
     assert f["outside"]["223.5.5.5:443"] is True and f["outside"]["1.1.1.1:443"] is False
-    assert f["proxies"] == {("192.168.64.1", 7897): {"where": ["$http_proxy"], "ok": False}}
-    assert levels(f) == [("FAIL", "proxy 192.168.64.1:7897 does not answer, and it is set in $http_proxy")]
+    assert f["proxies"] == {("192.168.64.1", 7897): {"where": ["the environment"], "ok": False}}
+    assert levels(f) == [("FAIL", "proxy 192.168.64.1:7897 does not answer, and it is set in the environment")]
     assert f["devs"] == ["enp0s1"]
-    assert N.gateway_answers("10.0.0.1", lambda cmd, timeout=8.0: (1, "10.0.0.1 dev enp0s1  FAILED\n")) is False
+    silent = lambda cmd, timeout=8.0: (127, "") if cmd[0] == "ping" else (1, "10.0.0.1 dev enp0s1  FAILED\n")
+    assert N.gateway_answers("10.0.0.1", silent, lambda gw: False) is False
+    assert N.gateway_answers("10.0.0.1", silent, lambda gw: True) is True          # a machine without ping: the knock decides
+
+
+def test_a_proxy_of_the_shared_network_is_named_when_the_path_stops_earlier():
+    proxies = {("192.168.64.1", 7897): {"where": ["the environment", "/etc/environment"], "ok": False}}
+    got = levels(facts(addrs=[], route=None, gateway_ok=None, devs=["enp0s1"], links={"enp0s1": {"carrier": True}},
+                       proxies=proxies))
+    assert got == [("FAIL", "no IPv4 address: nobody answered the DHCP request"),
+                   ("WARN", "proxy 192.168.64.1:7897 (set in the environment, /etc/environment) is the host on UTM's "
+                            "shared network; this machine is not on that network now")]
+    # on the shared network the same setting is judged by whether it answers, once
+    shared = facts(addrs=[("enp0s1", "192.168.64.5", 24)], route=("192.168.64.1", "enp0s1"), proxies=proxies)
+    assert [lv for lv, _ in levels(shared)] == ["FAIL"]
+    other = {("proxy.example", 3128): {"where": ["the environment"], "ok": False}}
+    assert len(levels(facts(addrs=[], route=None, gateway_ok=None, proxies=other))) == 1
+
+
+def test_knock_takes_a_refusal_for_an_answer():
+    import socket
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        closed = srv.getsockname()[1]                                       # bound, not listening: connections are refused
+        assert N.knock("127.0.0.1", (closed,), 1.0) is True
+        srv.listen(1)
+        assert N.knock("127.0.0.1", (closed,), 1.0) is True
+    assert N.knock("192.0.2.1", (9,), 0.3) is False                        # TEST-NET-1: nobody there
+
+
+def test_no_address_tells_a_dead_link_from_an_unanswered_dhcp_request():
+    none = dict(addrs=[], route=None, gateway_ok=None, devs=["enp0s1"])
+    got = N.diagnose(facts(links={"enp0s1": {"carrier": False}}, **none))
+    assert got[0][1] == "no IPv4 address and no link on enp0s1: the VM's network cable is unplugged"
+    got = N.diagnose(facts(links={"enp0s1": {"carrier": True, "nm": "connecting (getting IP configuration)"}}, **none))
+    assert got[0][1] == "no IPv4 address: nobody answered the DHCP request"
+    lines = N.report(facts(links={"enp0s1": {"carrier": True, "nm": "connecting (getting IP configuration)"}}, **none))
+    assert "          enp0s1: link up, NetworkManager: connecting (getting IP configuration)" in lines
 
 
 def test_cli_prints_facts_and_verdict(monkeypatch, capsys):
