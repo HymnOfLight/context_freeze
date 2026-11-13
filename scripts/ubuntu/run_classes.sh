@@ -38,6 +38,14 @@
 #   ROUNDS=6 SEEDS="1 2 3" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_night scripts/ubuntu/run_classes.sh   # ~6 h
 #   CF_BROWSER_DL_RATE_MBPS=4 / CF_BROWSER_DL_URL=https://...   # browser_dl: speed to hold (0 = unlimited), file to fetch
 #   DL_DISK_CHECK=0                                       # do not stop when the downloads would not fit on the disk
+#   DL_TRIM=1                                             # delete every file 百度网盘 / 迅雷 finish while the run goes on (cf.linux.dl_trim:
+#                                                         # only files it saw them write): the disk holds the files in progress,
+#                                                         # not rate x time.  Queue many files of 1 - 3 GB, one task at a time
+#                                                         # (python3 -m cf.linux.dl_files lists links)
+#   DL_TRIM=punch                                         # also free the written part of the files in progress (they read back
+#                                                         # as zeros: try it on one task first, an app may reject the finished file)
+#   DL_TRIM_ARGS="--dir /mnt/dl"                          # more flags for cf.linux.dl_trim (a download directory that is hidden
+#                                                         # or under a system path, --grace, --min-mb)
 #
 # Synthetic variant (no tools, accounts or download tasks needed: bundled numeric / zlib / downloader apps and a
 # local rate-limited source):
@@ -81,9 +89,12 @@ has_app() { python3 -c "import json,sys; sys.exit(0 if sys.argv[2] in json.load(
 has_downloads() { python3 -c "import json,sys; sys.exit(0 if (json.load(open(sys.argv[1])).get('classes') or {}).get('download') else 1)" "$CONFIG"; }
 MINUTES=$(( (T * (DWELL + 6) / 60 + 2) * $(echo $CELLS | wc -w) * $(echo $SEEDS | wc -w) ))
 SRV_PID=""
+TRIM_PID=""
+DL_TRIM="${DL_TRIM:-0}"
 old_swappiness=""
 cleanup() {
   [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null || true
+  [ -n "$TRIM_PID" ] && kill "$TRIM_PID" 2>/dev/null || true
   # the bench apps would otherwise keep computing / downloading after the experiment
   pkill -f "cf.linux.bench_app --app" 2>/dev/null || true
   pkill -f "cf.linux.browser_dl --app" 2>/dev/null || true       # it stops its browser and removes the partial file
@@ -187,14 +198,28 @@ if [ "$DRY" != 1 ]; then
   fi
   # real download apps: they must be downloading now - nothing else is measured for them
   rc=0
-  python3 -m cf.linux.netstat "$CONFIG" --watch 6 --min-kbps "${DL_MIN_KBPS:-50}" --minutes "$MINUTES" || rc=$?
+  if [ "$DL_TRIM" != 0 ]; then
+    # finished files are deleted as the run goes on: what the disk has to hold is the files in progress
+    python3 -m cf.linux.netstat "$CONFIG" --watch 6 --min-kbps "${DL_MIN_KBPS:-50}" || rc=$?
+  else
+    python3 -m cf.linux.netstat "$CONFIG" --watch 6 --min-kbps "${DL_MIN_KBPS:-50}" --minutes "$MINUTES" || rc=$?
+  fi
   if [ "$rc" = 3 ]; then
-    echo "   (DL_DISK_CHECK=0 runs anyway)"
+    echo "   (DL_TRIM=1 deletes the files the download apps finish during the run; DL_DISK_CHECK=0 runs anyway)"
     [ "${DL_DISK_CHECK:-1}" = 1 ] && [ "${STRICT:-1}" = 1 ] && exit 2
   elif [ "$rc" != 0 ]; then
     echo "   start a big download (enough for $MINUTES min) in each of these apps, leave it running and re-run;"
     echo "   DL_MIN_KBPS=0 or STRICT=0 runs anyway (their download columns will be empty or low)"
     [ "${STRICT:-1}" = 1 ] && exit 2
+  fi
+  if [ "$DL_TRIM" != 0 ] && has_downloads; then
+    trim_flags="${DL_TRIM_ARGS:-}"; [ "$DL_TRIM" = punch ] && trim_flags="--punch $trim_flags"
+    echo "  files the download apps are writing now (DL_TRIM=$DL_TRIM: finished ones are deleted during the run$( [ "$DL_TRIM" = punch ] && echo ', the written part of the others is freed'); log: $OUT/dl_trim.log):"
+    # shellcheck disable=SC2086
+    python3 -m cf.linux.dl_trim "$CONFIG" --list $trim_flags | sed 's/^/    /' || true
+    # shellcheck disable=SC2086
+    python3 -m cf.linux.dl_trim "$CONFIG" $trim_flags >> "$OUT/dl_trim.log" 2>&1 &
+    TRIM_PID=$!
   fi
   free_gb=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc 0-9)
   if has_downloads || has_app bench_download; then

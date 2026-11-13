@@ -294,7 +294,8 @@ def main(argv=None) -> int:
         print(f"at these speeds, in the {args.minutes:.0f} min of the run: {line}; {free:.0f} GB free in {os.path.expanduser('~')}")
         if need > free - args.reserve_gb:
             print(f"!! that is {need:.0f} GB and does not fit ({free:.0f} GB free, {args.reserve_gb:g} GB kept in reserve): lower "
-                  f"the speed limit in the apps, free some space, or run fewer rounds", file=sys.stderr)
+                  f"the speed limit in the apps, free some space, run fewer rounds, or let the finished files be deleted during the run "
+                  f"(DL_TRIM=1, cf.linux.dl_trim)", file=sys.stderr)
             return 3
     return 0
 
