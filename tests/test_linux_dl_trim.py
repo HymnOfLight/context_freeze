@@ -272,3 +272,82 @@ def test_plan_repeats_the_files_with_a_query_string_until_it_is_enough():
 def test_run_script_starts_and_stops_the_trimmer():
     sh = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts/ubuntu/run_classes.sh")).read()
     assert 'DL_TRIM="${DL_TRIM:-0}"' in sh and 'kill "$TRIM_PID"' in sh and "cf.linux.dl_trim" in sh
+
+
+def test_plain_http_keeps_only_what_the_mirror_really_serves_over_http():
+    GB = 2 ** 30
+    files = [("https://m/a.iso", GB), ("https://m/b.iso", 2 * GB), ("https://m/c.iso", GB)]
+
+    def probe(url, timeout):
+        return {"http://m/a.iso": (GB, "http://m/a.iso"),                     # served as asked
+                "http://m/b.iso": (2 * GB, "https://m/b.iso"),                # sent back to https
+                "http://m/c.iso": (None, "HTTP 403")}[url]
+    out, notes = F.plain_http(files, probe=probe)
+    assert out == [("http://m/a.iso", GB)]
+    assert any("redirects to https://m/b.iso" in n for n in notes) and any("403" in n for n in notes)
+
+
+# ------------------------------------------------------------------ fewer download apps
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_subset_reduces_the_download_class_and_the_visiting_order():
+    import json
+
+    from cf.linux import subset as S
+    cfg = json.load(open(os.path.join(REPO, "configs/ubuntu_arm64_full.json")))
+    out, gone = S.subset(cfg, download=["xunlei"])
+    assert gone == ["baidunetdisk", "browser_dl"]
+    assert out["classes"]["download"] == ["xunlei"] and out["classes"]["compute"] == cfg["classes"]["compute"]
+    assert "baidunetdisk" not in out["apps"] and "browser_dl" not in out["apps"] and len(out["apps"]) == 11
+    pat = out["trace"]["pattern"]
+    assert len(pat) == 15 and pat.count("xunlei") == 1 and "browser_dl" not in pat
+    assert all(a != b for a, b in zip(pat, pat[1:])) and pat[0] != pat[-1]
+    assert out["trace"]["T"] == 30 and out["throttle"] == cfg["throttle"]
+    assert cfg["classes"]["download"] == ["baidunetdisk", "xunlei", "browser_dl"]          # the original is not touched
+
+    none, gone = S.subset(cfg, download=[])
+    assert none["classes"]["download"] == [] and len(none["trace"]["pattern"]) == 14 and len(gone) == 3
+    same, gone = S.subset(cfg, download=["baidunetdisk", "xunlei", "browser_dl"])
+    assert gone == [] and same == cfg
+    with pytest.raises(ValueError, match="not a download app"):
+        S.subset(cfg, download=["thunder"])
+    with pytest.raises(ValueError, match="not an app"):
+        S.subset(cfg, drop=["nope"])
+
+    toy = {"apps": ["a", "b", "c"], "classes": {"interactive": ["a", "c"], "download": ["b"]},
+           "trace": {"kind": "pattern", "pattern": ["a", "b", "a", "c", "b"]}}
+    out, _ = S.subset(toy, drop=["b"])
+    assert out["trace"]["pattern"] == ["a", "c"]               # a b a -> one visit to a; the trailing b goes
+
+
+def test_run_script_runs_the_reduced_config(tmp_path):
+    import json
+    env = dict(os.environ, DRY="1", OUT=str(tmp_path), CONFIG="configs/ubuntu_arm64_full.json", DL_APPS="xunlei", ROUNDS="6",
+               SEEDS="1 2 3")
+    r = subprocess.run(["bash", "scripts/ubuntu/run_classes.sh"], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    cfg = json.load(open(tmp_path / "config.json"))
+    assert cfg["classes"]["download"] == ["xunlei"]
+    assert "rounds=6 (T=90)" in r.stdout and f"config={tmp_path}/config.json" in r.stdout
+    cmds = [ln for ln in r.stdout.splitlines() if ln.startswith("python3 -u run_linux.py")]
+    assert len(cmds) == 9 and all(f"{tmp_path}/config.json" in c and "--T 90" in c for c in cmds)
+
+    env["DL_APPS"] = "thunder"
+    r = subprocess.run(["bash", "scripts/ubuntu/run_classes.sh"], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2 and "not a download app" in r.stdout + r.stderr
+
+
+def test_limits_left_on_an_app_are_named(tmp_path):
+    from cf.linux import netstat as N
+    from cf.linux.cgroup import CgroupTree
+    tree = CgroupTree(root=str(tmp_path), subdir="cf")
+    assert N.limits_now(tree, "xunlei") == ""                   # no such cgroup
+    leaf = tmp_path / "cf" / "xunlei"
+    leaf.mkdir(parents=True)
+    for name, text in (("cpu.max", "max 100000\n"), ("memory.high", "max\n"), ("cgroup.freeze", "0\n")):
+        (leaf / name).write_text(text)
+    assert N.limits_now(tree, "xunlei") == ""
+    (leaf / "cpu.max").write_text("10000 100000\n")
+    (leaf / "memory.high").write_text(str(32 * 2 ** 20) + "\n")
+    assert N.limits_now(tree, "xunlei") == "cpu.max 10 % of a core, memory.high 32 MB"
