@@ -278,6 +278,11 @@ def main(argv=None) -> int:
             if kbps < args.min_kbps:
                 low.append((a, "not running" if not pids else
                             "no TCP sockets seen for it" if not r["sockets"] else f"{kbps:.0f} KB/s"))
+        for a in ids:
+            why = limits_now(dev.tree, a)
+            if why:
+                print(f"   {a} is limited right now ({why}): expected while an experiment runs; otherwise a run that was "
+                      f"killed left it - lift with: python3 run_linux.py {args.config} --release")
         if dev.net.error:
             print(f"!! {dev.net.error}", file=sys.stderr)
             return 2
@@ -298,6 +303,26 @@ def main(argv=None) -> int:
                   f"(DL_TRIM=1, cf.linux.dl_trim)", file=sys.stderr)
             return 3
     return 0
+
+
+def limits_now(tree, app: str) -> str:
+    """The limits that are on the app's cgroup at this moment ("" = none): what makes a download
+    crawl or never find its source when nobody is running an experiment."""
+    if not tree.exists(app):
+        return ""
+    out = []
+    cpu = tree.read(app, "cpu.max").split()
+    if cpu and cpu[0] != "max":
+        try:
+            out.append(f"cpu.max {100.0 * int(cpu[0]) / int(cpu[1]):.0f} % of a core")
+        except (ValueError, IndexError, ZeroDivisionError):
+            out.append(f"cpu.max {' '.join(cpu)}")
+    high = tree.read(app, "memory.high").strip()
+    if high and high != "max":
+        out.append(f"memory.high {int(high) / 2 ** 20:.0f} MB" if high.isdigit() else f"memory.high {high}")
+    if tree.read(app, "cgroup.freeze").strip() == "1":
+        out.append("frozen")
+    return ", ".join(out)
 
 
 def disk_budget(mbps: dict[str, float], minutes: float, cmds: Optional[dict[str, str]] = None) -> tuple[float, str]:
