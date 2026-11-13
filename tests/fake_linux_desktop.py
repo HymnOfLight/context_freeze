@@ -86,6 +86,7 @@ class FakeLinuxDesktop:
         self.rng = random.Random(seed)
         self.cat = dict(cat or APPS)
         self.tree = FakeTree()
+        self.mem_peak: dict[str, int] = {}      # app -> memory.peak of its cgroup, kB
         self.profile = ThrottleProfile()
         self.notify = FakeNotify()
         self.mobile = None                      # no Android runtime (subclass / set to fake one)
@@ -151,6 +152,9 @@ class FakeLinuxDesktop:
 
     def adopt(self, id_):
         return {"moved": [], "failed": {}}
+
+    def mem_peak_kb(self, id_):
+        return self.mem_peak.get(id_)
 
     # ------------------------------------------------------------- actions
     def launch(self, id_):

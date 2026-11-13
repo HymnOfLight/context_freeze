@@ -23,6 +23,13 @@
 #                                                         # (default www.baidu.com:443; "" = no probe)
 #   STRICT=0 / SWAPPINESS=60 / DRY=1                      # as in run_squeeze.sh
 #
+# Responsiveness + compute only, with more compute apps (no download apps, nothing to log in to or to start by hand
+# for the compute class): 7-Zip, Z3, OpenSSL (encrypt / decrypt / sign), a local large language model (llama.cpp),
+# Tesseract OCR, FFmpeg transcoding - 14 steps per round, ~10 min per cell
+#   scripts/ubuntu/install_compute_apps.sh --llama --check                 # once: the tools, llama.cpp + a model, one test job each
+#   CONFIG=configs/ubuntu_arm64_compute.json OUT=results/arm64_compute scripts/ubuntu/run_classes.sh
+#   TOOLCHECK=0                                           # skip the test job of every compute app before the first cell
+#
 # Synthetic variant (no tools, accounts or download tasks needed: bundled numeric / zlib / downloader apps and a
 # local rate-limited source):
 #   CONFIG=configs/ubuntu_arm64_classes_synthetic.json OUT=results/arm64_classes_syn scripts/ubuntu/run_classes.sh
@@ -86,11 +93,10 @@ if [ "$DRY" != 1 ]; then
   python3 run_linux.py "$CONFIG" --scenario list > "$OUT/apps_resolved.txt" || true
   if grep -q '^missing:' "$OUT/apps_resolved.txt"; then
     echo "!! not installed: $(grep '^missing:' "$OUT/apps_resolved.txt" | tr '\n' ' ')  (EXTRA=\"--placeholders\" runs them as the stand-in)"; fi
-  tools=""
-  has_app sevenzip && ! command -v 7z >/dev/null && ! command -v 7zz >/dev/null && ! command -v 7za >/dev/null && tools+=" p7zip-full"
-  has_app z3 && ! command -v z3 >/dev/null && tools+=" z3"
-  if [ -n "$tools" ]; then
-    echo "!! the compute apps drive the real tools, which are not installed:  sudo apt install -y$tools" >&2
+  if ! tools=$(python3 -m cf.linux.tool_jobs --missing "$CONFIG"); then
+    echo "!! the compute apps drive real programs, and these are not ready (scripts/ubuntu/install_compute_apps.sh [--llama]):" >&2
+    echo "$tools" | sed 's/^/   /' >&2
+    echo "   (or take the app out of apps / classes.compute / trace.pattern of the config; STRICT=0 runs without it)" >&2
     [ "${STRICT:-1}" = 1 ] && exit 2
   fi
   want=$(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['apps']))" "$CONFIG")
@@ -109,6 +115,15 @@ if [ "$DRY" != 1 ]; then
   trap cleanup EXIT
   # bench apps left over from an earlier run would keep their old log position and old download source
   pkill -f "cf.linux.bench_app --app" 2>/dev/null && sleep 1 || true
+  # one job of every compute app, here and unlimited: a tool that is installed but does not work (a model that
+  # does not load, a codec that is missing) would otherwise only show up as bad_jobs after the run
+  if [ "${TOOLCHECK:-1}" = 1 ]; then
+    echo "  one test job per compute app (TOOLCHECK=0 skips this):"
+    if ! python3 -m cf.linux.tool_jobs --check --cycles 1 --config "$CONFIG" | sed 's/^/    /'; then
+      echo "!! a compute app does not do its job correctly - see the line marked FAILED / MISSING above" >&2
+      [ "${STRICT:-1}" = 1 ] && exit 2
+    fi
+  fi
   SWAPPINESS="${SWAPPINESS:-200}"
   cur=$(cat /proc/sys/vm/swappiness)
   if [ "$SWAPPINESS" != "$cur" ]; then
@@ -135,7 +150,8 @@ if [ "$DRY" != 1 ]; then
   fi
   # the latency probe of the download apps (inside each app's cgroup) connects to this host twice a second
   export CF_BENCH_RTT_HOST="$RTT_HOST"
-  [ -n "$RTT_HOST" ] && echo "  latency probe of the download apps: TCP connect to $RTT_HOST"
+  if [ -n "$RTT_HOST" ] && { has_app baidunetdisk || has_app xunlei || has_app bench_download; }; then
+    echo "  latency probe of the download apps: TCP connect to $RTT_HOST"; fi
   if [ "${ONBOARD:-0}" = 1 ]; then
     python3 -m cf.linux.blankdoc --reset >/dev/null
     CONFIG="$CONFIG" scripts/ubuntu/cf_onboard.sh || true
@@ -150,7 +166,11 @@ if [ "$DRY" != 1 ]; then
     [ "${STRICT:-1}" = 1 ] && exit 2
   fi
   free_gb=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc 0-9)
-  [ "${free_gb:-99}" -lt 10 ] && echo "!! only ${free_gb} GB free in $HOME - the downloads keep writing during the run"
+  if has_app baidunetdisk || has_app xunlei || has_app bench_download; then
+    [ "${free_gb:-99}" -lt 10 ] && echo "!! only ${free_gb} GB free in $HOME - the downloads keep writing during the run"
+  else
+    [ "${free_gb:-99}" -lt 2 ] && echo "!! only ${free_gb} GB free in $HOME - the result files and the swap file need room"
+  fi
 fi
 
 M_FG_FROM=""

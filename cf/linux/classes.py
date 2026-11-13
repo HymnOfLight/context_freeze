@@ -46,7 +46,7 @@ DOWNLOAD_COLS = ["run", "policy", "app", "fg_s", "fg_mbps", "fg_mbps_p10", "fg_r
                  "bg_vs_none_pct", "rtt_lost_pct", "errors", "bg_tiers", "source", "fg_socks", "bg_socks", "fg_recvq_p95_kb",
                  "bg_recvq_p95_kb", "fg_idle_pct", "bg_idle_pct", "fg_retrans", "bg_retrans", "fg_disk_mbps", "bg_disk_mbps"]
 IDLE_KBPS = 10.0          # a sample below this rate: nothing is being downloaded (task finished / paused / stalled)
-OP_CN = {"compress": "压缩", "extract": "解压"}
+OP_CN = {"compress": "压缩", "extract": "解压", "encrypt": "加密", "decrypt": "解密", "sign": "签名验签"}
 
 INTERACTIVE_CN = [("run", "格"), ("app", "应用"), ("n_calls", "呼叫次数"), ("n_limited", "其中从受限后台切回"),
                   ("resp_p50_ms", "响应 P50 (ms)"), ("resp_p95_ms", "响应 P95 (ms)"), ("resp_max_ms", "响应最大 (ms)"),
@@ -87,7 +87,10 @@ NOTES = [
     "全选+复制 到剪贴板拿到文本的时间 (两次按键延时 + 轮询约 0.2 s 是固定底噪, 看格与格的差). 不应答 ping 的应用 (微信等) 只有输入回读.",
     "计算型: 同一个固定任务循环做, 由真实程序完成: 7-Zip = 用系统里装的 7z 把约 4 MB 的真实文件 (文档 / python 源码 / 可执行文件) "
     "以默认级别 -mx=5、两线程压成 .7z (压缩), 再解压出来 (解压), 两个操作各占一行; Z3 求解器 = 用系统里装的 z3 依次解三个约束问题 "
-    "(24 皇后 sat / 9 鸽 8 笼 unsat / 32 位半素数分解 sat), 三个都解对算一个任务. (合成配置里: 科学计算 = LU + FFT + n 体, "
+    "(24 皇后 sat / 9 鸽 8 笼 unsat / 32 位半素数分解 sat), 三个都解对算一个任务; OpenSSL = 对一个 32 MB 文件做口令加密 (AES-256-CBC, "
+    "PBKDF2 60 万次迭代)、解密并核对 SHA-256、RSA-3072 签名并验签, 三个操作各占一行; 大模型推理 = llama.cpp 每个任务启动一次、载入本地 GGUF 模型、"
+    "对同一个问题贪心生成恰好 64 个 token (单线程); 文字识别 = Tesseract (LSTM) 识别一页 A4 英文, 至少认对 90 % 的词; "
+    "视频转码 = FFmpeg 把 4 s 的 720p 视频缩到 540p 并用 libx264 重新编码. (合成配置里: 科学计算 = LU + FFT + n 体, "
     "压缩解压 = zlib.) 前台 = 该应用是当前请求的应用的停留期; 后台 = 其它应用在前台的停留期 (只统计至少 90 % 的时间落在同一档位里的任务). "
     "任务内 CPU 占比 = 该程序的 CPU 时间 / 任务墙钟时间 (两线程的 7z 压缩不受限时约 180 %), 低说明任务大部分时间在等 CPU 配额或等缺页.",
     "下载型 (真实应用: 百度网盘 / 迅雷, 数据来源 = sockets): 每秒从内核读一次该应用全部 TCP 连接的统计 (ss -tin, 按 cgroup / 进程归属), "
@@ -241,6 +244,14 @@ def _tiers(ivs: list[dict]) -> str:
     return ", ".join(f"{k}×{n}" for k, n in sorted(c.items(), key=lambda kv: -kv[1]))
 
 
+def _ops(events: list[dict]) -> list[str]:
+    """The operations these jobs name, in a fixed order (that of OP_CN, unknown ones after it in
+    order of appearance): which operation a log happens to start with differs from cell to cell."""
+    seen = list(dict.fromkeys(e.get("op") or "" for e in events))
+    known = list(OP_CN)
+    return sorted(seen, key=lambda op: (known.index(op) if op in known else len(known), seen.index(op)))
+
+
 def compute_rows(run: dict) -> list[dict]:
     """One row per compute app, or per (app, operation) when its jobs name one (7-Zip: compress,
     extract) - then "app" is "<app>:<op>"."""
@@ -248,7 +259,7 @@ def compute_rows(run: dict) -> list[dict]:
     for app in classes_of(run)["compute"]:
         all_ev = [e for e in bench_events(run, app) if e.get("k") == "job"]
         ivs = intervals(run, app)
-        for op in list(dict.fromkeys(e.get("op") or "" for e in all_ev)) or [""]:
+        for op in _ops(all_ev) or [""]:
             ev = [e for e in all_ev if (e.get("op") or "") == op]
             rows.append(_compute_row(run, f"{app}:{op}" if op else app, op, ev, ivs))
     return rows
@@ -595,7 +606,10 @@ def plot_classes(runs: list[dict], path: str, tb: Optional[dict] = None) -> bool
                            label=f"{_label(n)} · {T('前台', 'fg') if k == 0 else T('后台', 'bg')}",
                            yerr=[[0.0] * len(es), es] if ek else None, capsize=2, error_kw={"lw": 0.8})
         ax.set_xticks(range(len(apps)))
-        ax.set_xticklabels([app_l(a) for a in apps], fontsize=9 if len(apps) <= 4 else 7.5)
+        labels = [app_l(a) for a in apps]
+        if len(apps) > 6:                      # "OpenSSL · 签名验签" x 9 runs into its neighbours on one line
+            labels = [x.replace(" · ", "\n") if zh else x.replace(" ", "\n", 1) for x in labels]
+        ax.set_xticklabels(labels, fontsize=9 if len(apps) <= 4 else 7.5)
         ax.set_title(title, fontsize=10)
         ax.set_ylabel(ylabel, fontsize=9)
         ax.grid(axis="y", alpha=0.3)
@@ -674,7 +688,7 @@ def plot_bench(run: dict, path: str) -> bool:
         name = _cn(app) if zh else app
         if app in cl["compute"]:
             jobs = [e for e in ev if e.get("k") == "job"]
-            ops = list(dict.fromkeys(e.get("op") or "" for e in jobs))
+            ops = _ops(jobs)
             for i, op in enumerate(ops):
                 sel = [e for e in jobs if (e.get("op") or "") == op]
                 ax.scatter([e["T"] - t_ref for e in sel], [e["ms"] for e in sel], s=5, color=["#1f77b4", "#ff7f0e", "#9467bd"][i % 3],

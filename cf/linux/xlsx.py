@@ -18,7 +18,8 @@ from .analyze import per_process_rows, squeeze_app_rows, summarize
 APP_CN = {"wechat": "微信", "qq": "QQ", "dingtalk": "钉钉", "wps": "WPS", "firefox": "Firefox", "wemeet": "腾讯会议",
           "baidunetdisk": "百度网盘", "xunlei": "迅雷", "iqiyi": "爱奇艺", "bilibili": "哔哩哔哩", "netease_music": "网易云音乐",
           "zwcad": "中望CAD", "shimo": "石墨文档", "douyin": "抖音", "chrome": "Chrome", "feishu": "飞书", "wecom": "企业微信",
-          "sevenzip": "7-Zip", "z3": "Z3 求解器",
+          "sevenzip": "7-Zip", "z3": "Z3 求解器", "openssl": "OpenSSL", "llama": "大模型推理", "tesseract": "文字识别",
+          "ffmpeg": "视频转码",
           "bench_numeric": "科学计算", "bench_compress": "压缩解压", "bench_download": "下载"}
 
 SUMMARY_KEYS = [("policy", "策略"), ("fg_pss_avg_mb", "前台 PSS 均值 (MB)"), ("bg_pss_quiet_avg_mb", "后台驻留 PSS 均值 (MB)"),
