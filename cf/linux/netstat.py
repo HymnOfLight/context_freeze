@@ -235,6 +235,8 @@ def summarize(recs: list[dict]) -> dict:
 def main(argv=None) -> int:
     import argparse
     import json
+    import os
+    import shutil
     import sys
 
     from . import apps as A
@@ -245,6 +247,10 @@ def main(argv=None) -> int:
     ap.add_argument("--apps", nargs="+", help="default: the config's classes.download apps that are real apps")
     ap.add_argument("--watch", type=float, default=5.0, metavar="S", help="seconds to observe (default 5)")
     ap.add_argument("--min-kbps", type=float, default=0.0, help="exit 1 when an app receives less than this (KB/s)")
+    ap.add_argument("--minutes", type=float, default=0.0, metavar="M",
+                    help="also say how much these apps would write in M minutes at the speed seen, against the free "
+                         "disk space; exit 3 when it does not fit")
+    ap.add_argument("--reserve-gb", type=float, default=5.0, help="free space to keep (with --minutes; default 5)")
     args = ap.parse_args(argv)
     cfg = json.load(open(args.config))
     cat = A.with_overrides(cfg.get("app_overrides"), cfg.get("placeholder_apps"))
@@ -256,6 +262,7 @@ def main(argv=None) -> int:
         return 0
     probe = cfg.get("net_probe") or {}
     low = []
+    seen: dict[str, float] = {}
     try:
         dev.net_start(ids, every_s=1.0, loopback=bool(probe.get("loopback")), by=probe.get("by", "auto"), strays=True)
         time.sleep(max(2.5, args.watch))
@@ -265,6 +272,7 @@ def main(argv=None) -> int:
             r = summarize(dev.bench_read(a))
             pids = dev.pids(a) or dev.stray_pids(a)
             kbps = (r["mbps"] or 0) * 1024
+            seen[a] = r["mbps"] or 0.0
             print(f"{a:16s} {'yes' if pids else 'NO':8s} {r['sockets']:7d} {r['mbps'] if r['mbps'] is not None else 0:8.3f} "
                   f"{r['rtt_ms'] if r['rtt_ms'] is not None else float('nan'):8.1f}")
             if kbps < args.min_kbps:
@@ -278,7 +286,33 @@ def main(argv=None) -> int:
     for a, why in low:
         print(f"!! {a}: {why} - start a download of a big file in it (and leave it running) before the experiment",
               file=sys.stderr)
-    return 1 if low else 0
+    if low:
+        return 1
+    if args.minutes > 0:
+        need, line = disk_budget(seen, args.minutes, {a: cat[a].cmd for a in ids})
+        free = shutil.disk_usage(os.path.expanduser("~")).free / 2 ** 30
+        print(f"at these speeds, in the {args.minutes:.0f} min of the run: {line}; {free:.0f} GB free in {os.path.expanduser('~')}")
+        if need > free - args.reserve_gb:
+            print(f"!! that is {need:.0f} GB and does not fit ({free:.0f} GB free, {args.reserve_gb:g} GB kept in reserve): lower "
+                  f"the speed limit in the apps, free some space, or run fewer rounds", file=sys.stderr)
+            return 3
+    return 0
+
+
+def disk_budget(mbps: dict[str, float], minutes: float, cmds: Optional[dict[str, str]] = None) -> tuple[float, str]:
+    """(GB the downloads need on disk, a line saying so per app).  An app that re-uses one file
+    (cf.linux.browser_dl deletes what it finished) needs that file's size, not rate x time."""
+    from .browser_dl import FILE_GB
+    need, parts = 0.0, []
+    for a, v in mbps.items():
+        if "cf.linux.browser_dl" in ((cmds or {}).get(a) or ""):
+            need += FILE_GB
+            parts.append(f"{a} re-uses one file ({FILE_GB:g} GB)")
+        else:
+            gb = v * 60.0 * minutes / 1024.0
+            need += gb
+            parts.append(f"{a} writes about {gb:.1f} GB")
+    return need, ", ".join(parts)
 
 
 if __name__ == "__main__":
