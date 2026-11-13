@@ -30,6 +30,15 @@
 #   CONFIG=configs/ubuntu_arm64_compute.json OUT=results/arm64_compute scripts/ubuntu/run_classes.sh
 #   TOOLCHECK=0                                           # skip the test job of every compute app before the first cell
 #
+# All three classes at full size - 13 real apps: the 4 interactive ones, the 6 compute apps above and 3 download
+# apps: 百度网盘, 迅雷 (logged in, a download running in each, speed limited in the app) and browser_dl (a second
+# Firefox that keeps downloading a large file by itself, held at 2 MB/s) - 17 steps per round, ~15 min per cell.
+# Setting the three download apps up: manual §6.9 "下载型三个应用怎么配置".
+#   CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full scripts/ubuntu/run_classes.sh
+#   ROUNDS=6 SEEDS="1 2 3" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_night scripts/ubuntu/run_classes.sh   # ~6 h
+#   CF_BROWSER_DL_RATE_MBPS=4 / CF_BROWSER_DL_URL=https://...   # browser_dl: speed to hold (0 = unlimited), file to fetch
+#   DL_DISK_CHECK=0                                       # do not stop when the downloads would not fit on the disk
+#
 # Synthetic variant (no tools, accounts or download tasks needed: bundled numeric / zlib / downloader apps and a
 # local rate-limited source):
 #   CONFIG=configs/ubuntu_arm64_classes_synthetic.json OUT=results/arm64_classes_syn scripts/ubuntu/run_classes.sh
@@ -69,12 +78,15 @@ T=$((ROUNDS * PAT))
 echo "== run_classes $(date -Is): config=$CONFIG rounds=$ROUNDS (T=$T) dwell=${DWELL}s seeds=$SEEDS cells=$CELLS out=$OUT"
 
 has_app() { python3 -c "import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))['apps'] else 1)" "$CONFIG" "$1"; }
+has_downloads() { python3 -c "import json,sys; sys.exit(0 if (json.load(open(sys.argv[1])).get('classes') or {}).get('download') else 1)" "$CONFIG"; }
+MINUTES=$(( (T * (DWELL + 6) / 60 + 2) * $(echo $CELLS | wc -w) * $(echo $SEEDS | wc -w) ))
 SRV_PID=""
 old_swappiness=""
 cleanup() {
   [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null || true
   # the bench apps would otherwise keep computing / downloading after the experiment
   pkill -f "cf.linux.bench_app --app" 2>/dev/null || true
+  pkill -f "cf.linux.browser_dl --app" 2>/dev/null || true       # it stops its browser and removes the partial file
   [ -n "$old_swappiness" ] && sudo sysctl -q -w vm.swappiness="$old_swappiness" || true
 }
 
@@ -150,7 +162,7 @@ if [ "$DRY" != 1 ]; then
   fi
   # the latency probe of the download apps (inside each app's cgroup) connects to this host twice a second
   export CF_BENCH_RTT_HOST="$RTT_HOST"
-  if [ -n "$RTT_HOST" ] && { has_app baidunetdisk || has_app xunlei || has_app bench_download; }; then
+  if [ -n "$RTT_HOST" ] && has_downloads; then
     echo "  latency probe of the download apps: TCP connect to $RTT_HOST"; fi
   if [ "${ONBOARD:-0}" = 1 ]; then
     python3 -m cf.linux.blankdoc --reset >/dev/null
@@ -159,14 +171,33 @@ if [ "$DRY" != 1 ]; then
   # shellcheck disable=SC2086
   python3 run_linux.py "$CONFIG" --onboard-check $EXTRA | tee "$OUT/onboard.txt" \
     || echo "  note: some apps are not ready - ONBOARD=1 (or scripts/ubuntu/cf_onboard.sh) first"
+  # the browser that downloads by itself: start it now, so that it is downloading when the check below looks
+  if has_app browser_dl; then
+    if python3 -m cf.linux.browser_dl --check | sed 's/^/    browser_dl: /'; then
+      if ! pgrep -u "$USER" -f "cf.linux.browser_dl --app browser_dl" >/dev/null; then
+        python3 run_linux.py "$CONFIG" --launch browser_dl | sed 's/^/    /' || true
+        echo "    waiting 25 s for its download to start"; sleep 25
+      fi
+    elif echo " $EXTRA " | grep -q -- "--placeholders"; then
+      echo "    browser_dl cannot run right now (see above) - continuing because of --placeholders"
+    else
+      echo "!! browser_dl cannot run (see above; manual §6.9 '下载型三个应用怎么配置')" >&2
+      [ "${STRICT:-1}" = 1 ] && exit 2
+    fi
+  fi
   # real download apps: they must be downloading now - nothing else is measured for them
-  if ! python3 -m cf.linux.netstat "$CONFIG" --watch 6 --min-kbps "${DL_MIN_KBPS:-50}"; then
-    echo "   start a big download (enough for $(( (T * (DWELL + 6) / 60 + 2) * $(echo $CELLS | wc -w) * $(echo $SEEDS | wc -w) )) min) in each of these apps, leave it running and re-run;"
+  rc=0
+  python3 -m cf.linux.netstat "$CONFIG" --watch 6 --min-kbps "${DL_MIN_KBPS:-50}" --minutes "$MINUTES" || rc=$?
+  if [ "$rc" = 3 ]; then
+    echo "   (DL_DISK_CHECK=0 runs anyway)"
+    [ "${DL_DISK_CHECK:-1}" = 1 ] && [ "${STRICT:-1}" = 1 ] && exit 2
+  elif [ "$rc" != 0 ]; then
+    echo "   start a big download (enough for $MINUTES min) in each of these apps, leave it running and re-run;"
     echo "   DL_MIN_KBPS=0 or STRICT=0 runs anyway (their download columns will be empty or low)"
     [ "${STRICT:-1}" = 1 ] && exit 2
   fi
   free_gb=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc 0-9)
-  if has_app baidunetdisk || has_app xunlei || has_app bench_download; then
+  if has_downloads || has_app bench_download; then
     [ "${free_gb:-99}" -lt 10 ] && echo "!! only ${free_gb} GB free in $HOME - the downloads keep writing during the run"
   else
     [ "${free_gb:-99}" -lt 2 ] && echo "!! only ${free_gb} GB free in $HOME - the result files and the swap file need room"
