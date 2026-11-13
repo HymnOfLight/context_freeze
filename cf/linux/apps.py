@@ -47,6 +47,8 @@ class LinuxApp:
     match: str                         # regex: cmdline / exe / comm of the app's processes
     wm_class: str                      # regex on WM_CLASS (instance or class)
     name_rx: str = ""                  # regex on the window title (fallback)
+    not_under: str = ""                # regex: processes matching it, and their descendants, are another app's
+                                       # (a second instance of the same program that `match` cannot tell apart)
     notify_names: tuple[str, ...] = () # app_name values the app passes to org.freedesktop.Notifications
     package: str = ""                  # dpkg package (availability check: dpkg -s)
     alt_packages: tuple[str, ...] = () # other package names the same app ships under (UOS / 星火 builds)
@@ -154,10 +156,20 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
              install="星火应用商店 arm64 仓库 (netease.cloud.music.otohime: deepin 商店的官方 Electron 版 3.x) 或 music.163.com 的 x86_64 deb",
              note="必须登录 (手机号 + 验证码 / 扫码); 播放一个歌单后停在歌单页: 后台持续解码 + 网络, 比视频轻"),
     LinuxApp("firefox", "Firefox", "download",
-             cmd="firefox", match=r"(^|/)firefox(-esr)?(\s|$)|/usr/lib/firefox", wm_class=r"^(firefox|Navigator)",
-             package="firefox", exe="/usr/bin/firefox",
+             # class only ("firefox" / "Firefox" / "firefox-esr"): the instance name "Navigator" is shared by
+             # every Firefox window, also those of the browser_dl instance below
+             cmd="firefox", match=r"(^|/)firefox(-esr)?(\s|$)|/usr/lib/firefox", wm_class=r"^firefox",
+             not_under=r"--class cf-", package="firefox", exe="/usr/bin/firefox",
              install="apt (Mozilla APT 仓库 deb 版, 不要用 22.04 默认的 snap: snap 进程会被 snapd 放进自己的 systemd scope, 逃出我们的 cgroup)",
              note="deb 版: https://support.mozilla.org/kb/install-firefox-linux#w_install-firefox-deb-package-for-debian-based-distributions"),
+    LinuxApp("browser_dl", "浏览器下载 (Firefox)", "download",
+             cmd="python3 -m cf.linux.browser_dl --app browser_dl",
+             match=r"cf\.linux\.browser_dl\b.*--app browser_dl\b|--class cf-browser_dl\b", wm_class=r"^cf-browser_dl$",
+             arch=("any",), work={"kind": "none", "oracle": "title"},
+             install="Mozilla APT 仓库的 Firefox deb (不能用 snap 版): 手册 §6.9 '下载型三个应用怎么配置'",
+             note="第二个 Firefox (独立的 profile 和窗口类 cf-browser_dl, 与交互型的 firefox 是两个应用): 用浏览器自己的下载管理器"
+                  "反复下载同一个大文件 (默认 Ubuntu 镜像, 国内镜像站), 下完即删再下; 默认经本进程里的 CONNECT 中继限速到 2 MB/s "
+                  "(CF_BROWSER_DL_RATE_MBPS, 0 = 不限速); 不需要账号, 不需要手工开始下载 (cf/linux/browser_dl.py)"),
     LinuxApp("chrome", "Google Chrome", "download",
              cmd="google-chrome-stable", match=r"/opt/google/chrome/chrome", wm_class=r"google-chrome|Google-chrome",
              package="google-chrome-stable", exe="/opt/google/chrome/chrome", arch=("x86_64",),
@@ -626,6 +638,9 @@ def is_installed(a: LinuxApp, arch: Optional[str] = None, mobile=None) -> bool:
         import importlib.util
         if importlib.util.find_spec("Xlib") is None:
             return False
+        if "cf.linux.browser_dl" in a.cmd:     # drives a real Firefox (the deb build)
+            from .browser_dl import missing as no_browser
+            return not no_browser()
         m = re.search(r"cf\.linux\.bench_app\b.*--kind (\S+)", a.cmd)
         if m:                                  # kinds that drive a real tool (7z, z3, llama.cpp + a model ...) need it
             from .tool_jobs import missing

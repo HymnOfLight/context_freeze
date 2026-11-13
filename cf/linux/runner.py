@@ -326,7 +326,10 @@ class ThrottleExperiment(Experiment):
         run proceeds (the app may well be logged in), but work_state_ok / draft typing will be
         meaningless for it."""
         from .onboard import not_ready
-        real = [a for a in self.apps if self.kinds.get(a) in ("desktop", "mobile", "oss")]
+        from .onboard import self_managed
+        cat = getattr(self.dev, "cat", None) or {}
+        real = [a for a in self.apps if self.kinds.get(a) in ("desktop", "mobile", "oss")
+                and not (a in cat and self_managed(cat[a]))]
         if not real:
             return
         never, bad = not_ready(real)

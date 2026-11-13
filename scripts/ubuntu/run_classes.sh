@@ -30,6 +30,26 @@
 #   CONFIG=configs/ubuntu_arm64_compute.json OUT=results/arm64_compute scripts/ubuntu/run_classes.sh
 #   TOOLCHECK=0                                           # skip the test job of every compute app before the first cell
 #
+# All three classes at full size - 13 real apps: the 4 interactive ones, the 6 compute apps above and 3 download
+# apps: 百度网盘, 迅雷 (logged in, a download running in each, speed limited in the app) and browser_dl (a second
+# Firefox that keeps downloading a large file by itself, held at 2 MB/s) - 17 steps per round, ~15 min per cell.
+# Setting the three download apps up: manual §6.9 "下载型三个应用怎么配置".
+#   CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full scripts/ubuntu/run_classes.sh
+#   ROUNDS=6 SEEDS="1 2 3" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_night scripts/ubuntu/run_classes.sh   # ~6 h
+#   CF_BROWSER_DL_RATE_MBPS=4 / CF_BROWSER_DL_URL=https://...   # browser_dl: speed to hold (0 = unlimited), file to fetch
+#   DL_APPS="xunlei browser_dl"                           # download class reduced to these apps (of the config's three): here
+#                                                         # 迅雷 + the Firefox download; "xunlei", "browser_dl", or "none".
+#                                                         # The reduced config is written to $OUT/config.json (cf.linux.subset)
+#   DL_DISK_CHECK=0                                       # do not stop when the downloads would not fit on the disk
+#   DL_TRIM=1                                             # delete every file 百度网盘 / 迅雷 finish while the run goes on (cf.linux.dl_trim:
+#                                                         # only files it saw them write): the disk holds the files in progress,
+#                                                         # not rate x time.  Queue many files of 1 - 3 GB, one task at a time
+#                                                         # (python3 -m cf.linux.dl_files lists links)
+#   DL_TRIM=punch                                         # also free the written part of the files in progress (they read back
+#                                                         # as zeros: try it on one task first, an app may reject the finished file)
+#   DL_TRIM_ARGS="--dir /mnt/dl"                          # more flags for cf.linux.dl_trim (a download directory that is hidden
+#                                                         # or under a system path, --grace, --min-mb)
+#
 # Synthetic variant (no tools, accounts or download tasks needed: bundled numeric / zlib / downloader apps and a
 # local rate-limited source):
 #   CONFIG=configs/ubuntu_arm64_classes_synthetic.json OUT=results/arm64_classes_syn scripts/ubuntu/run_classes.sh
@@ -64,17 +84,29 @@ DRY="${DRY:-0}"
 mkdir -p "$OUT"
 LOG="$OUT/run_classes.log"
 exec > >(tee -a "$LOG") 2>&1
+if [ -n "${DL_APPS:-}" ]; then
+  # shellcheck disable=SC2086
+  CONFIG=$(python3 -m cf.linux.subset "$CONFIG" --download $DL_APPS --out "$OUT/config.json") || exit 2
+fi
 PAT=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['trace']['pattern']))" "$CONFIG")
 T=$((ROUNDS * PAT))
 echo "== run_classes $(date -Is): config=$CONFIG rounds=$ROUNDS (T=$T) dwell=${DWELL}s seeds=$SEEDS cells=$CELLS out=$OUT"
 
 has_app() { python3 -c "import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))['apps'] else 1)" "$CONFIG" "$1"; }
+has_downloads() { python3 -c "import json,sys; sys.exit(0 if (json.load(open(sys.argv[1])).get('classes') or {}).get('download') else 1)" "$CONFIG"; }
+MINUTES=$(( (T * (DWELL + 6) / 60 + 2) * $(echo $CELLS | wc -w) * $(echo $SEEDS | wc -w) ))
 SRV_PID=""
+TRIM_PID=""
+DL_TRIM="${DL_TRIM:-0}"
 old_swappiness=""
 cleanup() {
   [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null || true
+  [ -n "$TRIM_PID" ] && kill "$TRIM_PID" 2>/dev/null || true
+  # a run that was killed leaves its limits on the apps: 迅雷 held at 10 % of a core finds no resources
+  python3 run_linux.py "$CONFIG" --release >/dev/null 2>&1 || true
   # the bench apps would otherwise keep computing / downloading after the experiment
   pkill -f "cf.linux.bench_app --app" 2>/dev/null || true
+  pkill -f "cf.linux.browser_dl --app" 2>/dev/null || true       # it stops its browser and removes the partial file
   [ -n "$old_swappiness" ] && sudo sysctl -q -w vm.swappiness="$old_swappiness" || true
 }
 
@@ -150,7 +182,7 @@ if [ "$DRY" != 1 ]; then
   fi
   # the latency probe of the download apps (inside each app's cgroup) connects to this host twice a second
   export CF_BENCH_RTT_HOST="$RTT_HOST"
-  if [ -n "$RTT_HOST" ] && { has_app baidunetdisk || has_app xunlei || has_app bench_download; }; then
+  if [ -n "$RTT_HOST" ] && has_downloads; then
     echo "  latency probe of the download apps: TCP connect to $RTT_HOST"; fi
   if [ "${ONBOARD:-0}" = 1 ]; then
     python3 -m cf.linux.blankdoc --reset >/dev/null
@@ -159,14 +191,47 @@ if [ "$DRY" != 1 ]; then
   # shellcheck disable=SC2086
   python3 run_linux.py "$CONFIG" --onboard-check $EXTRA | tee "$OUT/onboard.txt" \
     || echo "  note: some apps are not ready - ONBOARD=1 (or scripts/ubuntu/cf_onboard.sh) first"
+  # the browser that downloads by itself: start it now, so that it is downloading when the check below looks
+  if has_app browser_dl; then
+    if python3 -m cf.linux.browser_dl --check | sed 's/^/    browser_dl: /'; then
+      if ! pgrep -u "$USER" -f "cf.linux.browser_dl --app browser_dl" >/dev/null; then
+        python3 run_linux.py "$CONFIG" --launch browser_dl | sed 's/^/    /' || true
+        echo "    waiting 25 s for its download to start"; sleep 25
+      fi
+    elif echo " $EXTRA " | grep -q -- "--placeholders"; then
+      echo "    browser_dl cannot run right now (see above) - continuing because of --placeholders"
+    else
+      echo "!! browser_dl cannot run (see above; manual §6.9 '下载型三个应用怎么配置')" >&2
+      [ "${STRICT:-1}" = 1 ] && exit 2
+    fi
+  fi
   # real download apps: they must be downloading now - nothing else is measured for them
-  if ! python3 -m cf.linux.netstat "$CONFIG" --watch 6 --min-kbps "${DL_MIN_KBPS:-50}"; then
-    echo "   start a big download (enough for $(( (T * (DWELL + 6) / 60 + 2) * $(echo $CELLS | wc -w) * $(echo $SEEDS | wc -w) )) min) in each of these apps, leave it running and re-run;"
+  rc=0
+  if [ "$DL_TRIM" != 0 ]; then
+    # finished files are deleted as the run goes on: what the disk has to hold is the files in progress
+    python3 -m cf.linux.netstat "$CONFIG" --watch 6 --min-kbps "${DL_MIN_KBPS:-50}" || rc=$?
+  else
+    python3 -m cf.linux.netstat "$CONFIG" --watch 6 --min-kbps "${DL_MIN_KBPS:-50}" --minutes "$MINUTES" || rc=$?
+  fi
+  if [ "$rc" = 3 ]; then
+    echo "   (DL_TRIM=1 deletes the files the download apps finish during the run; DL_DISK_CHECK=0 runs anyway)"
+    [ "${DL_DISK_CHECK:-1}" = 1 ] && [ "${STRICT:-1}" = 1 ] && exit 2
+  elif [ "$rc" != 0 ]; then
+    echo "   start a big download (enough for $MINUTES min) in each of these apps, leave it running and re-run;"
     echo "   DL_MIN_KBPS=0 or STRICT=0 runs anyway (their download columns will be empty or low)"
     [ "${STRICT:-1}" = 1 ] && exit 2
   fi
+  if [ "$DL_TRIM" != 0 ] && has_downloads; then
+    trim_flags="${DL_TRIM_ARGS:-}"; [ "$DL_TRIM" = punch ] && trim_flags="--punch $trim_flags"
+    echo "  files the download apps are writing now (DL_TRIM=$DL_TRIM: finished ones are deleted during the run$( [ "$DL_TRIM" = punch ] && echo ', the written part of the others is freed'); log: $OUT/dl_trim.log):"
+    # shellcheck disable=SC2086
+    python3 -m cf.linux.dl_trim "$CONFIG" --list $trim_flags | sed 's/^/    /' || true
+    # shellcheck disable=SC2086
+    python3 -m cf.linux.dl_trim "$CONFIG" $trim_flags >> "$OUT/dl_trim.log" 2>&1 &
+    TRIM_PID=$!
+  fi
   free_gb=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc 0-9)
-  if has_app baidunetdisk || has_app xunlei || has_app bench_download; then
+  if has_downloads || has_app bench_download; then
     [ "${free_gb:-99}" -lt 10 ] && echo "!! only ${free_gb} GB free in $HOME - the downloads keep writing during the run"
   else
     [ "${free_gb:-99}" -lt 2 ] && echo "!! only ${free_gb} GB free in $HOME - the result files and the swap file need room"

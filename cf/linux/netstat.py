@@ -27,7 +27,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 _HEAD = re.compile(r"^\s*(?:tcp\s+)?([A-Z][A-Z0-9-]*)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)")
 _PID = re.compile(r"pid=(\d+)")
@@ -201,6 +201,10 @@ class SockSampler(threading.Thread):
         with self._lock:
             return self._out.pop(app, [])
 
+    def peers(self, app: str) -> list[str]:
+        """The remote ends ("addr:port") of the app's sockets at the last look."""
+        return [s["peer"] for s in (self._prev.get(app) or {}).values()]
+
     # -- thread
     def run(self) -> None:
         due = time.monotonic()
@@ -235,6 +239,8 @@ def summarize(recs: list[dict]) -> dict:
 def main(argv=None) -> int:
     import argparse
     import json
+    import os
+    import shutil
     import sys
 
     from . import apps as A
@@ -245,6 +251,10 @@ def main(argv=None) -> int:
     ap.add_argument("--apps", nargs="+", help="default: the config's classes.download apps that are real apps")
     ap.add_argument("--watch", type=float, default=5.0, metavar="S", help="seconds to observe (default 5)")
     ap.add_argument("--min-kbps", type=float, default=0.0, help="exit 1 when an app receives less than this (KB/s)")
+    ap.add_argument("--minutes", type=float, default=0.0, metavar="M",
+                    help="also say how much these apps would write in M minutes at the speed seen, against the free "
+                         "disk space; exit 3 when it does not fit")
+    ap.add_argument("--reserve-gb", type=float, default=5.0, help="free space to keep (with --minutes; default 5)")
     args = ap.parse_args(argv)
     cfg = json.load(open(args.config))
     cat = A.with_overrides(cfg.get("app_overrides"), cfg.get("placeholder_apps"))
@@ -256,6 +266,7 @@ def main(argv=None) -> int:
         return 0
     probe = cfg.get("net_probe") or {}
     low = []
+    seen: dict[str, float] = {}
     try:
         dev.net_start(ids, every_s=1.0, loopback=bool(probe.get("loopback")), by=probe.get("by", "auto"), strays=True)
         time.sleep(max(2.5, args.watch))
@@ -265,11 +276,24 @@ def main(argv=None) -> int:
             r = summarize(dev.bench_read(a))
             pids = dev.pids(a) or dev.stray_pids(a)
             kbps = (r["mbps"] or 0) * 1024
+            seen[a] = r["mbps"] or 0.0
             print(f"{a:16s} {'yes' if pids else 'NO':8s} {r['sockets']:7d} {r['mbps'] if r['mbps'] is not None else 0:8.3f} "
                   f"{r['rtt_ms'] if r['rtt_ms'] is not None else float('nan'):8.1f}")
             if kbps < args.min_kbps:
                 low.append((a, "not running" if not pids else
                             "no TCP sockets seen for it" if not r["sockets"] else f"{kbps:.0f} KB/s"))
+        hosts = [h for h in [(os.environ.get("CF_BENCH_RTT_HOST", probe.get("probe_host") or "") or "").rsplit(":", 1)[0],
+                             "mirrors.tuna.tsinghua.edu.cn"] if h]
+        note = proxy_note(hosts, [p for a in ids for p in dev.net.peers(a)])
+        if note:
+            print(f"!! a proxy in fake-IP (TUN / enhanced) mode sits between this machine and the network: {note}.\n"
+                  f"   The download and latency figures then describe the proxy, and 迅雷 may never find its sources. Switch "
+                  f"the proxy's TUN mode off on the host,\n   or put the VM on a bridged network (manual §2.5).", file=sys.stderr)
+        for a in ids:
+            why = limits_now(dev.tree, a)
+            if why:
+                print(f"   {a} is limited right now ({why}): expected while an experiment runs; otherwise a run that was "
+                      f"killed left it - lift with: python3 run_linux.py {args.config} --release")
         if dev.net.error:
             print(f"!! {dev.net.error}", file=sys.stderr)
             return 2
@@ -278,7 +302,91 @@ def main(argv=None) -> int:
     for a, why in low:
         print(f"!! {a}: {why} - start a download of a big file in it (and leave it running) before the experiment",
               file=sys.stderr)
-    return 1 if low else 0
+    if low:
+        return 1
+    if args.minutes > 0:
+        need, line = disk_budget(seen, args.minutes, {a: cat[a].cmd for a in ids})
+        free = shutil.disk_usage(os.path.expanduser("~")).free / 2 ** 30
+        print(f"at these speeds, in the {args.minutes:.0f} min of the run: {line}; {free:.0f} GB free in {os.path.expanduser('~')}")
+        if need > free - args.reserve_gb:
+            print(f"!! that is {need:.0f} GB and does not fit ({free:.0f} GB free, {args.reserve_gb:g} GB kept in reserve): lower "
+                  f"the speed limit in the apps, free some space, run fewer rounds, or let the finished files be deleted during the run "
+                  f"(DL_TRIM=1, cf.linux.dl_trim)", file=sys.stderr)
+            return 3
+    return 0
+
+
+def is_fake_ip(addr: str) -> bool:
+    """198.18.0.0/15: reserved for benchmarking, never a real server - and what proxies in fake-IP
+    mode (Clash / Mihomo / Surge / sing-box with TUN or "enhanced mode") answer DNS queries with.
+    `addr` may carry a port ("198.18.0.151:443")."""
+    import ipaddress
+    host = addr.strip()
+    if host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    try:
+        return ipaddress.ip_address(host.strip("[]")) in ipaddress.ip_network("198.18.0.0/15")
+    except ValueError:
+        return False
+
+
+def proxy_note(hosts: Sequence[str], peers: Sequence[str] = (), resolve: Optional[Callable] = None) -> str:
+    """"" or what gives a transparent proxy away: a host name that resolves into the fake-IP range,
+    or sockets of the apps that end there.  With such a proxy between this machine and the network
+    the download figures describe the proxy, the latency probe times the proxy's own handshake,
+    and clients with protocols of their own (迅雷) may never find their sources."""
+    import socket
+    if resolve is None:
+        def resolve(h):
+            return [ai[4][0] for ai in socket.getaddrinfo(h, None, socket.AF_INET, socket.SOCK_STREAM)]
+    seen = []
+    for h in hosts:
+        try:
+            hit = next((a for a in resolve(h) if is_fake_ip(a)), None)
+        except OSError:
+            hit = None
+        if hit:
+            seen.append(f"{h} resolves to {hit}")
+    n = sum(1 for p in peers if is_fake_ip(p))
+    if n:
+        seen.append(f"{n} of the apps' {len(peers)} connections end in 198.18.x.x")
+    return "; ".join(seen)
+
+
+def limits_now(tree, app: str) -> str:
+    """The limits that are on the app's cgroup at this moment ("" = none): what makes a download
+    crawl or never find its source when nobody is running an experiment."""
+    if not tree.exists(app):
+        return ""
+    out = []
+    cpu = tree.read(app, "cpu.max").split()
+    if cpu and cpu[0] != "max":
+        try:
+            out.append(f"cpu.max {100.0 * int(cpu[0]) / int(cpu[1]):.0f} % of a core")
+        except (ValueError, IndexError, ZeroDivisionError):
+            out.append(f"cpu.max {' '.join(cpu)}")
+    high = tree.read(app, "memory.high").strip()
+    if high and high != "max":
+        out.append(f"memory.high {int(high) / 2 ** 20:.0f} MB" if high.isdigit() else f"memory.high {high}")
+    if tree.read(app, "cgroup.freeze").strip() == "1":
+        out.append("frozen")
+    return ", ".join(out)
+
+
+def disk_budget(mbps: dict[str, float], minutes: float, cmds: Optional[dict[str, str]] = None) -> tuple[float, str]:
+    """(GB the downloads need on disk, a line saying so per app).  An app that re-uses one file
+    (cf.linux.browser_dl deletes what it finished) needs that file's size, not rate x time."""
+    from .browser_dl import FILE_GB
+    need, parts = 0.0, []
+    for a, v in mbps.items():
+        if "cf.linux.browser_dl" in ((cmds or {}).get(a) or ""):
+            need += FILE_GB
+            parts.append(f"{a} re-uses one file ({FILE_GB:g} GB)")
+        else:
+            gb = v * 60.0 * minutes / 1024.0
+            need += gb
+            parts.append(f"{a} writes about {gb:.1f} GB")
+    return need, ", ".join(parts)
 
 
 if __name__ == "__main__":

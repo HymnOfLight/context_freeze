@@ -177,7 +177,13 @@ class LinuxDesktop:
         if a.is_mobile:
             hits = self.mobile.host_pids(a.package) if self.mobile is not None else []
         else:
-            hits = PR.find_pids(a.match)
+            hits = [p for p in PR.find_pids(a.match) if p not in inside]
+            if hits and a.not_under:
+                theirs = set(PR.children_of(PR.find_pids(a.not_under)))
+                hits = [p for p in hits if p not in theirs]
+            # a process that sits in another app's cgroup is that app's (two apps can be the same
+            # program: the firefox of the interactive class and the one browser_dl drives)
+            hits = [p for p in hits if self.tree.leaf_of(p) in (None, id_) or self.tree.leaf_of(p) not in self.cat]
         return [p for p in hits if p not in inside and p != os.getpid()]
 
     def mem_peak_kb(self, id_: str) -> Optional[int]:

@@ -903,7 +903,10 @@ def test_bench_app_window_drives_the_real_tool(tmp_path, kind, ops, need):
     log, state, work = str(tmp_path / "b.jsonl"), str(tmp_path / "b.json"), str(tmp_path / "work")
     proc = None
     try:
-        time.sleep(1.0)
+        sock, t_up = "/tmp/.X11-unix/X" + disp[1:], time.time() + 15
+        while not os.path.exists(sock) and time.time() < t_up:
+            time.sleep(0.1)
+        time.sleep(0.3)
         proc = subprocess.Popen([sys.executable, "-m", "cf.linux.bench_app", "--app", "t_" + kind, "--kind", kind,
                                  "--corpus-mb", "1", "--log", log, "--state-file", state, "--work-dir", work], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -927,6 +930,7 @@ def test_bench_app_window_drives_the_real_tool(tmp_path, kind, ops, need):
         if proc and proc.poll() is None:
             proc.kill()
         xvfb.terminate()
+        xvfb.wait(10)                          # the next case uses the same display number
 
 
 def test_operations_are_listed_in_a_fixed_order():
