@@ -245,7 +245,8 @@ ss -tn | awk 'NR>1{print $5}' | grep -c '^198\.1[89]\.'      # 本机有多少�
 
 **改成桥接 (或换了网络模式) 之后连网页都打不开**。桥接后虚拟机在网络看来是一台**新设备** (自己的网卡地址, 自己向路由器要 IP),
 Mac 上已经做过的登录 / 认证不算它的; 同时共享网络时那个 "宿主 = 192.168.64.1" 的地址不存在了。一条命令看是卡在哪一跳
-(不需要配置文件, 也不走任何代理设置; 没网拉不了新代码时用下面表里右列的命令手工查):
+(不需要配置文件, 不走任何代理设置, 也不需要 `ping` —— 最小安装的 Ubuntu 没有它; 没网拉不了新代码时用表里括号中的命令手工查,
+其中 `up() { timeout 3 bash -c "</dev/tcp/$1/$2" 2>/dev/null && echo 通 || echo 不通; }` 是一个不依赖 ping 的 "这个地址这个端口连不连得上"):
 
 ```bash
 python3 -m cf.linux.netcheck         # 地址 -> 网关 -> 网关之外 -> 登录页 -> 域名解析 -> 代理, 停在第一处不通的地方并给出处理办法; 退出码 0 = 通
@@ -253,16 +254,20 @@ python3 -m cf.linux.netcheck         # 地址 -> 网关 -> 网关之外 -> 登�
 
 | `netcheck` 的结论 | 含义 | 处理 (括号里是手工核对的命令) |
 |---|---|---|
-| `no IPv4 address` | 没拿到地址 (`ip -4 addr` 里网卡没有 `inet`): 路由器没理它的 DHCP 请求 | UTM 的 Bridged Interface 别用 Automatic, 选 Mac 正在上网的那块 (Wi-Fi 一般是 `en0`); 校园网 / 公司网 (802.1X、一人一设备、AP 隔离) 根本不接受这第二台设备 → **改回 Shared Network** |
-| `the gateway … does not answer` | 有地址但网关不通 (`ping -c 2 $(ip route \| awk '/default/{print $3}')`): 地址是上一个网络留下的, 或桥到了一块没上网的网卡 | 重启虚拟机 / `sudo nmcli device reapply enp0s1`; 核对 UTM 里选的网卡 |
-| `the gateway answers but nothing beyond it does` | 网关通, 外面不通 (`ping -c 2 223.5.5.5`): 网络不放行这台没登记 / 没登录的设备 | 能登记就登记它的网卡地址 (`ip link show enp0s1` 的 `link/ether`), 不能就改回 Shared Network |
+| `no IPv4 address` | 没拿到地址 (`ip -4 addr show scope global` 什么都不输出; `nmcli device status` 里网卡一直是 "连接中 (正在获取 IP 配置)"): 路由器没理它的 DHCP 请求。后面几项 (域名解析不出、curl 返回 000) 都只是它的结果 | UTM 的 Bridged Interface 别用 Automatic, 选 Mac 正在上网的那块 (Wi-Fi 一般是 `en0`); 校园网 / 公司网 (802.1X、一人一设备、AP 隔离) 根本不接受这第二台设备 → **改回 Shared Network** |
+| `no IPv4 address and no link on …` | 网卡连 "网线" 都没有 (`cat /sys/class/net/enp0s1/carrier` 是 0): UTM 里网卡被删了, 或桥接的那块 Mac 网卡当前没启用 | UTM 里重选 Bridged Interface 后重新开机; `sudo nmcli device connect enp0s1` |
+| `the gateway … does not answer` | 有地址但网关不通 (`ip neigh show $(ip route \| awk '/default/{print $3}')` 是 `FAILED` / 空): 地址是上一个网络留下的, 或桥到了一块没上网的网卡 | 重启虚拟机 / `sudo nmcli device reapply enp0s1`; 核对 UTM 里选的网卡 |
+| `the gateway answers but nothing beyond it does` | 网关通, 外面不通 (`up 223.5.5.5 443` 不通): 网络不放行这台没登记 / 没登录的设备 | 能登记就登记它的网卡地址 (`ip link show enp0s1` 的 `link/ether`), 不能就改回 Shared Network |
 | `the network answers with its own page …` | 打开任何 http 网页都被换成登录页 (校园网 / 酒店网的 Web 认证) | 在虚拟机的 Firefox 里打开 `http://connect.rom.miui.com/generate_204` 登录一次; 账号只许一台设备在线的改回 Shared Network |
-| `addresses are reachable but names do not resolve` | `ping 223.5.5.5` 通, `getent hosts www.baidu.com` 没结果: DNS 还指着旧网络 (`resolvectl status`) | `sudo resolvectl dns enp0s1 223.5.5.5` (到下次重启为止); 手写过 DNS 的改 netplan / NetworkManager |
-| `proxy 192.168.64.1:7897 does not answer, and it is set in …` | **网络本身是通的**, 但本节开头写进 `/etc/environment`、`/etc/apt/apt.conf.d/95proxy` (或 GNOME "网络代理") 的代理地址是共享网络下的宿主, 桥接后没有这台机器: 读这些设置的程序 (apt、curl、git、pip、用 "系统代理" 的浏览器) 全都连不上 | 注释掉 `/etc/environment` 里那几行后重新登录, `sudo rm /etc/apt/apt.conf.d/95proxy`, `gsettings set org.gnome.system.proxy mode none`, 当前终端 `unset http_proxy https_proxy all_proxy`; 还想走代理就把地址换成 Mac 在局域网里的 IP (Clash 开 Allow LAN) |
+| `addresses are reachable but names do not resolve` | `up 223.5.5.5 443` 通, `getent hosts www.baidu.com` 没结果: DNS 还指着旧网络 (`resolvectl status`) | `sudo resolvectl dns enp0s1 223.5.5.5` (到下次重启为止); 手写过 DNS 的改 netplan / NetworkManager |
+| `proxy 192.168.64.1:7897 does not answer, and it is set in …` | **网络本身是通的**, 但本节开头写进 `/etc/environment`、`/etc/apt/apt.conf.d/95proxy` (或 GNOME "网络代理") 的代理地址是共享网络下的宿主, 桥接后没有这台机器: 读这些设置的程序 (apt、curl、git、pip、用 "系统代理" 的浏览器) 全都连不上 | 注释掉 `/etc/environment` 里那几行后重新登录, `sudo rm /etc/apt/apt.conf.d/95proxy`, `gsettings set org.gnome.system.proxy mode none`, 当前终端 `unset {http,https,ftp,all}_proxy {HTTP,HTTPS,FTP,ALL}_PROXY`; 还想走代理就把地址换成 Mac 在局域网里的 IP (Clash 开 Allow LAN) |
+| `proxy 192.168.64.1:7897 … is the host on UTM's shared network; this machine is not on that network now` (警告, 跟在上面某一条后面) | 路还没通到能检查代理的地方, 但已经能看出: 网络修好以后这个代理设置在桥接下也是死的 | 同上一行; 改回 Shared Network 则它重新可用, 不用动 |
 | `… resolve into 198.18.x.x` (警告) | 还在宿主的 fake-IP 代理后面 (上一段) | 关 TUN 模式 |
 
 桥接后**不经过 Mac 的代理**, 所以 GitHub 之类原来靠代理才快的站点会变慢或打不开 —— 这是桥接的本意, 不是故障; 需要时按上表 `proxy …` 那一行把代理地址换成 Mac 的局域网 IP。
-实验本身不需要桥接: 回到 Shared Network、在 Mac 上关掉代理的 TUN 模式 (上面第一种办法) 是最省事的组合。
+实验本身不需要桥接: 回到 Shared Network、在 Mac 上关掉代理的 TUN 模式 (上面第一种办法) 是最省事的组合 —— 这时 `/etc/environment` 里的
+`192.168.64.1:7897` 照旧可用 (apt / git 继续走它), `netcheck` 只剩一条 "proxy … is set" 的提示: 从这个终端启动的应用会继承这些变量,
+所以跑下载类实验的那个终端里先 `unset {http,https,ftp,all}_proxy {HTTP,HTTPS,FTP,ALL}_PROXY`。
 
 ## 3. 每次开机: cgroup 委托 + zram
 
@@ -1245,7 +1250,8 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 盘上占用归零、客户端接着写; 镜像目录页解析、按大小筛选去重、不够时加 ?n=K 重复、只留真给明文 http 的;
                                                    # 下载型缩到一个应用后的配置 (访问顺序相邻重复合并) 和 DL_APPS 的 DRY 运行; 应用身上残留的限制能被指出来;
                                                    # 网络自检 (tests/test_linux_netcheck.py): ip 输出解析、各处代理设置的收集、每一跳不通时只报第一处、
-                                                   # 登录页、代理地址失效 / 仍有效 / fake-IP 的区分 (探测全部注入, 不碰真实网络);
+                                                   # 登录页、代理地址失效 / 仍有效 / fake-IP 的区分、没有 ping 的机器、没地址时区分 "没网线" 和 "DHCP 没人理"
+                                                   # (探测全部注入, 不碰真实网络);
                                                    # 域名解析到 198.18.x.x / 应用的连接落在 198.18.x.x 时认出中间的 fake-IP 代理
                                                    # 冷启动后立刻收养跑出 cgroup 的进程 / "m_fg 是冷启动后量的" 与 "内存限制没有生效" 的提示 / 图只画有数据的类
                                                    # 出图字体 (tests/test_linux_plot_fonts.py): 字全的字体优先 / 只有汉字的字体配 DejaVu 逐字回退 /
