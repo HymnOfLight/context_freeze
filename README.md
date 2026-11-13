@@ -62,6 +62,7 @@ CONFIG=configs/ubuntu_arm64.json ONBOARD=1 PRESET=night WORK=1 scripts/ubuntu/ru
 scripts/ubuntu/run_classes.sh                                            # 三类应用 (手册 §6.9, 约 10 分钟一格), 全部用真实应用: 交互 (微信 / QQ / WPS / Firefox) 的呼叫 / 切换响应与顺滑度, 计算型 (7-Zip 压缩解压 / Z3 约束求解) 前台 vs 后台的任务时延, 下载型 (百度网盘 / 迅雷) 的速度与网络时延; none / mild / squeeze 三格. 先 sudo apt install -y p7zip-full z3, 并在两个下载应用里各开一个大文件下载
 scripts/ubuntu/install_compute_apps.sh --llama --check                   # 更多真实的计算应用: OpenSSL 加解密 / llama.cpp 本地大模型 / Tesseract 文字识别 / FFmpeg 转码 (+ 7-Zip / Z3), 装完每个任务试做一遍
 CONFIG=configs/ubuntu_arm64_compute.json OUT=results/arm64_compute scripts/ubuntu/run_classes.sh   # 只做 呼叫响应 + 计算型 (六个真实程序, 不含下载型, 约 10 分钟一格; 过夜加 ROUNDS=8 SEEDS="1 2 3")
+CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full scripts/ubuntu/run_classes.sh         # 三类全量, 13 个真实应用: 交互 4 + 计算 6 + 下载 3 (百度网盘 / 迅雷 / 浏览器下载 browser_dl: 第二个 Firefox 自己反复下一个大文件, 限速 2 MB/s, 不用账号); 约 15 分钟一格, 过夜加 ROUNDS=6 SEEDS="1 2 3" (约 6 小时). 三个下载应用怎么配置、磁盘怎么算: 手册 §6.9
 CONFIG=configs/ubuntu_arm64_classes_synthetic.json scripts/ubuntu/run_classes.sh   # 同上的合成版: 计算 / 下载换成自带基准程序 + 本机限速源, 不需要工具 / 账号 / 下载任务
 scripts/ubuntu/run_squeeze.sh                                            # 实验性 (手册 §6.8): office 5 应用、3 格, 按进程统计前/后台 PSS, 激进挤压 (memory.reclaim 整个 cgroup, 10 % 核带宽), 静默期每分钟换出量
 NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40  # 场景 x 策略 x η x 变体 (CPU 档位 / cpuset / swap 上限 / memory.max 对照); FULL=1 全量; PLACEHOLDERS=1 没装的用占位顶替

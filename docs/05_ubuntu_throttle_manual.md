@@ -788,6 +788,66 @@ ROUNDS=8 SEEDS="1 2 3" CONFIG=configs/ubuntu_arm64_compute.json OUT=results/arm6
 - **只想跑其中几个**: 从配置的 `apps`、`classes.compute`、`trace.pattern` 三处删掉不要的 id (没装工具的应用脚本会点名; `STRICT=0` 时 runner 自己把它丢掉继续跑)。
 - 任务的输入都是启动时在 `/tmp/cf_bench_<id>.d/` 里现做并保留的: 32 MB 的待加密文件 (由 7-Zip 那批真实文件拼成)、RSA 密钥、画好的那页文字、一段 Mandelbrot 缩放的视频 (每帧都有细节和运动, 不用下载素材)。同一台机器的各格用的是同一份输入; 换机器绝对时间不可比。
 
+**三类全量: 响应 + 计算 + 下载, 13 个真实应用** (`configs/ubuntu_arm64_full.json`): 交互 4 个 (微信 / QQ / WPS / Firefox) + 上面的 6 个计算应用 + 3 个下载应用 —— **百度网盘**、**迅雷** (登录后各带一个下载任务) 和 **`browser_dl` 浏览器下载** (第二个 Firefox, 自己开始、自己续上下载, 不用账号)。三格的限制同上; 每轮 17 步 `微信 → 7-Zip → WPS → 迅雷 → Firefox → Z3 → QQ → 百度网盘 → 微信 → OpenSSL → WPS → 大模型 → Firefox → 浏览器下载 → QQ → 文字识别 → 视频转码`, 默认 2 轮, **约 15 分钟一格**。
+
+```bash
+CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full scripts/ubuntu/run_classes.sh                                    # 三格, 约 45 分钟
+ROUNDS=6 SEEDS="1 2 3" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_night scripts/ubuntu/run_classes.sh        # 过夜: 9 格 x 约 40 分钟 = 约 6 小时
+python3 -m cf.linux.netstat configs/ubuntu_arm64_full.json --watch 10 --minutes 360    # 三个下载应用此刻的速度, 以及按这个速度 6 小时要写多少盘
+```
+
+**下载型三个应用怎么配置** (一次配好, 以后每次跑之前只要确认任务还在下):
+
+*磁盘先算账.* 百度网盘和迅雷是真的把文件写到盘上: **要写的量 (GB) ≈ 速度 (MB/s) × 小时数 × 3.5**。6 小时: 0.5 MB/s → 约 11 GB, 1 MB/s → 约 21 GB, 2 MB/s → 约 42 GB。浏览器下载只占一个文件 (4.8 GB, 下完即删)。先 `df -h ~` 看剩多少, 再决定两个应用各限速多少; 60 GB 的盘 (系统 + 应用占掉二十来 GB) 建议两个应用**各限到 0.5–1 MB/s**。任务量也按这个数准备: 实验期间任务下完了, 那个应用后面的格就没有数据 (报告里 "无流量的秒" 会很高)。脚本开跑前会看 6 秒三个应用的实际速度, 按本次运行的总时长算出要写多少, 放不下 (留 5 GB 余量) 就停下并说明 (`DL_DISK_CHECK=0` 跳过)。
+
+*启动方式.* 实验里的应用都要**用 runner 启动** (这样进程才在各自的 cgroup `/cf/<id>` 里), 不要点桌面图标:
+
+```bash
+python3 run_linux.py configs/ubuntu_arm64_full.json --launch baidunetdisk xunlei      # 启动到 /cf/baidunetdisk、/cf/xunlei 后退出; 然后在窗口里登录、建任务
+python3 run_linux.py configs/ubuntu_arm64_full.json --launch wechat qq wps firefox    # 交互应用同理 (登录, 用一两分钟)
+```
+
+1. **百度网盘** (`baidunetdisk`; arm64 是星火应用商店 / 统信商店的官方构建 `com.baidu.baidunetdisk`, §4.4):
+   - 登录: 手机百度网盘扫码 (或手机号 + 验证码)。
+   - 准备要下的文件: 网盘里要有总量够大的文件 (按上面的公式; 一个大文件或几个文件都行)。自己没有就把别人分享的大文件 "保存到我的网盘", 或者从别的电脑先传几个大文件上去。
+   - 设置 → 传输: 下载目录放在空间够的盘上 (默认在 `$HOME` 下); **同时下载任务数设为 1** (文件一个接一个下, 速度才平稳); 有 "下载限速" 一项就按上面算好的数填 (非会员本身被限在几百 KB/s 到 1 MB/s 左右, 没有这一项也可以不管)。
+   - 选中文件 → 下载, 停在 "传输列表 / 正在下载" 页, 窗口不要关也不要最小化到托盘。
+2. **迅雷** (`xunlei`; 星火应用商店的 `com.xunlei.download`, §4.4):
+   - 登录: 手机号 + 验证码或手机迅雷扫码 (不登录不能新建任务)。
+   - 设置里: **同时下载任务数 1**; **下载限速**按算好的数填 (各版本菜单名字略有不同, 在 "设置中心 → 下载设置 / 速度设置" 里找); 下载目录放在空间够的盘上。
+   - 新建任务, 粘贴 **HTTP(S) 链接** (不要用磁力 / BT: 那部分流量走 UDP, `下载速度` 一列量不到, 只会出现在 "写盘" 列)。可以直接用镜像站的系统镜像, 一次把几个链接都粘进去排队, 例如 (共约 12.7 GB, 1 MB/s 能下 3.5 小时; 不够就到 `https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/` 的各版本目录里再拷几个 `.iso` 的链接):
+     ```
+     https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/20.04/ubuntu-20.04.6-desktop-amd64.iso
+     https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.5-live-server-amd64.iso
+     https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/20.04/ubuntu-20.04.6-live-server-amd64.iso
+     https://mirrors.bfsu.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.5-desktop-amd64.iso
+     ```
+   - 停在任务列表页。
+3. **浏览器下载** (`browser_dl`, `cf/linux/browser_dl.py`) —— 不用登录, 不用手工开始, 只要求系统里的 Firefox 是 **deb 版**:
+   ```bash
+   readlink -f "$(command -v firefox)"          # 应是 /usr/lib/firefox/firefox; 指向 /snap/... 或 /usr/bin/snap 就是 snap 版
+   sudo scripts/ubuntu/install_cn_apps.sh --firefox     # 是 snap 版时: 换成 Mozilla APT 仓库的 deb (§0 第 4 步的同一套命令)
+   python3 -m cf.linux.browser_dl --check       # 三行: 用哪个 Firefox、哪个下载源答应了、限速多少
+   ```
+   它做的事: 用**独立的 profile** (`~/.local/share/context_freeze/browser_dl/profile`) 和**独立的窗口类** (`cf-browser_dl`) 再开一个 Firefox —— 和交互型的那个 `firefox` 是两个应用、两个 cgroup, 互不影响, 你自己的书签 / 登录状态不会被动到。窗口里是本机的一个说明页, 页面每 2 秒问一次 "有没有要下的文件", 有就让一个隐藏的 frame 去打开那个链接 —— 和你点一个下载链接完全一样, 文件由 **Firefox 自己的下载管理器**收、解密、写盘 (存到 `~/.local/share/context_freeze/browser_dl/downloads`)。文件下完就删掉重下, 所以跑多久都只占一个文件的空间; 卡住 5 分钟没进度、或者某个源给了链接却没开始下, 就换下一个源。
+   - **下载源**: 默认是几个国内镜像站上的同一个 Ubuntu 镜像 (4.8 GB; 清华 → 北外 → 南大 → 华为云 → 浙大 → releases.ubuntu.com, 用第一个答应的)。换成别的文件: `export CF_BROWSER_DL_URL="https://…/big.iso"` (可以空格分隔给几个)。
+   - **限速**: Firefox 自己没有限速功能, 而不限速的话一晚上会从镜像站拉走几百 GB, 速度也不稳。所以默认让它的 HTTPS 连接经过同一进程里的一个小中继 (HTTP CONNECT 隧道, 不解密, 只是按 **2 MB/s** 把字节转交给浏览器; 中继在应用自己的 cgroup 里, 受同样的限制)。改速度 `export CF_BROWSER_DL_RATE_MBPS=4`; `=0` 是不经中继、有多快下多快 (这时测到的是浏览器自己的连接, 对 CPU 限制最敏感, 但流量很大, 只建议短跑时用)。两个变量都要在**启动它之前**设好 (`run_classes.sh` 发现它没在跑会自己启动它)。
+   - 经中继时表里这个应用的 "往返时延 / 收包积压" 是中继那条外网连接的: 限速靠 "收得慢" 实现, 所以积压一直接近接收窗口, 各格之间只比**下载速度**和**处理延迟**; 不限速 (`=0`) 时这两列才是浏览器自己的连接。
+   - 预期: 2 MB/s 的下载占不满 squeeze 格给后台应用的 10 % 核。在一台 x86 云主机上试跑 (1 轮, none + squeeze 两格, 其余两个下载应用是占位) 时它在 squeeze 格的后台速度仍是 2.0 MB/s (不限制的 100 %), 变的只有处理延迟 (P95 2.8 → 37 ms)。想看 CPU 限制把下载压慢到什么程度, 把限速提高到限制够得着的量级 (`CF_BROWSER_DL_RATE_MBPS=8` 或更高, 流量和镜像站的负担也相应变大) 或设 0。
+   - `run_classes.sh` 结束时会把它关掉 (否则它会一直下); 单独启动 / 停止: `python3 run_linux.py configs/ubuntu_arm64_full.json --launch browser_dl`, `pkill -f "cf.linux.browser_dl --app"`。日志在 `results/app_logs/browser_dl.log` (每次开始 / 下完 / 换源各一行)。
+4. **确认三个都在下**, 并看磁盘够不够:
+   ```bash
+   python3 -m cf.linux.netstat configs/ubuntu_arm64_full.json --watch 10 --minutes 360
+   # app              running  sockets     MB/s   rtt ms
+   # baidunetdisk     yes            3    0.512     28.0
+   # xunlei           yes            2    1.004     12.5
+   # browser_dl       yes            5    1.998      7.2
+   # at these speeds, in the 360 min of the run: baidunetdisk writes about 10.8 GB, xunlei writes about 21.2 GB, browser_dl re-uses one file (4.8 GB); 41 GB free in /home/u
+   ```
+   `running` 是 `NO` = 应用不在它的 cgroup 里 (是点图标启动的: 退出后用上面的 `--launch` 重开); `sockets` 是 0 或速度是 0 = 任务没在下 (暂停了 / 下完了 / 走的是 P2P)。`browser_dl` 没在跑时这条命令看不到它, 先 `--launch browser_dl` 等半分钟。
+
+**两个 Firefox 是怎么分开的**: 进程正则分不开它们 (内容进程的命令行里没有 profile), 所以 (a) 窗口按类名区分 —— 交互型的 `firefox` 只认类名 `firefox` (每个 Firefox 窗口的实例名都是 `Navigator`, 不能用它), 下载用的那个启动时带 `--class cf-browser_dl`; (b) 进程按 cgroup 和父子关系区分 —— 已经在别的应用的 cgroup 里的进程不会被 "收养" 走, 带 `--class cf-…` 的进程及其全部子进程也永远不算 `firefox` 的 (目录条目的 `not_under`)。
+
 **合成版** (`configs/ubuntu_arm64_classes_synthetic.json`): 计算型和下载型换成仓库自带的可控程序 —— `bench_numeric` (LU 分解求解 + FFT + n 体积分, 一个工作进程)、`bench_compress` (zlib -6 压 8 MB 再解压校验, 两个工作进程)、`bench_download` (从本机限速源做 HTTP Range 分片下载, 每片 sha256 后写盘, 自带建连探测)。不用装工具、不用账号、不用准备下载任务, 下载速度上限固定 (默认 20 MB/s), 可以作为真实应用结果的对照或在外网不稳时使用:
 
 ```bash
@@ -1052,6 +1112,9 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 更多计算应用: OpenSSL 加密 / 解密 (密文被改坏必须判错) / 签名, 画一页字让 Tesseract 认 (白纸必须判错),
                                                    # FFmpeg 转码, llama.cpp 的查找规则与任务 (装了才真跑), 计算应用的 m_fg 取 cgroup 峰值,
                                                    # tool_jobs --check / --missing, configs/ubuntu_arm64_compute.json 的结构
+                                                   # 浏览器下载 (tests/test_linux_browser_dl.py): snap 版 Firefox 判为不可用 / 选第一个答应的下载源 / CONNECT 中继
+                                                   # 把两条隧道合计限在给定速度 / 说明页把链接交给浏览器 / 下完删掉重下、卡住换源、盘满不下 / 两个 Firefox
+                                                   # 互不收养 / 磁盘预算 / configs/ubuntu_arm64_full.json 的结构; 装了 deb 版 Firefox 且有 X 时真下一次本机文件
                                                    # 冷启动后立刻收养跑出 cgroup 的进程 / "m_fg 是冷启动后量的" 与 "内存限制没有生效" 的提示 / 图只画有数据的类
                                                    # 出图字体 (tests/test_linux_plot_fonts.py): 字全的字体优先 / 只有汉字的字体配 DejaVu 逐字回退 /
                                                    # 装了 Droid Sans Fallback 时真画一张中英混排 + 对数轴的图, 不许有缺字告警
@@ -1080,7 +1143,9 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `scripts/ubuntu/run_squeeze.sh` + `CELLS= T= DWELL= SEEDS= SAMPLE= ONBOARD= SWAPPINESS= STRICT= DRY= OUT=` | 实验性 | §6.8: office 5 应用, none / squeeze (激进: cpuset+10 % 带宽+weight 1, memory.high 10 %, memory.reclaim 整个 cgroup ×3 并周期重复) / mild 三格 (+ 可选 `squeeze1`: 不周期重挤, 配 `SAMPLE=2` 看换出 / 换入收敛曲线), 长停留, 按进程统计 + 静默期换出速率; 出 `squeeze_apps.csv` / `plots/squeeze_apps.png` / `plots/<run>_swapflow.png` / `per_process.csv` |
 | `scripts/ubuntu/install_compute_apps.sh [--llama] [--check]` + `LLAMA_TAG= LLAMA_REPO= MODEL_URL= CF_DATA_HOME=` | 一次 | §6.9 计算应用背后的真实程序: apt 装 7-Zip / Z3 / OpenSSL / Tesseract / FFmpeg; `--llama` 源码编译 llama.cpp 的 `llama-completion` 并下载一个 GGUF 模型到 `~/.local/share/context_freeze/llama`; `--check` 每个任务试做一遍 |
 | `python3 -m cf.linux.tool_jobs [KIND…] [--check [--cycles n]] [--config CONFIG]` / `--missing CONFIG` | §6.9 检查 | 计算应用的工具装没装、缺什么、怎么装; `--check` 试做并打印每个操作的墙钟 / CPU 时间; `--missing` 列出某个配置里工具没就绪的计算应用 (有则退出码 1) |
-| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
+| `python3 -m cf.linux.browser_dl --app ID [--url URL …] [--rate-mbps n] [--dir D] [--min-free-gb n]` / `--check` + `CF_BROWSER_DL_URL= CF_BROWSER_DL_RATE_MBPS= CF_BROWSER=` | 由 runner 启动 | §6.9 下载应用 `browser_dl`: 第二个 Firefox (独立 profile / 窗口类), 用浏览器自己的下载管理器反复下载同一个大文件, 下完即删; 默认经进程内的 CONNECT 中继限速 2 MB/s (0 = 不限速); `--check` 报告用哪个 Firefox、哪个源、限速多少 |
+| `python3 -m cf.linux.netstat CONFIG [--watch s] [--min-kbps n] [--minutes M]` | §6.9 检查 | 真实下载应用此刻的连接数 / 速度 / 往返时延; `--min-kbps` 有应用没在下时退出码 1; `--minutes` 按看到的速度算这么多分钟要写多少盘, 放不下退出码 3 |
+| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= DL_DISK_CHECK= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
 | `python3 -m cf.linux.classes FILES… --out DIR [--no-plots]` | 分析 | §6.9 的三张表 (CSV / Markdown / Excel) 和图; 不重跑实验 |
 | `python3 -m cf.linux.bench_app --app ID --kind sevenzip\|z3\|openssl\|llama\|tesseract\|ffmpeg\|numeric\|compress\|download [--corpus-mb n --level n --threads n --model F --tokens n --workers k --scale f --url U --rtt-host H:P]` / `--serve PORT --rate-mbps n` / `--check-url U` | §6.9 内部 | 可度量的计算 / 下载应用: X11 窗口 + 循环做固定任务 (`sevenzip` / `z3` 每个任务启动一次真实程序), 每个任务的时延写到 `/tmp/cf_bench_<id>.jsonl`; `--serve` 是合成版的本机限速下载源 |
 | `python3 -m cf.linux.netstat CONFIG [--apps ID…] [--watch S] [--min-kbps K]` | §6.9 检查 | 看 S 秒配置里下载应用的 TCP 连接: 是否在跑、连接数、MB/s、往返时延 (内核 `ss` 统计); 低于 K 时退出码 1 |
