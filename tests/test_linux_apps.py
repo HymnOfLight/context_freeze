@@ -74,6 +74,7 @@ def test_launch_cmd_falls_back_to_exe_when_the_launcher_is_not_on_path(tmp_path,
     exe = tmp_path / "Elevator.sh"
     exe.write_text("#!/bin/sh\n")
     monkeypatch.setattr(A.shutil, "which", lambda tok: None)
+    monkeypatch.setattr(A, "menu_entries", lambda dirs=None: [])     # not this machine's menu (the toy regex "x" fits firefox)
     a = A.LinuxApp("dingtalk", "钉钉", "push", "dingtalk", "x", "x", exe=str(exe))
     assert A.launch_cmd(a) == str(exe)
     assert A.launch_cmd(A.LinuxApp("b", "b", "push", "bilibili --no-sandbox", "x", "x", exe=str(exe))) == f"{exe} --no-sandbox"
