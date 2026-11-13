@@ -283,7 +283,7 @@ def listing(groups: dict, rules: dict, min_mb: float, opener: Callable = open_fi
                     files[f.key] = f
         lines.append(f"{app}: {len(pids)} processes" + ("" if pids else "  (not running, or not started through the runner)"))
         for f in sorted(files.values(), key=lambda f: -f.size):
-            mark = "followed" if f.size >= min_mb * 2 ** 20 else f"ignored: under {min_mb:g} MB"
+            mark = "followed" if f.size >= min_mb * 2 ** 20 else f"followed once it reaches {min_mb:g} MB"
             lines.append(f"    {f.size / 2 ** 30:7.2f} GB ({f.disk / 2 ** 30:.2f} on disk)  {clean_path(f.path)}   [{mark}]")
         if pids and not files:
             lines.append("    no file being written (no download running, or it writes into a hidden directory: --dir)")

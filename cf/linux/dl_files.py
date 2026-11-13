@@ -116,6 +116,7 @@ def main(argv=None) -> int:
     links = plan(files, gb, args.skip)
     for u, size in links:
         print(u if args.plain else f"{size / 2 ** 30:5.2f} GB  {u}")
+    sys.stdout.flush()
     total = sum(s for _, s in links) / 2 ** 30
     print(f"{len(links)} links, {total:.1f} GB in total ({len(files)} different files, {sum(s for _, s in files) / 2 ** 30:.1f} GB); "
           f"largest {max(s for _, s in links) / 2 ** 30:.2f} GB"
