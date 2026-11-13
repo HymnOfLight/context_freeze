@@ -37,6 +37,9 @@
 #   CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full scripts/ubuntu/run_classes.sh
 #   ROUNDS=6 SEEDS="1 2 3" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_night scripts/ubuntu/run_classes.sh   # ~6 h
 #   CF_BROWSER_DL_RATE_MBPS=4 / CF_BROWSER_DL_URL=https://...   # browser_dl: speed to hold (0 = unlimited), file to fetch
+#   DL_APPS="xunlei"                                      # download class reduced to these apps (of the config's three);
+#                                                         # "xunlei browser_dl", "browser_dl", or "none" for no download apps.
+#                                                         # The reduced config is written to $OUT/config.json (cf.linux.subset)
 #   DL_DISK_CHECK=0                                       # do not stop when the downloads would not fit on the disk
 #   DL_TRIM=1                                             # delete every file 百度网盘 / 迅雷 finish while the run goes on (cf.linux.dl_trim:
 #                                                         # only files it saw them write): the disk holds the files in progress,
@@ -81,6 +84,10 @@ DRY="${DRY:-0}"
 mkdir -p "$OUT"
 LOG="$OUT/run_classes.log"
 exec > >(tee -a "$LOG") 2>&1
+if [ -n "${DL_APPS:-}" ]; then
+  # shellcheck disable=SC2086
+  CONFIG=$(python3 -m cf.linux.subset "$CONFIG" --download $DL_APPS --out "$OUT/config.json") || exit 2
+fi
 PAT=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['trace']['pattern']))" "$CONFIG")
 T=$((ROUNDS * PAT))
 echo "== run_classes $(date -Is): config=$CONFIG rounds=$ROUNDS (T=$T) dwell=${DWELL}s seeds=$SEEDS cells=$CELLS out=$OUT"
@@ -95,6 +102,8 @@ old_swappiness=""
 cleanup() {
   [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null || true
   [ -n "$TRIM_PID" ] && kill "$TRIM_PID" 2>/dev/null || true
+  # a run that was killed leaves its limits on the apps: 迅雷 held at 10 % of a core finds no resources
+  python3 run_linux.py "$CONFIG" --release >/dev/null 2>&1 || true
   # the bench apps would otherwise keep computing / downloading after the experiment
   pkill -f "cf.linux.bench_app --app" 2>/dev/null || true
   pkill -f "cf.linux.browser_dl --app" 2>/dev/null || true       # it stops its browser and removes the partial file
