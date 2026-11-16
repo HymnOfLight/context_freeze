@@ -223,6 +223,14 @@ curl -sI https://github.com | head -1          # HTTP/2 200
 代理会把下载应用的流量整形成 Clash 的速率, `download_mbps` 量的就不再是 "后台被限到 1 核后还能下多快"。
 `run_all.sh` 发现代理变量时会提示。`snap` 不读这些变量 (这也是 §0 第 4 步先装 Mozilla deb 的原因之一)。
 
+**git 单独记住代理** (不靠环境变量, 所以在 `unset` 过代理变量的实验终端里、以及关掉宿主代理的 TUN 模式之后, `git pull` 照样能用;
+只对 github.com 生效, 国内的仓库仍然直连):
+
+```bash
+git config --global http.https://github.com.proxy http://$GW:7897     # GW 同上 (UTM 共享网络: 192.168.64.1)
+git config --global --get-regexp 'http\..*proxy'                      # 查看; 取消: git config --global --unset http.https://github.com.proxy
+```
+
 **更隐蔽的一种: 宿主上的代理开着 TUN / 虚拟网卡 / 增强模式 (fake-IP)**。这时虚拟机里什么变量都不用设, 所有流量 (UTM 共享网络经 macOS 转发)
 都被代理接管, 关掉环境变量也没用。认法: 域名解析出来是 `198.18.x.x` (一段保留地址, 真实服务器不会用; 代理的 fake-IP 模式拿它当占位):
 
@@ -1188,6 +1196,13 @@ sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubunt
 文件损坏时 `python3 -m cf.linux.blankdoc --reset` 重建 (`run_all.sh ONBOARD=1` 每次都重建 - 但 WPS 正开着它时**不动它**: WPS 监视着这个文件,
 被覆盖会弹出模态的 "文件已修改, 是否重新加载" 对话框抢走焦点, 演练就成了 `not-active`; 想要干净文档先退出 WPS 再 reset)。
 `apt` 走代理 `Could not connect to x.x.x.2:7897 Connection refused` — VMware NAT 的宿主是 `.1` 不是网关 `.2` (§2.5); 删掉 `/etc/apt/apt.conf.d/95proxy`。
+
+**`git pull` 报 `gnutls_handshake() failed: The TLS connection was non-properly terminated`** — 连 github.com 的 TLS 握手被中途掐断。两种情况:
+(a) 这个终端里没有代理变量 (`env | grep -i https_proxy` 没输出: `unset` 过, 或宿主代理原先是 TUN 模式、关掉之后虚拟机不再被它接管), git 在直连 github.com;
+(b) 走了代理, 但代理那头的节点不通。区分: `curl -s -m 8 -o /dev/null -w '%{http_code}\n' -x http://192.168.64.1:7897 https://github.com` ——
+是 `200` 就是 (a): 按 §2.5 给 git 单独配代理 (`git config --global http.https://github.com.proxy http://192.168.64.1:7897`) 后重试;
+是 `000` 就是 (b) 或代理根本连不上: 看 Mac 上的 Clash 是否开着、勾了 Allow LAN、端口是 7897、当前节点能用 (Mac 自己的浏览器能不能开 github.com)。
+桥接网络下把 `192.168.64.1` 换成 Mac 在局域网里的 IP。
 
 **虚拟机网卡改成桥接 (或换了网络) 后上不了网** — `python3 -m cf.linux.netcheck` 指出卡在哪一跳: 没拿到地址 / 网络要这台新设备单独登录 /
 代理设置还指着共享网络下的宿主 `192.168.64.1:7897`; 对照表和处理办法在 §2.5 末尾。校园网、公司网下桥接通常行不通, 改回 Shared Network 并关掉宿主代理的 TUN 模式。
