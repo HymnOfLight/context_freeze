@@ -114,7 +114,7 @@ def test_gather_probes_without_touching_the_network(monkeypatch):
     f = N.gather(run, env={"http_proxy": "http://192.168.64.1:7897"}, physical=lambda dev: dev == "enp0s1",
                  connect=lambda h, p, timeout=3.0: h == "223.5.5.5", lookup=lambda n: ["110.242.68.3"],
                  get=lambda u: (204, ""), files={}, devices=lambda: ["enp0s1"],
-                 knock=lambda gw: False, link=lambda dev: {"carrier": True})
+                 knock=lambda gw: False, link=lambda dev: {"carrier": True}, via=lambda proxy, name: "never asked")
     assert f["addrs"] == [("enp0s1", "192.168.64.5", 24)]                   # waydroid's bridge is not an uplink
     assert f["route"] == ("192.168.64.1", "enp0s1") and f["gateway_ok"] is True   # no ping, no open port, but a neighbour
     assert f["links"] == {"enp0s1": {"carrier": True, "nm": "connected"}}
@@ -174,3 +174,149 @@ def test_cli_prints_facts_and_verdict(monkeypatch, capsys):
     assert N.main([]) == 0 and "ok:" in capsys.readouterr().out
     monkeypatch.setattr(N, "gather", lambda: facts(dns={"www.baidu.com": ["198.18.0.7"]}))
     assert N.main([]) == 0 and " ! www.baidu.com resolve" in capsys.readouterr().out     # a warning is not a failure
+
+
+def _fake_proxy(reply, tunnel_to=None):
+    """An http proxy on a loopback port that answers one CONNECT with `reply`, then either hangs
+    up or (tunnel_to = a port) passes bytes both ways.  Returns its port."""
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+
+    def pump(a, b):
+        try:
+            while True:
+                data = a.recv(65536)
+                if not data:
+                    break
+                b.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for x in (a, b):
+                try:
+                    x.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def serve():
+        conn, _ = srv.accept()
+        srv.close()
+        head = b""
+        while b"\r\n\r\n" not in head:
+            head += conn.recv(4096)
+        conn.sendall(reply)
+        if tunnel_to is None:
+            conn.close()
+            return
+        far = socket.create_connection(("127.0.0.1", tunnel_to))
+        threading.Thread(target=pump, args=(conn, far), daemon=True).start()
+        pump(far, conn)
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv.getsockname()[1]
+
+
+def test_a_proxy_that_refuses_or_drops_the_tunnel_is_told_from_one_that_fetches(tmp_path):
+    import shutil
+    import socket
+    import ssl
+    import subprocess
+    import threading
+    import pytest
+    # what apt shows as "502 Bad Gateway [IP: 192.168.64.1 7897]"
+    port = _fake_proxy(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+    assert N.through_proxy(("127.0.0.1", port), "github.com", 3.0) == "502 Bad Gateway"
+    # Clash with a dead node: "200 Connection established" at once, then nothing behind it
+    port = _fake_proxy(b"HTTP/1.1 200 Connection established\r\n\r\n")
+    assert N.through_proxy(("127.0.0.1", port), "github.com", 3.0) == "tunnel closed before the far side answered"
+    with socket.socket() as dead:
+        dead.bind(("127.0.0.1", 0))
+        assert N.through_proxy(dead.getsockname(), "github.com", 2.0) == "Connection refused"
+    if not shutil.which("openssl"):
+        pytest.skip("needs openssl for a TLS server to tunnel to")
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=github.com",
+                    "-keyout", str(tmp_path / "k.pem"), "-out", str(tmp_path / "c.pem")], check=True, capture_output=True)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(tmp_path / "c.pem"), str(tmp_path / "k.pem"))
+    tls = socket.socket()
+    tls.bind(("127.0.0.1", 0))
+    tls.listen(1)
+
+    def answer():
+        conn, _ = tls.accept()
+        try:
+            with ctx.wrap_socket(conn, server_side=True) as c:
+                c.recv(1)
+        except OSError:
+            pass
+
+    threading.Thread(target=answer, daemon=True).start()
+    port = _fake_proxy(b"HTTP/1.1 200 Connection established\r\n\r\n", tunnel_to=tls.getsockname()[1])
+    assert N.through_proxy(("127.0.0.1", port), "github.com", 5.0) == ""
+    tls.close()
+
+
+def test_a_proxy_that_takes_connections_but_fetches_nothing_is_a_failure():
+    where = ["the environment", "/etc/environment"]
+    dead = {("192.168.64.1", 7897): {"where": where, "ok": True,
+                                     "via": {"www.baidu.com": "502 Bad Gateway", "github.com": "502 Bad Gateway"}}}
+    shared = dict(addrs=[("enp0s1", "192.168.64.5", 24)], route=("192.168.64.1", "enp0s1"))
+    got = N.diagnose(facts(proxies=dead, **shared))
+    assert [(lv, what) for lv, what, _ in got] == [
+        ("FAIL", "proxy 192.168.64.1:7897 takes connections but fetches nothing through them (www.baidu.com: 502 Bad Gateway; "
+                 "github.com: 502 Bad Gateway), and it is set in the environment, /etc/environment")]
+    assert "curl -x http://127.0.0.1:7897" in got[0][2] and "502 Bad Gateway [IP: 192.168.64.1 7897]" in got[0][2]
+    assert any("www.baidu.com through it: 502 Bad Gateway" in line for line in N.report(facts(proxies=dead, **shared)))
+    half = {("192.168.64.1", 7897): {"where": where, "ok": True,
+                                     "via": {"www.baidu.com": "", "github.com": "tunnel closed before the far side answered"}}}
+    got = levels(facts(proxies=half, **shared))
+    assert got == [("FAIL", "proxy 192.168.64.1:7897 reaches www.baidu.com but not github.com (tunnel closed before the far "
+                            "side answered), and it is set in the environment, /etc/environment")]
+    fine = {("192.168.64.1", 7897): {"where": where, "ok": True, "via": {"www.baidu.com": "", "github.com": ""}}}
+    assert levels(facts(proxies=fine, **shared)) == [("WARN", "proxy 192.168.64.1:7897 is set in the environment, /etc/environment")]
+    assert any("github.com through it: ok" in line for line in N.report(facts(proxies=fine, **shared)))
+
+
+def test_only_proxies_named_as_http_are_asked_to_fetch():
+    http = set()
+    N.proxy_settings({"all_proxy": "socks5://10.0.0.1:1080", "http_proxy": "http://10.0.0.2:7897"}, {},
+                     {"mode": "manual", "socks": "10.0.0.3:1080", "http": "10.0.0.4:8080"}, http)
+    assert http == {("10.0.0.2", 7897), ("10.0.0.4", 8080)}
+    asked = []
+
+    def run(cmd, timeout=8.0):
+        return (0, ADDR) if "addr" in cmd else (0, ROUTE) if "route" in cmd else (0, "'none'\n") if cmd[0] == "gsettings" else (1, "")
+
+    f = N.gather(run, env={"all_proxy": "socks5://10.0.0.1:1080", "http_proxy": "http://10.0.0.2:7897"},
+                 physical=lambda dev: dev == "enp0s1", connect=lambda h, p, timeout=3.0: True, lookup=lambda n: ["110.242.68.3"],
+                 get=lambda u: (204, ""), files={}, devices=lambda: ["enp0s1"], knock=lambda gw: True,
+                 link=lambda dev: {"carrier": True}, via=lambda proxy, name: asked.append((proxy, name)) or "502 Bad Gateway")
+    assert sorted(asked) == [(("10.0.0.2", 7897), "github.com"), (("10.0.0.2", 7897), "www.baidu.com")]
+    assert f["proxies"][("10.0.0.2", 7897)]["via"] == {"www.baidu.com": "502 Bad Gateway", "github.com": "502 Bad Gateway"}
+    assert "via" not in f["proxies"][("10.0.0.1", 1080)]
+
+
+def test_without_the_ip_tool_the_kernel_tables_are_read(tmp_path):
+    table = ("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+             "enp0s1\t0040A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n"
+             "enp0s1\t00000000\t0140A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n")
+    assert N.parse_proc_route(table) == ("192.168.64.1", "enp0s1")
+    assert N.parse_proc_route(table.splitlines()[0] + "\n" + table.splitlines()[1] + "\n") is None
+    assert N.parse_proc_route("Iface\tDestination\n" "ppp0\t00000000\t00000000\t0001\t0\t0\t0\t00000000\t0\t0\t0\n") == ("", "ppp0")
+    (tmp_path / "route").write_text(table)
+    route, addrs = N.kernel_tables(str(tmp_path / "route"))
+    assert route == ("192.168.64.1", "enp0s1")
+    assert all(not ip.startswith("127.") and 0 < plen <= 32 for _, ip, plen in addrs)       # this machine's own, loopback left out
+
+    def run(cmd, timeout=8.0):
+        return (0, "'none'\n") if cmd[0] == "gsettings" else (127, "")                      # neither ip nor ping nor nmcli
+
+    f = N.gather(run, env={}, physical=lambda dev: True, connect=lambda h, p, timeout=3.0: True,
+                 lookup=lambda n: ["110.242.68.3"], get=lambda u: (204, ""), files={}, devices=lambda: ["enp0s1"],
+                 knock=lambda gw: True, link=lambda dev: {"carrier": True},
+                 kernel=lambda: (("192.168.64.1", "enp0s1"), [("enp0s1", "192.168.64.5", 24), ("docker0", "172.17.0.1", 16)]))
+    assert f["route"] == ("192.168.64.1", "enp0s1") and ("enp0s1", "192.168.64.5", 24) in f["addrs"]
+    assert f["gateway_ok"] is True and N.diagnose(f) == []

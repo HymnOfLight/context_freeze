@@ -18,6 +18,8 @@ import ipaddress
 import os
 import re
 import socket
+import ssl
+import struct
 import subprocess
 import sys
 import threading
@@ -34,6 +36,8 @@ PORTAL_URLS = ("http://connect.rom.miui.com/generate_204",
                "http://connectivity-check.ubuntu.com/",
                "http://connectivitycheck.gstatic.com/generate_204")
 PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy")
+# asked for through a proxy that is set: a name the usual rules send out directly, and one they send abroad
+VIA_PROXY = ("www.baidu.com", "github.com")
 PROXY_FILES = ("/etc/environment", "/etc/apt/apt.conf", "/etc/profile.d", "/etc/apt/apt.conf.d")
 UTM_SHARED = ipaddress.ip_network("192.168.64.0/24")
 UNSET = "unset {http,https,ftp,all}_proxy {HTTP,HTTPS,FTP,ALL}_PROXY"
@@ -64,6 +68,46 @@ def parse_default(text: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def parse_proc_route(text: str) -> Optional[tuple[str, str]]:
+    """(gateway, device) of the default route in /proc/net/route - what `ip route` reads, for a
+    machine without iproute2."""
+    for line in text.splitlines()[1:]:
+        f = line.split()
+        try:
+            if len(f) >= 8 and int(f[1], 16) == 0 and int(f[7], 16) == 0 and int(f[3], 16) & 1:      # 0.0.0.0/0, up
+                gw = int(f[2], 16)
+                return (socket.inet_ntoa(struct.pack("<L", gw)) if gw else "", f[0])
+        except ValueError:
+            continue
+    return None
+
+
+def kernel_tables(route_file: str = "/proc/net/route", net_dir: str = "/sys/class/net") -> tuple:
+    """(default route, addresses) without the `ip` tool: /proc/net/route and one ioctl per interface."""
+    import fcntl
+    try:
+        with open(route_file) as f:
+            route = parse_proc_route(f.read())
+    except OSError:
+        route = None
+    addrs = []
+    try:
+        devs = sorted(os.listdir(net_dir))
+    except OSError:
+        devs = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        for dev in devs:
+            req = struct.pack("256s", dev.encode()[:15])
+            try:
+                ip = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, req)[20:24])              # SIOCGIFADDR
+                mask = struct.unpack(">L", fcntl.ioctl(s.fileno(), 0x891B, req)[20:24])[0]      # SIOCGIFNETMASK
+            except OSError:
+                continue                                                                          # no IPv4 address on it
+            if not ipaddress.ip_address(ip).is_loopback and not ipaddress.ip_address(ip).is_link_local:
+                addrs.append((dev, ip, bin(mask).count("1")))
+    return route, addrs
+
+
 def proxy_target(url: str) -> Optional[tuple[str, int]]:
     """host and port a proxy setting names ("http://192.168.64.1:7897", "192.168.64.1:7897")."""
     try:
@@ -75,34 +119,38 @@ def proxy_target(url: str) -> Optional[tuple[str, int]]:
         return None
 
 
-def proxy_settings(env: Mapping[str, str], files: Mapping[str, str], gnome: Mapping[str, str]) -> dict:
+def proxy_settings(env: Mapping[str, str], files: Mapping[str, str], gnome: Mapping[str, str],
+                   speaks_http: Optional[set] = None) -> dict:
     """{(host, port): [where it is set, ...]} over the environment, the given files' text and
-    GNOME's system proxy ({"mode": "manual", "http": "host:port", ...})."""
+    GNOME's system proxy ({"mode": "manual", "http": "host:port", ...}).  `speaks_http` collects
+    the targets that some setting names as an http proxy (not only as a socks one)."""
     found: dict = {}
 
-    def add(target, where):
+    def add(target, where, url=""):
         if target and target[0] not in ("localhost", "127.0.0.1", "::1"):
             found.setdefault(target, [])
             if where not in found[target]:
                 found[target].append(where)
+            if speaks_http is not None and not url.lower().startswith("socks"):
+                speaks_http.add(target)
 
     for k, v in env.items():
         if k.lower() in PROXY_VARS and v:
-            add(proxy_target(v), "the environment")
+            add(proxy_target(v), "the environment", v)
     for path, text in files.items():
         for line in text.splitlines():
             if line.lstrip().startswith(("#", "//")):
                 continue
             m = _ASSIGN.match(line)
             if m and m.group(1).lower() in PROXY_VARS:
-                add(proxy_target(m.group(2)), path)
+                add(proxy_target(m.group(2)), path, m.group(2))
             elif "proxy" in line.lower():
                 for url in _URL.findall(line):
-                    add(proxy_target(url), path)
+                    add(proxy_target(url), path, url)
     if gnome.get("mode") == "manual":
         for k, v in gnome.items():
             if k != "mode" and v:
-                add(proxy_target(v), f"GNOME system proxy ({k})")
+                add(proxy_target(v), f"GNOME system proxy ({k})", "socks" if k == "socks" else "")
     return found
 
 
@@ -112,6 +160,38 @@ def tcp_ok(host: str, port: int, timeout: float = 3.0) -> bool:
             return True
     except OSError:
         return False
+
+
+def through_proxy(proxy: tuple, name: str, timeout: float = 8.0) -> str:
+    """"" when a TLS server answers for name:443 through the http proxy, else what went wrong.
+    The proxy's "200" to CONNECT is not the answer: Clash sends it before it has dialled out, and a
+    node that is down shows only as a tunnel that closes."""
+    try:
+        with socket.create_connection(proxy, timeout=timeout) as s:
+            s.sendall(f"CONNECT {name}:443 HTTP/1.1\r\nHost: {name}:443\r\n\r\n".encode())
+            head = b""
+            while b"\r\n\r\n" not in head and len(head) < 65536:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                head += chunk
+            status = head.split(b"\r\n", 1)[0].decode("latin-1").split(" ", 1)
+            if len(status) < 2:
+                return "no reply to CONNECT"
+            if not status[1].startswith("2"):
+                return status[1].strip()
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE      # who answers is not the question, only whether
+            with ctx.wrap_socket(s, server_hostname=name):
+                return ""
+    except TimeoutError:
+        return "timed out"
+    except ConnectionRefusedError:
+        return "Connection refused"
+    except (ssl.SSLError, ConnectionError):
+        return "tunnel closed before the far side answered"
+    except OSError as e:
+        return e.strerror or type(e).__name__
 
 
 def resolve(name: str, timeout: float = 5.0) -> Optional[list[str]]:
@@ -222,19 +302,29 @@ def gateway_answers(gw: str, run: Callable, knock: Callable = knock) -> bool:
     above have filled in when it is there at all."""
     if run(["ping", "-c", "2", "-W", "2", gw], timeout=8)[0] == 0 or knock(gw):
         return True
-    neigh = run(["ip", "neigh", "show", gw])[1]
+    rc, neigh = run(["ip", "neigh", "show", gw])
+    if rc == 127:                                             # no iproute2: the kernel's table, flags 0x2 = resolved
+        try:
+            with open("/proc/net/arp") as f:
+                return any(line.split()[:1] == [gw] and int(line.split()[2], 16) & 2 for line in f.readlines()[1:])
+        except (OSError, ValueError, IndexError):
+            return False
     return "lladdr" in neigh and not re.search(r"\b(FAILED|INCOMPLETE)\b", neigh)
 
 
 def gather(run: Callable = _run, *, env: Optional[Mapping[str, str]] = None, physical: Callable = _physical,
            connect: Callable = tcp_ok, lookup: Callable = resolve, get: Callable = http_status,
            files: Optional[Mapping[str, str]] = None, devices: Callable = _devices,
-           knock: Callable = knock, link: Optional[Callable] = None) -> dict:
+           knock: Callable = knock, link: Optional[Callable] = None, via: Callable = through_proxy,
+           kernel: Callable = kernel_tables) -> dict:
     """Everything `diagnose` needs, each probe independent of the others."""
     env = os.environ if env is None else env
-    route = parse_default(run(["ip", "-4", "route", "show", "default"])[1])
-    addrs = [a for a in parse_addrs(run(["ip", "-4", "-o", "addr", "show", "scope", "global"])[1])
-             if physical(a[0]) or (route and a[0] == route[1])]
+    rc, text = run(["ip", "-4", "route", "show", "default"])
+    if rc == 127:                                             # no iproute2 on this machine
+        route, found = kernel()
+    else:
+        route, found = parse_default(text), parse_addrs(run(["ip", "-4", "-o", "addr", "show", "scope", "global"])[1])
+    addrs = [a for a in found if physical(a[0]) or (route and a[0] == route[1])]
     facts: dict = {"addrs": addrs, "route": route, "gateway_ok": None, "devs": list(devices())}
     if route and route[0]:
         facts["gateway_ok"] = gateway_answers(route[0], run, knock)
@@ -247,12 +337,17 @@ def gather(run: Callable = _run, *, env: Optional[Mapping[str, str]] = None, phy
         outside = [pool.submit(connect, h, p) for h, p in OUTSIDE]
         names = [pool.submit(lookup, n) for n in NAMES]
         web = [pool.submit(get, u) for u in PORTAL_URLS]
-        proxies = proxy_settings(env, _read_proxy_files() if files is None else files, _gnome(run))
+        http: set = set()
+        proxies = proxy_settings(env, _read_proxy_files() if files is None else files, _gnome(run), http)
         alive = {t: pool.submit(connect, t[0], t[1]) for t in proxies}
         facts["outside"] = {f"{h}:{p}": f.result() for (h, p), f in zip(OUTSIDE, outside)}
         facts["dns"] = {n: f.result() for n, f in zip(NAMES, names)}
         facts["web"] = {u: f.result() for u, f in zip(PORTAL_URLS, web)}
         facts["proxies"] = {t: {"where": w, "ok": alive[t].result()} for t, w in proxies.items()}
+        fetched = {(t, n): pool.submit(via, t, n) for t, p in facts["proxies"].items() if p["ok"] and t in http
+                   for n in VIA_PROXY}
+        for (t, n), fut in fetched.items():
+            facts["proxies"][t].setdefault("via", {})[n] = fut.result()
     return facts
 
 
@@ -347,6 +442,24 @@ def _hops(f: dict) -> list[tuple[str, str, str]]:
                         "gsettings set org.gnome.system.proxy mode none; in this shell: " + UNSET + ") "
                         "or point it at the address the host has now (bridged: the Mac's own LAN address, "
                         "with Allow LAN on in the proxy)"))
+            continue
+        via = p.get("via") or {}
+        bad = {n: err for n, err in via.items() if err}
+        if bad and len(bad) == len(via):
+            out.append(("FAIL", f"proxy {host}:{port} takes connections but fetches nothing through them ("
+                                + "; ".join(f"{n}: {err}" for n, err in bad.items()) + f"), and it is set in {where}",
+                        "the fault is inside the proxy on the host, not in this machine or on the way to it. There: is a "
+                        f"node selected that works (curl -x http://127.0.0.1:{port} https://github.com must print a "
+                        "page), is the mode Rule or Global rather than a rule set that rejects? A browser on the host "
+                        "that opens pages proves nothing while its system proxy is off. Until then everything here "
+                        f"that reads the setting fails (apt: '502 Bad Gateway [IP: {host} {port}]', git: "
+                        "'gnutls_handshake() failed'); what needs no proxy works without it: "
+                        "sudo env -u http_proxy -u https_proxy apt install ...   and, in this shell, " + UNSET))
+        elif bad:
+            out.append(("FAIL", f"proxy {host}:{port} reaches {', '.join(n for n in via if n not in bad)} but not "
+                                + "; ".join(f"{n} ({err})" for n, err in bad.items()) + f", and it is set in {where}",
+                        "the proxy's way abroad is down (its node / subscription, on the host): git pull from github.com "
+                        "and install_compute_apps.sh --llama fail until it is back. The experiment needs no proxy"))
         else:
             out.append(("WARN", f"proxy {host}:{port} is set in {where}",
                         "fine for apt / git. Apps started from this shell inherit it: before a run of the download "
@@ -375,7 +488,8 @@ def report(f: dict) -> list[str]:
         f"{urlsplit(u).hostname} {'no answer' if not r else str(r[0]) + (' -> ' + r[1] if r[1] else '')}"
         for u, r in f["web"].items()))
     for (host, port), p in sorted(f["proxies"].items()):
-        lines.append(f"proxy     {host}:{port} {'answers' if p['ok'] else 'NO ANSWER'}  [{', '.join(p['where'])}]")
+        via = "".join(f"; {n} through it: {err or 'ok'}" for n, err in (p.get("via") or {}).items())
+        lines.append(f"proxy     {host}:{port} {'answers' if p['ok'] else 'NO ANSWER'}{via}  [{', '.join(p['where'])}]")
     if not f["proxies"]:
         lines.append("proxy     none set")
     return lines
