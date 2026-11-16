@@ -270,6 +270,8 @@ python3 -m cf.linux.netcheck         # 地址 -> 网关 -> 网关之外 -> 登�
 | `addresses are reachable but names do not resolve` | `up 223.5.5.5 443` 通, `getent hosts www.baidu.com` 没结果: DNS 还指着旧网络 (`resolvectl status`) | `sudo resolvectl dns enp0s1 223.5.5.5` (到下次重启为止); 手写过 DNS 的改 netplan / NetworkManager |
 | `proxy 192.168.64.1:7897 does not answer, and it is set in …` | **网络本身是通的**, 但本节开头写进 `/etc/environment`、`/etc/apt/apt.conf.d/95proxy` (或 GNOME "网络代理") 的代理地址是共享网络下的宿主, 桥接后没有这台机器: 读这些设置的程序 (apt、curl、git、pip、用 "系统代理" 的浏览器) 全都连不上 | 注释掉 `/etc/environment` 里那几行后重新登录, `sudo rm /etc/apt/apt.conf.d/95proxy`, `gsettings set org.gnome.system.proxy mode none`, 当前终端 `unset {http,https,ftp,all}_proxy {HTTP,HTTPS,FTP,ALL}_PROXY`; 还想走代理就把地址换成 Mac 在局域网里的 IP (Clash 开 Allow LAN) |
 | `proxy 192.168.64.1:7897 … is the host on UTM's shared network; this machine is not on that network now` (警告, 跟在上面某一条后面) | 路还没通到能检查代理的地方, 但已经能看出: 网络修好以后这个代理设置在桥接下也是死的 | 同上一行; 改回 Shared Network 则它重新可用, 不用动 |
+| `proxy 192.168.64.1:7897 takes connections but fetches nothing through them (…: 502 Bad Gateway …)` | 代理的端口连得上 (Allow LAN、端口、防火墙都没问题), 但经它取什么都失败 —— `netcheck` 真的经它向 `www.baidu.com` 和 `github.com` 各做了一次 TLS 握手。毛病在**宿主上的代理内部** (节点失效 / 订阅过期 / 规则把请求拒掉), 不在虚拟机也不在路上。虚拟机里的表现: `apt` 报 `502  Bad Gateway [IP: 192.168.64.1 7897]`, `git pull` 报 `gnutls_handshake() failed` | 在 Mac 上 `curl -x http://127.0.0.1:7897 https://github.com -o /dev/null -w '%{http_code}\n'` 应是 200, 不是就换节点 / 更新订阅 / 模式改成 "规则" 或 "全局"; Mac 的浏览器能开网页不说明代理是好的 (系统代理没开时浏览器是直连)。修好之前不需要代理的事绕开它做: `sudo env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY apt install …`, 当前终端 `unset …` (同上) |
+| `proxy … reaches www.baidu.com but not github.com (…)` | 代理的直连规则是通的, 出国的那一路 (节点) 不通 | 同上一行的 Mac 侧检查; 实验本身不需要代理, 受影响的只有 `git pull` 和 `install_compute_apps.sh --llama` |
 | `… resolve into 198.18.x.x` (警告) | 还在宿主的 fake-IP 代理后面 (上一段) | 关 TUN 模式 |
 
 桥接后**不经过 Mac 的代理**, 所以 GitHub 之类原来靠代理才快的站点会变慢或打不开 —— 这是桥接的本意, 不是故障; 需要时按上表 `proxy …` 那一行把代理地址换成 Mac 的局域网 IP。
@@ -1197,6 +1199,10 @@ sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubunt
 被覆盖会弹出模态的 "文件已修改, 是否重新加载" 对话框抢走焦点, 演练就成了 `not-active`; 想要干净文档先退出 WPS 再 reset)。
 `apt` 走代理 `Could not connect to x.x.x.2:7897 Connection refused` — VMware NAT 的宿主是 `.1` 不是网关 `.2` (§2.5); 删掉 `/etc/apt/apt.conf.d/95proxy`。
 
+**`apt install` 报 `502  Bad Gateway [IP: 192.168.64.1 7897]`** — apt 连上了宿主的代理 (方括号里就是它), 是代理自己取不回东西: 节点失效 / 订阅过期 / 规则拒绝,
+要在 Mac 上修 (`python3 -m cf.linux.netcheck` 会报 "takes connections but fetches nothing", §2.5 的表)。Ubuntu 的软件源不需要代理, 这一次绕开它:
+`sudo env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY apt install -y <包>` (`/etc/apt/apt.conf.d/95proxy` 存在的话先删掉)。
+
 **`git pull` 报 `gnutls_handshake() failed: The TLS connection was non-properly terminated`** — 连 github.com 的 TLS 握手被中途掐断。两种情况:
 (a) 这个终端里没有代理变量 (`env | grep -i https_proxy` 没输出: `unset` 过, 或宿主代理原先是 TUN 模式、关掉之后虚拟机不再被它接管), git 在直连 github.com;
 (b) 走了代理, 但代理那头的节点不通。区分: `curl -s -m 8 -o /dev/null -w '%{http_code}\n' -x http://192.168.64.1:7897 https://github.com` ——
@@ -1241,6 +1247,10 @@ CF_PLOT_FONT="Noto Sans CJK JP" python3 -m cf.linux.classes ...                 
 
 ## 11. 测试
 
+需要 `pytest` (`sudo apt install -y python3-pytest` 或 `pip install --user pytest`)。末行形如 `248 passed, 15 skipped` 是正常的: 被跳过的是要靠
+本机没有的东西才能跑的那几个 (多数需要 `Xvfb` 虚拟显示; 其余是某个计算工具没装、当前终端不在 `/cf` 里); `python3 -m pytest tests -q -rs` 逐条列出原因。
+有 `failed` 才是问题。matplotlib 的 `Unable to import Axes3D` 警告是系统里装了两份 matplotlib (apt 一份、pip 一份), 不影响出图。
+
 ```bash
 python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋钮值 / 伪 cgroupfs / xprop 解析 / 伪桌面上的完整 runner (静态与预算策略、
                                                    # 无进程被杀、WARM、state_lost 注入、resume 重放档位) / focusd 决策 / 应用目录与 桌面->手机版 替代链 /
@@ -1265,7 +1275,8 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 盘上占用归零、客户端接着写; 镜像目录页解析、按大小筛选去重、不够时加 ?n=K 重复、只留真给明文 http 的;
                                                    # 下载型缩到一个应用后的配置 (访问顺序相邻重复合并) 和 DL_APPS 的 DRY 运行; 应用身上残留的限制能被指出来;
                                                    # 网络自检 (tests/test_linux_netcheck.py): ip 输出解析、各处代理设置的收集、每一跳不通时只报第一处、
-                                                   # 登录页、代理地址失效 / 仍有效 / fake-IP 的区分、没有 ping 的机器、没地址时区分 "没网线" 和 "DHCP 没人理"
+                                                   # 登录页、代理地址失效 / 仍有效 / fake-IP 的区分、没有 ping / ip 命令的机器、没地址时区分 "没网线" 和 "DHCP 没人理"、
+                                                   # 代理端口连得上但取不回东西 (本机假代理: 回 502 / 回 200 后断开 / 真的转发到一个 TLS 服务)
                                                    # (探测全部注入, 不碰真实网络);
                                                    # 域名解析到 198.18.x.x / 应用的连接落在 198.18.x.x 时认出中间的 fake-IP 代理
                                                    # 冷启动后立刻收养跑出 cgroup 的进程 / "m_fg 是冷启动后量的" 与 "内存限制没有生效" 的提示 / 图只画有数据的类
