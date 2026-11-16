@@ -548,7 +548,7 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 | `running outside /cf (desktop icon / autostart)` | 应用在跑, 但进程在 `user.slice` 里 (从桌面图标点开的, 或钉钉这类开机自启动的), 普通用户不能把它移进 `/cf/<id>`, 限流对它无效 | 交互式 `cf_onboard.sh <id>` 会在启动时发现并提议 "退出它并由脚本重新启动" (回车即可); 钉钉还要关掉自启动 (`rm ~/.config/autostart/*dingtalk*`); 或配置 `sudo_adopt: true` |
 | `login timeout / skipped` | 等了 `--onboard-timeout` (默认 600 s) 没见到 ≥ `main` 的主窗口 | 登录完成后重跑 `cf_onboard.sh <id>`; 主窗口本来就小的在 `onboard_overrides` 里改 `main` |
 | `N non-normal (dialog / dock ...)` 出现在 `main_window` 列 | 找到的窗口都不是普通顶层窗口 (对话框 / 托盘). 旧版本把微信 / WPS / 中望的 Qt 无边框主窗口 (`_KDE_NET_WM_WINDOW_TYPE_OVERRIDE, _NET_WM_WINDOW_TYPE_NORMAL`) 也误判成这种, 现在按类型列表判断 | 更新代码; 仍出现就 `--discover` 看该窗口的 `_NET_WM_WINDOW_TYPE` |
-| `no main window now (...)` | 记录是就绪的, 但现在没有一个 ≥ `main` 的普通窗口; `main_window` 列写着实际找到的最大窗口 (`largest 640x400 < 700x500`) 或 `no window matched` | 窗口被最小化 / 关掉了就点开; 尺寸偏小就放大窗口或改 `main`; `no window matched` = WM_CLASS / 标题都对不上, `--discover` 看真实的 WM_CLASS 写进 `app_overrides.wm_class` |
+| `no main window now (...)` | 记录是就绪的, 但现在没有一个 ≥ `main` 的普通窗口; `main_window` 列写着实际找到的最大窗口和它的标题 (`largest 640x400 '微信' < 700x500`; 看标题就知道那是登录框、设置对话框, 还是主窗口本身就这么小) 或 `no window matched` | 主窗口被最小化 / 收进托盘 / 关掉了就点开 (留在屏幕上的只是个对话框时就是这种情况); 主窗口本身偏小就拉大, 或在配置的 `onboard_overrides` 里改 `main`; `no window matched` = WM_CLASS / 标题都对不上, `--discover` 看真实的 WM_CLASS 写进 `app_overrides.wm_class` |
 | `work not-active (focus was on 0x... 'xxx' [class])` / `oracle clipboard: not-active (...)` | 脚本发键前核对 `_NET_ACTIVE_WINDOW`: 焦点在**别的程序**的窗口上 (括号里是谁: 弹窗 / 对话框 / 桌面) - 切前台失败 (GNOME 焦点保护 / 模态对话框挡住) 或当时记的是已经消失的登录框。该应用自己的其他窗口 (QQ / 钉钉弹出的独立会话窗、WPS 重建的文档窗) 不算, 照常输入。发现焦点被抢时脚本会**夺回一次** (再 `activate` 该应用) 再输入 / 读 oracle, 日志记 `refocused`; 只有夺不回来才算 `not-active` | 关掉括号里那个窗口 (操作者的终端: 回车后别再点它), 重跑 `cf_onboard.sh <id>`; 还不行看 §10 "activate 失败" |
 | `prep skipped` | 准备那一步回答了 `s` - 常常不是故意的: 上一问 (如 "退出并重新启动?") 回车后脚本忙了 10-20 s, 这期间敲的键被下一问吃掉了 | 重跑 `cf_onboard.sh <id>`, 等提示出现再敲键 (现在每个提示前会丢弃提前敲的键) |
 | `oracle clipboard: xclip: ...` | 没装 xclip | `sudo apt install xclip` |
@@ -885,6 +885,11 @@ python3 run_linux.py configs/ubuntu_arm64_full.json --launch wechat qq wps firef
    sudo scripts/ubuntu/install_cn_apps.sh --firefox     # 是 snap 版时: 换成 Mozilla APT 仓库的 deb (§0 第 4 步的同一套命令)
    python3 -m cf.linux.browser_dl --check       # 三行: 用哪个 Firefox、哪个下载源答应了、限速多少
    ```
+   snap 版不行的原因对交互型的那个 `firefox` 同样成立 (它的进程归 snapd 管, 放不进 `/cf/firefox`; 就绪表里是 `running outside /cf`), 所以这一步两个应用都需要。
+   `--firefox` 做的事: 下 Mozilla 的签名密钥并核对指纹 → 加 APT 源 → 装 deb → **确认 `/usr/lib/firefox/firefox` 装上了以后**才 `snap remove firefox`
+   (装不上时 snap 原样留着, 不会落到没有浏览器)。代理变量 / `95proxy` 指着一个取不回东西的代理 (502) 时, 密钥和 apt 都会自动再**不经代理**试一次。
+   注意 snap 版的书签 / 登录状态在 `~/snap/firefox` 里, 不会带到 deb 版 (deb 版从全新的 `~/.mozilla` 开始; snapd 把旧数据的快照留 31 天, `snap saved` 可查) ——
+   实验用的 Firefox 不需要账号。装完后把还开着的旧 Firefox 全部退出, 再 `python3 run_linux.py configs/ubuntu_arm64_full.json --launch firefox`。
    它做的事: 用**独立的 profile** (`~/.local/share/context_freeze/browser_dl/profile`) 和**独立的窗口类** (`cf-browser_dl`) 再开一个 Firefox —— 和交互型的那个 `firefox` 是两个应用、两个 cgroup, 互不影响, 你自己的书签 / 登录状态不会被动到。窗口里是本机的一个说明页, 页面每 2 秒问一次 "有没有要下的文件", 有就让一个隐藏的 frame 去打开那个链接 —— 和你点一个下载链接完全一样, 文件由 **Firefox 自己的下载管理器**收、解密、写盘 (存到 `~/.local/share/context_freeze/browser_dl/downloads`)。文件下完就删掉重下, 所以跑多久都只占一个文件的空间; 卡住 5 分钟没进度、或者某个源给了链接却没开始下, 就换下一个源。
    - **下载源**: 默认是几个国内镜像站上的同一个 Ubuntu 镜像 (4.8 GB; 清华 → 北外 → 南大 → 华为云 → 浙大 → releases.ubuntu.com, 用第一个答应的)。换成别的文件: `export CF_BROWSER_DL_URL="https://…/big.iso"` (可以空格分隔给几个)。
    - **限速**: Firefox 自己没有限速功能, 而不限速的话一晚上会从镜像站拉走几百 GB, 速度也不稳。所以默认让它的 HTTPS 连接经过同一进程里的一个小中继 (HTTP CONNECT 隧道, 不解密, 只是按 **2 MB/s** 把字节转交给浏览器; 中继在应用自己的 cgroup 里, 受同样的限制)。改速度 `export CF_BROWSER_DL_RATE_MBPS=4`; `=0` 是不经中继、有多快下多快 (这时测到的是浏览器自己的连接, 对 CPU 限制最敏感, 但流量很大, 只建议短跑时用)。两个变量都要在**启动它之前**设好 (`run_classes.sh` 发现它没在跑会自己启动它)。
