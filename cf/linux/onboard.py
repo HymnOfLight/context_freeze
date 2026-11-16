@@ -241,7 +241,9 @@ def seen_windows(dev, app_id: str, spec: dict) -> str:
                                 for h in all_hits for t in (h.get("types") or [h.get("type")])}))
         return f"{len(all_hits)} non-normal ({kinds})"
     g = cands[0]["geometry"]
-    return f"largest {g[0]}x{g[1]} < {spec['main'][0]}x{spec['main'][1]}"
+    # its title says which window that is: a login box, a settings dialog, or a main window that is simply small
+    title = f" '{cands[0]['name'][:20]}'" if cands[0].get("name") else ""
+    return f"largest {g[0]}x{g[1]}{title} < {spec['main'][0]}x{spec['main'][1]}"
 
 
 # ------------------------------------------------------------------ interaction
