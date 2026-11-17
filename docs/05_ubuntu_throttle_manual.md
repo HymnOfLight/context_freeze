@@ -52,7 +52,7 @@ wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | sudo tee /etc/
 gpg -n -q --import --import-options import-show /etc/apt/keyrings/packages.mozilla.org.asc | grep -q 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 && echo key-ok
 echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" | sudo tee /etc/apt/sources.list.d/mozilla.list
 printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/mozilla
-sudo apt update && sudo apt install -y firefox
+sudo apt update && sudo apt install -y --allow-downgrades firefox    # --allow-downgrades: 已经装着 Ubuntu 自带的 firefox 包 (启动 snap 的那个, 版本号 1:1snap1…) 时, 换成真正的 deb 在 apt 看来是 "降级"
 sudo apt install -y ubuntu-desktop-minimal      # ~1.5 GB; 之后 sudo systemctl set-default graphical.target && sudo reboot
 ```
 
