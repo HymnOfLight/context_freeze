@@ -53,8 +53,11 @@ if [ "$FIREFOX" = 1 ]; then
   # Mozilla's APT repository: a real deb (the Ubuntu 22.04 default is a snap whose processes land in
   # snapd's own systemd scope, outside our cgroup).  Same steps as manual §0 step 4.
   echo "== firefox (Mozilla APT deb build) + xclip"
-  if dpkg-query -W -f='${db:Status-Status}' firefox 2>/dev/null | grep -q installed && [ ! -d /snap/firefox ] \
-     && apt-cache policy firefox | grep -q packages.mozilla.org; then
+  # read into variables first: under pipefail `cmd | grep -q` fails whenever grep leaves before cmd has finished writing
+  fx_status="$(dpkg-query -W -f='${db:Status-Status}' firefox 2>/dev/null || true)"
+  fx_policy="$(apt-cache policy firefox 2>/dev/null || true)"
+  if [ "$fx_status" = installed ] && [ ! -d /snap/firefox ] && [ -x /usr/lib/firefox/firefox ] \
+     && grep -q packages.mozilla.org <<<"$fx_policy"; then
     echo "   already installed: $(dpkg-query -W -f='${Version}' firefox)"; skipped+=(firefox)
   else
     # Every proxy setting left out: a proxy that is set but fetches nothing (the host's Clash answering
@@ -69,7 +72,9 @@ if [ "$FIREFOX" = 1 ]; then
       local pre=() opt=()
       if [ "${1:-}" = direct ]; then pre=("${direct[@]}"); opt=(-o Acquire::http::Proxy= -o Acquire::https::Proxy=); fi
       "${pre[@]}" apt-get "${opt[@]}" update -q || true
-      "${pre[@]}" apt-get "${opt[@]}" install -y -q firefox xclip && deb_ok
+      # --allow-downgrades: Ubuntu's own "firefox" package (the snap launcher) is version 1:1snap1-..., which
+      # sorts above every real Firefox version - replacing it counts as a downgrade, and -y alone refuses those
+      "${pre[@]}" apt-get "${opt[@]}" install -y -q --allow-downgrades firefox xclip && deb_ok
     }
     install -d -m 0755 /etc/apt/keyrings
     wget -qO "$key" https://packages.mozilla.org/apt/repo-signing-key.gpg || true
@@ -90,8 +95,8 @@ if [ "$FIREFOX" = 1 ]; then
         fi
         installed+=(firefox)
       else
-        echo "!! firefox: the deb from packages.mozilla.org did not install (unreachable with and without the proxy settings;"
-        echo "   manual §2.5: python3 -m cf.linux.netcheck). The snap, if there was one, was left alone."
+        echo "!! firefox: the deb from packages.mozilla.org did not install, with and without the proxy settings - apt's"
+        echo "   messages above say why (fetch errors: python3 -m cf.linux.netcheck, manual §2.5). The snap, if there was one, was left alone."
         failed+=(firefox)
       fi
     else
