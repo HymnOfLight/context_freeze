@@ -67,6 +67,7 @@ python3 -m cf.linux.dl_files --rate-mbps 1 --minutes 360 --plain          # 给�
 python3 -m cf.linux.netcheck                                              # 虚拟机上不了网 / 换了网络模式之后: 逐跳检查 (地址、网关、登录页、DNS、失效的代理设置), 指出卡在哪并给出处理办法
 DL_TRIM=1 ROUNDS=6 SEEDS="1 2 3" CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_night scripts/ubuntu/run_classes.sh   # 同上过夜, 边下边删: 百度网盘 / 迅雷下完的文件随下随删 (只删亲眼见到它们写的), 盘上只需放正在下的几个文件; DL_TRIM=punch 连正在下的也释放 (先试, 手册 §6.9)
 DL_APPS="xunlei browser_dl" DL_TRIM=1 CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_full_xf scripts/ubuntu/run_classes.sh   # 下载型 = 迅雷 + 浏览器下载 (第二个 Firefox), 不测百度网盘 (DL_APPS: 任选 xunlei / browser_dl / baidunetdisk, 或 none); 迅雷 "一直寻找资源" 的排查顺序见手册 §6.9
+CLASSES=download DL_APPS="baidunetdisk browser_dl" ROUNDS=10 DWELL=30 CONFIG=configs/ubuntu_arm64_full.json OUT=results/arm64_dl scripts/ubuntu/run_classes.sh   # 只跑下载型, 这里是百度网盘 + 浏览器下载: 两个应用轮流到前台, 前后台各一半时间, 三格约 42 分钟 (CLASSES: 只留 interactive / compute / download 中指定的类别; 手册 §6.9)
 CONFIG=configs/ubuntu_arm64_classes_synthetic.json scripts/ubuntu/run_classes.sh   # 同上的合成版: 计算 / 下载换成自带基准程序 + 本机限速源, 不需要工具 / 账号 / 下载任务
 scripts/ubuntu/run_squeeze.sh                                            # 实验性 (手册 §6.8): office 5 应用、3 格, 按进程统计前/后台 PSS, 激进挤压 (memory.reclaim 整个 cgroup, 10 % 核带宽), 静默期每分钟换出量
 NIGHT=1 scripts/ubuntu/run_matrix.sh configs/ubuntu_cn_desktop.json 40  # 场景 x 策略 x η x 变体 (CPU 档位 / cpuset / swap 上限 / memory.max 对照); FULL=1 全量; PLACEHOLDERS=1 没装的用占位顶替

@@ -963,7 +963,28 @@ DL_APPS="xunlei browser_dl" CONFIG=configs/ubuntu_arm64_full.json OUT=results/ar
 DL_APPS="xunlei" …      # 只有迅雷 (11 个应用, 每轮 15 步)        DL_APPS="browser_dl" …      # 只有浏览器下载 (不用账号)        DL_APPS="none" …      # 不要下载型
 ```
 
-被拿掉的应用如果还开着 (比如百度网盘), 脚本会说 "running but not part of this experiment" 并停下: 先把它退出。同一个 `OUT` 续跑时要带同样的 `DL_APPS`。**百度网盘没有限速选项**时两条路: 不管它 (普通账号的速度本来就被服务器限着; 配 `DL_TRIM=1` 不占盘), 或者用 `DL_APPS` 不测它。
+被拿掉的应用如果还开着 (比如百度网盘), 脚本会说 "running but not part of this experiment" 并停下: 先把它退出。同一个 `OUT` 续跑时要带同样的 `DL_APPS`。**百度网盘没有限速选项**时两条路: 不管它 (见下一段 "不限速的客户端"), 或者用 `DL_APPS` 不测它。
+
+**只跑下载型 (`CLASSES=download`)**: 交互 / 计算那些应用还没配好, 或者想先单独看下载。`CLASSES` 只留指定类别的应用 (`interactive` / `compute` / `download`, 可以写几个), 能和 `DL_APPS` 一起用:
+
+```bash
+CLASSES=download DL_APPS="baidunetdisk browser_dl" ROUNDS=10 DWELL=30 CONFIG=configs/ubuntu_arm64_full.json \
+  OUT=results/arm64_dl scripts/ubuntu/run_classes.sh        # 百度网盘 + 浏览器下载, 不测迅雷; 三格约 42 分钟
+```
+
+- 剩下的应用**轮流到前台**: 这里是 `百度网盘 → 浏览器下载` 来回换, 一个在前台 (不限制) 时另一个在后台 (按该格的限制), 每 `DWELL` 秒对调。每个应用前台、后台的时间各一半, 而且是交替着量的 —— 网速慢慢变快变慢时, 前台和后台受的影响一样。(全量配置里每个下载应用 17 步里只有 1 步在前台。)
+- 每轮只有 2 步, 默认的 `ROUNDS=2` 一格才 4 步, 脚本会提示太少。`ROUNDS=10 DWELL=30`: 每格每个应用前台 10 段、后台 10 段, 每段 30 秒, 一格约 14 分钟。
+- 至少要留两个应用: 只剩一个时它整场都在前台, 没有 "后台" 可量, 脚本会拒绝 (`only browser_dl is left …`)。
+- 不在这次实验里的应用 (微信 / QQ / WPS / 平时用的 Firefox / 迅雷) 要先退出, 否则脚本报 "running but not part of this experiment" 并停下。一次退干净: `for a in wechat qq wps firefox xunlei; do [ -f /sys/fs/cgroup/cf/$a/cgroup.procs ] && xargs -r kill < /sys/fs/cgroup/cf/$a/cgroup.procs; done`。
+- 报告的第一、二节写 "(这次运行没有这一类应用)", 只有第三节有数。以后跑全量要换一个 `OUT`。
+
+**不限速的客户端 (百度网盘没有限速选项)**: 可以照测, 注意三件事。
+
+1. *速度会飘, 先看噪声有多大*。不限速时速度由服务器和线路决定。`none` 格什么都没限制, 它的 "后台速度占前台 (%)" 本该是 100 %, 实际偏离多少就是这次测量的噪声; `mild` / `squeeze` 格的同一列要明显超出这个幅度才算限制的效果。浏览器下载被中继定在 2 MB/s, 是稳定的对照。噪声太大就加 `ROUNDS` 或多跑一个 `SEEDS`。
+2. *磁盘*。开跑前脚本按当时的速度打印 `at these speeds, in the N min of the run: baidunetdisk writes about X GB`, 放不下就停下。办法: 排几个 1–3 GB 的文件并加 `DL_TRIM=1` (下完的随下随删; 一个几十 GB 的大文件 `DL_TRIM=1` 帮不上), 或少跑一格 (`CELLS="none squeeze"`)。
+3. *它会和浏览器下载抢带宽*。浏览器下载在 `none` 格前台也到不了 2 MB/s 时, 说明线路被网盘占满了: 把 `CF_BROWSER_DL_RATE_MBPS` 调到它稳定够得着的值 (例如 `1`)。
+
+在 x86 云主机上按上面的命令形式实际跑过一遍 (三格, `ROUNDS=6 DWELL=15`; 百度网盘的位置上是一个替身: 一个窗口加一个不限速的 curl 下载, 约 50–100 MB/s —— 不是真的百度网盘客户端): 两个应用都被量到; `none` 格 "后台速度占前台" 是 107 % 和 105 % (即这么短的一次运行噪声约 ±7 %), `squeeze` 格替身是 56 %、浏览器下载 95 % (在噪声之内); 浏览器下载在这次运行里只有 1.7–1.8 MB/s, 就是第 3 条说的被抢了。另一次没有任何 swap (没开 zram) 的运行里, `squeeze` 格两个应用的后台速度都掉到接近 0、探针建连要 2 秒: 有 swap 的那次没有这个现象, 所以原因应是 `memory.high` 压下去的匿名内存没处可去 (内核对超过 `memory.high` 的进程每次分配最多罚睡 2 秒, 和量到的 2 秒对得上; 没有再进一步确认)。这不是下载被 CPU 限制的结果, 所以 zram 要开着 (脚本默认会开, `ZRAM_MB=0` 才不开)。
 
 **迅雷任务加不进去 / 一直 "正在寻找资源" / 速度是 0** —— 按这个顺序查 (每一步都是 "有问题就先修这一步"):
 
@@ -1278,7 +1299,7 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 边下边删 (tests/test_linux_dl_trim.py): 一个真实的 "客户端" 进程写文件 / 改名 / 关闭 -> 下完的被删、
                                                    # 同目录别的文件和只读打开的文件不动、临时名和带进度文件的不动、宽限时间、dry-run; 打洞后文件长度不变、
                                                    # 盘上占用归零、客户端接着写; 镜像目录页解析、按大小筛选去重、不够时加 ?n=K 重复、只留真给明文 http 的;
-                                                   # 下载型缩到一个应用后的配置 (访问顺序相邻重复合并) 和 DL_APPS 的 DRY 运行; 应用身上残留的限制能被指出来;
+                                                   # 下载型缩到一个应用后的配置 (访问顺序相邻重复合并) 和 DL_APPS 的 DRY 运行; 只留下载型两个应用 (CLASSES) 的配置和 DRY 运行; 应用身上残留的限制能被指出来;
                                                    # 网络自检 (tests/test_linux_netcheck.py): ip 输出解析、各处代理设置的收集、每一跳不通时只报第一处、
                                                    # 登录页、代理地址失效 / 仍有效 / fake-IP 的区分、没有 ping / ip 命令的机器、没地址时区分 "没网线" 和 "DHCP 没人理"、
                                                    # 代理端口连得上但取不回东西 (本机假代理: 回 502 / 回 200 后断开 / 真的转发到一个 TLS 服务)
@@ -1314,11 +1335,11 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `python3 -m cf.linux.tool_jobs [KIND…] [--check [--cycles n]] [--config CONFIG]` / `--missing CONFIG` | §6.9 检查 | 计算应用的工具装没装、缺什么、怎么装; `--check` 试做并打印每个操作的墙钟 / CPU 时间; `--missing` 列出某个配置里工具没就绪的计算应用 (有则退出码 1) |
 | `python3 -m cf.linux.browser_dl --app ID [--url URL …] [--rate-mbps n] [--dir D] [--min-free-gb n]` / `--check` + `CF_BROWSER_DL_URL= CF_BROWSER_DL_RATE_MBPS= CF_BROWSER=` | 由 runner 启动 | §6.9 下载应用 `browser_dl`: 第二个 Firefox (独立 profile / 窗口类), 用浏览器自己的下载管理器反复下载同一个大文件, 下完即删; 默认经进程内的 CONNECT 中继限速 2 MB/s (0 = 不限速); `--check` 报告用哪个 Firefox、哪个源、限速多少 |
 | `python3 -m cf.linux.dl_trim CONFIG [--list] [--dry-run] [--punch] [--apps …] [--every s] [--grace s] [--min-mb n] [--dir D] [--for s]` | `run_classes.sh` 在 `DL_TRIM=1 / punch` 时启动 | §6.9 边下边删: 下载应用下完的文件 (只限亲眼见到它在写的) 随下随删; `--punch` 连正在下的文件已写的部分也还给文件系统; `--list` 看应用此刻在写哪些文件, `--dry-run` 只报告不删 |
-| `python3 -m cf.linux.subset CONFIG [--download APP… \| none] [--drop APP…] --out FILE` | `run_classes.sh` 在 `DL_APPS=…` 时调用 | 去掉若干应用后的配置 (应用表 / 三类表 / 访问顺序一起改), 例如下载型只留迅雷 |
+| `python3 -m cf.linux.subset CONFIG [--download APP… \| none] [--classes CLASS…] [--drop APP…] --out FILE` | `run_classes.sh` 在 `DL_APPS=…` / `CLASSES=…` 时调用 | 去掉若干应用后的配置 (应用表 / 三类表 / 访问顺序一起改), 例如下载型只留迅雷, 或只留下载型这一类 |
 | `python3 -m cf.linux.dl_files [--gb n \| --rate-mbps r --minutes M] [--min-gb a --max-gb b] [--mirror URL] [--http] [--skip N] [--plain]` | §6.9 准备下载任务 | 从清华 / 北外镜像站的目录页现查一批 0.7–3.3 GB、此刻能下的安装镜像链接 (够数为止, 不够就加 `?n=K` 重复), 用来粘进迅雷 / 百度网盘离线下载 |
 | `python3 -m cf.linux.netcheck` | §2.5 上不了网时 | 从地址、网关、网关之外、登录页、域名解析到代理设置逐跳检查, 停在第一处不通的地方并给出处理办法; 不需要配置文件, 探测不走代理; 退出码 0 = 通 |
 | `python3 -m cf.linux.netstat CONFIG [--watch s] [--min-kbps n] [--minutes M]` | §6.9 检查 | 真实下载应用此刻的连接数 / 速度 / 往返时延; `--min-kbps` 有应用没在下时退出码 1; `--minutes` 按看到的速度算这么多分钟要写多少盘, 放不下退出码 3 |
-| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= DL_APPS= DL_DISK_CHECK= DL_TRIM= DL_TRIM_ARGS= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
+| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= DL_APPS= CLASSES= DL_DISK_CHECK= DL_TRIM= DL_TRIM_ARGS= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
 | `python3 -m cf.linux.classes FILES… --out DIR [--no-plots]` | 分析 | §6.9 的三张表 (CSV / Markdown / Excel) 和图; 不重跑实验 |
 | `python3 -m cf.linux.bench_app --app ID --kind sevenzip\|z3\|openssl\|llama\|tesseract\|ffmpeg\|numeric\|compress\|download [--corpus-mb n --level n --threads n --model F --tokens n --workers k --scale f --url U --rtt-host H:P]` / `--serve PORT --rate-mbps n` / `--check-url U` | §6.9 内部 | 可度量的计算 / 下载应用: X11 窗口 + 循环做固定任务 (`sevenzip` / `z3` 每个任务启动一次真实程序), 每个任务的时延写到 `/tmp/cf_bench_<id>.jsonl`; `--serve` 是合成版的本机限速下载源 |
 | `python3 -m cf.linux.netstat CONFIG [--apps ID…] [--watch S] [--min-kbps K]` | §6.9 检查 | 看 S 秒配置里下载应用的 TCP 连接: 是否在跑、连接数、MB/s、往返时延 (内核 `ss` 统计); 低于 K 时退出码 1 |
