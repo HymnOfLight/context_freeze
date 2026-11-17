@@ -40,6 +40,11 @@
 #   DL_APPS="xunlei browser_dl"                           # download class reduced to these apps (of the config's three): here
 #                                                         # 迅雷 + the Firefox download; "xunlei", "browser_dl", or "none".
 #                                                         # The reduced config is written to $OUT/config.json (cf.linux.subset)
+#   CLASSES="download"                                    # only the apps of this class / these classes (interactive, compute,
+#                                                         # download), taking turns in front.  With DL_APPS: the download
+#                                                         # class alone with two of its apps, 2 steps per round - give it rounds:
+#   CLASSES=download DL_APPS="baidunetdisk browser_dl" ROUNDS=10 DWELL=30 CONFIG=configs/ubuntu_arm64_full.json \
+#     OUT=results/arm64_dl scripts/ubuntu/run_classes.sh  # each app 10 x 30 s in front and 10 x 30 s behind per cell, ~14 min per cell
 #   DL_DISK_CHECK=0                                       # do not stop when the downloads would not fit on the disk
 #   DL_TRIM=1                                             # delete every file 百度网盘 / 迅雷 finish while the run goes on (cf.linux.dl_trim:
 #                                                         # only files it saw them write): the disk holds the files in progress,
@@ -84,16 +89,24 @@ DRY="${DRY:-0}"
 mkdir -p "$OUT"
 LOG="$OUT/run_classes.log"
 exec > >(tee -a "$LOG") 2>&1
-if [ -n "${DL_APPS:-}" ]; then
-  # shellcheck disable=SC2086
-  CONFIG=$(python3 -m cf.linux.subset "$CONFIG" --download $DL_APPS --out "$OUT/config.json") || exit 2
+if [ -n "${DL_APPS:-}" ] || [ -n "${CLASSES:-}" ]; then
+  sub=()
+  # shellcheck disable=SC2206
+  [ -n "${DL_APPS:-}" ] && sub+=(--download $DL_APPS)
+  # shellcheck disable=SC2206
+  [ -n "${CLASSES:-}" ] && sub+=(--classes $CLASSES)
+  CONFIG=$(python3 -m cf.linux.subset "$CONFIG" "${sub[@]}" --out "$OUT/config.json") || exit 2
 fi
 PAT=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['trace']['pattern']))" "$CONFIG")
 T=$((ROUNDS * PAT))
 echo "== run_classes $(date -Is): config=$CONFIG rounds=$ROUNDS (T=$T) dwell=${DWELL}s seeds=$SEEDS cells=$CELLS out=$OUT"
+if [ "$T" -lt 12 ]; then
+  echo "!! only $T steps per cell ($PAT per round x $ROUNDS rounds): too few to compare front and background - ROUNDS=$(( (20 + PAT - 1) / PAT )) gives $(( (20 + PAT - 1) / PAT * PAT ))"
+fi
 
 has_app() { python3 -c "import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))['apps'] else 1)" "$CONFIG" "$1"; }
-has_downloads() { python3 -c "import json,sys; sys.exit(0 if (json.load(open(sys.argv[1])).get('classes') or {}).get('download') else 1)" "$CONFIG"; }
+has_class() { python3 -c "import json,sys; sys.exit(0 if (json.load(open(sys.argv[1])).get('classes') or {}).get(sys.argv[2]) else 1)" "$CONFIG" "$1"; }
+has_downloads() { has_class download; }
 MINUTES=$(( (T * (DWELL + 6) / 60 + 2) * $(echo $CELLS | wc -w) * $(echo $SEEDS | wc -w) ))
 SRV_PID=""
 TRIM_PID=""
@@ -149,7 +162,7 @@ if [ "$DRY" != 1 ]; then
   pkill -f "cf.linux.bench_app --app" 2>/dev/null && sleep 1 || true
   # one job of every compute app, here and unlimited: a tool that is installed but does not work (a model that
   # does not load, a codec that is missing) would otherwise only show up as bad_jobs after the run
-  if [ "${TOOLCHECK:-1}" = 1 ]; then
+  if [ "${TOOLCHECK:-1}" = 1 ] && has_class compute; then
     echo "  one test job per compute app (TOOLCHECK=0 skips this):"
     if ! python3 -m cf.linux.tool_jobs --check --cycles 1 --config "$CONFIG" | sed 's/^/    /'; then
       echo "!! a compute app does not do its job correctly - see the line marked FAILED / MISSING above" >&2
