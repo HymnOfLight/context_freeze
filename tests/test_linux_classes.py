@@ -264,6 +264,51 @@ def test_class_tables_compare_foreground_background_and_the_baseline(two_runs):
     assert s["work_checks"] == 11 and s["work_fail"] == 0
 
 
+def test_jobs_per_minute_does_not_lose_the_job_under_way_at_each_end():
+    # three 15 s stretches in front, a 5 s job after another: 12 per minute.  The job that began before the
+    # stretch is not "inside" it, so counting jobs and dividing by 15 s would say 8
+    ivs = [{"pos": "fg", "t0": t, "t1": t + 15.0} for t in (0.0, 100.0, 200.0)] + [{"pos": "bg", "t0": 15.0, "t1": 100.0}]
+    jobs = [{"T": t + e, "ms": 5000.0} for t in (0.0, 100.0, 200.0) for e in (9.0, 14.0)]
+    assert C._per_min(jobs, ivs, "fg") == pytest.approx(12.0)
+    assert C._per_min(jobs, ivs, "bg") is None
+    # a 10 s job completes once per stretch: no time between two completions, no rate
+    assert C._per_min([{"T": t + 12.0, "ms": 10000.0} for t in (0.0, 100.0, 200.0)], ivs, "fg") is None
+    assert C._per_min(jobs[:4], ivs, "fg") is None                      # two pairs are fewer than MIN_GAPS
+
+
+def test_a_step_during_which_the_machine_stood_still_is_left_out(two_runs):
+    import copy
+    _, none, _ = two_runs
+    before = {r["app"]: r for r in C.compute_rows(none)}["fake_num"]
+    assert C.stalled(none) == []
+
+    def with_long_step(cpu_factor):
+        run = copy.deepcopy(none)
+        for s in run["steps"]:
+            if s["t"] == 6:                                             # a 0.25 s dwell that took 15 minutes
+                for b in s["bg"].values():
+                    b["wall_s"], b["cg_cpu_ms"] = 900.0, b["cg_cpu_ms"] * cpu_factor
+            elif s["t"] > 6:
+                s["t_dwell"] += 900.0
+        return run
+
+    paused = with_long_step(1)                                          # ... in which the apps used a dwell's worth of CPU
+    assert [(x["t"], x["req"], x["wall_s"], x["paused"]) for x in C.stalled(paused)] == [(6, "fake_chat", 900.0, True)]
+    row = {r["app"]: r for r in C.compute_rows(paused)}["fake_num"]
+    assert row["bg_s"] == pytest.approx(before["bg_s"] - 0.25, abs=0.05)             # not 900 s more
+    assert row["bg_jobs_per_min"] == pytest.approx(before["bg_jobs_per_min"], rel=0.1)
+    assert row["bg_job_p50_ms"] == before["bg_job_p50_ms"] and row["fg_s"] == before["fg_s"]
+    assert all(iv["t1"] - iv["t0"] < 5 for iv in C.intervals(paused, "fake_num"))
+    dl = {r["app"]: r for r in C.download_rows(paused)}["fake_dlb"]
+    assert dl["bg_mbps"] == pytest.approx(40, rel=0.05) and dl["bg_s"] < 5
+    md = C.report_md([paused])
+    assert "第 7 步" in md and "虚拟机被暂停" in md and "实际过了 900 s" in md
+
+    hung = with_long_step(3600)                                         # the apps kept computing: not a pause
+    assert [x["paused"] for x in C.stalled(hung)] == [False]
+    assert "仍在运行" in C.report_md([hung]) and "虚拟机被暂停" not in C.report_md([hung])
+
+
 def test_classes_default_to_kind_and_category_without_a_config_entry(two_runs):
     _, none, _ = two_runs
     run = json.loads(json.dumps({k: none[k] for k in ("meta", "steps", "path")}))
