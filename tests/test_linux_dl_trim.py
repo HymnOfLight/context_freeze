@@ -364,6 +364,35 @@ def test_subset_keeps_one_class_alone():
         S.subset(cfg, only_classes=["downloads"])
 
 
+def test_subset_puts_an_idle_window_in_front_of_a_single_app():
+    """The Firefox download alone: it cannot take turns with itself, so a window that does nothing
+    holds the front in every other step."""
+    import json
+
+    from cf.linux import apps as A
+    from cf.linux import subset as S
+    cfg = json.load(open(os.path.join(REPO, "configs/ubuntu_arm64_full.json")))
+    out, gone = S.subset(cfg, download=["browser_dl"], only_classes=["download"], front="idle_front")
+    assert out["apps"] == ["browser_dl", "idle_front"] and len(gone) == 12 and "idle_front" not in gone
+    assert out["classes"] == {"interactive": [], "compute": [], "download": ["browser_dl"]}       # the window is in no class
+    assert out["trace"]["pattern"] == ["browser_dl", "idle_front"] and out["trace"]["T"] == 4
+    assert out["front_app"] == "idle_front" and out["throttle"] == cfg["throttle"] and "front_app" not in cfg
+
+    two, _ = S.subset(cfg, download=["baidunetdisk", "browser_dl"], only_classes=["download"], front="idle_front")
+    assert two["apps"] == ["baidunetdisk", "browser_dl"] and "front_app" not in two               # two apps: nothing is added
+    wps, gone = S.subset(cfg, download=["browser_dl"], only_classes=["download"], front="wps")    # an app of the config in front
+    assert wps["apps"] == ["browser_dl", "wps"] and "wps" not in gone and wps["classes"]["interactive"] == []
+    with pytest.raises(ValueError, match="only browser_dl is left"):                              # not in front of itself
+        S.subset(cfg, download=["browser_dl"], only_classes=["download"], front="browser_dl")
+
+    a = A.CATALOG["idle_front"]
+    assert a.kind == "placeholder" and "--cpu 0 --mem 0" in a.cmd and "--io-mbps" not in a.cmd and "--notify" not in a.cmd
+    import re
+    assert re.search(a.match, "python3 -m cf.linux.placeholder_app --app idle_front --title x")
+    assert not re.search(a.match, "python3 -m cf.linux.placeholder_app --app idle_front2")
+    assert re.search(a.wm_class, "cf-idle_front") and not re.search(a.wm_class, "cf-browser_dl")
+
+
 def test_run_script_runs_the_download_class_alone(tmp_path):
     import json
     env = dict(os.environ, DRY="1", OUT=str(tmp_path), CONFIG="configs/ubuntu_arm64_full.json", CLASSES="download",

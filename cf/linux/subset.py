@@ -6,6 +6,8 @@ set up on this machine, a download class reduced to the one client that works).
     python3 -m cf.linux.subset CONFIG --drop qq baidunetdisk --out OUT.json
     python3 -m cf.linux.subset CONFIG --classes download --download baidunetdisk browser_dl --out OUT.json
                                                                            # the download class alone, two of its apps
+    python3 -m cf.linux.subset CONFIG --classes download --download browser_dl --front idle_front --out OUT.json
+                                                                           # one app alone, an idle window in front in between
 
 The apps go out of `apps`, of every class in `classes` and of the visiting order `trace.pattern`
 (two visits to the same app that end up next to each other become one).  Everything else - limits,
@@ -14,6 +16,9 @@ CLASSES=...).
 
 With --classes the apps of the other classes go; the ones that stay take turns in front.  At least
 two apps have to stay: an app is measured in the background only while another one is in front.
+With --front APP a single app may stay: APP (`idle_front`: a window that does nothing) is added, in
+no class, and the two take turns - the app is in front in every other step and behind APP in the
+steps between, with nothing else competing for the network, the CPU or the memory.
 """
 from __future__ import annotations
 
@@ -23,9 +28,11 @@ from typing import Optional, Sequence
 
 
 def subset(cfg: dict, drop: Sequence[str] = (), download: Optional[Sequence[str]] = None,
-           only_classes: Optional[Sequence[str]] = None) -> tuple[dict, list[str]]:
+           only_classes: Optional[Sequence[str]] = None, front: Optional[str] = None) -> tuple[dict, list[str]]:
     """(the reduced config, the apps that were removed).  `download`: keep only these apps of
     classes.download ([] = none of them).  `only_classes`: keep only the apps of these classes.
+    `front`: when a single app is left, this app joins it (in no class) and takes the front in every
+    other step; the config then names it as `front_app`.
     ValueError for a name the config does not have, and when fewer than two apps would be left."""
     out = copy.deepcopy(cfg)
     apps = list(out.get("apps") or [])
@@ -64,13 +71,20 @@ def subset(cfg: dict, drop: Sequence[str] = (), download: Optional[Sequence[str]
             pat.pop()
         if not pat:
             raise ValueError("nothing left in trace.pattern")
-        if len(pat) < 2:
+        if len(pat) < 2 and front and front != pat[0]:
+            out["apps"] = [a for a in out["apps"] if a != front] + [front]
+            gone = [a for a in gone if a != front]              # an app of the config may be the one in front: no class, not reported
+            pat.append(front)
+            out["front_app"] = front
+        elif len(pat) < 2:
             raise ValueError(f"only {pat[0]} is left: it would be in front for the whole run and never in the "
-                             "background - keep a second app")
+                             "background - keep a second app" + ("" if front else ", or name one that holds the front "
+                                                                 "in between (--front idle_front; run_classes.sh: FRONT_APP)"))
         if "T" in tr and tr["pattern"]:
             tr["T"] = max(1, round(tr["T"] / len(tr["pattern"]))) * len(pat)
         tr["pattern"] = pat
-    out["_comment_subset"] = f"derived by cf.linux.subset: without {', '.join(gone)}"
+    out["_comment_subset"] = f"derived by cf.linux.subset: without {', '.join(gone)}" + (
+        f"; {out['front_app']} holds the front in every other step" if out.get("front_app") else "")
     return out, gone
 
 
@@ -84,12 +98,14 @@ def main(argv=None) -> int:
     ap.add_argument("--classes", nargs="+", metavar="CLASS",
                     help="keep only the apps of these classes (interactive / compute / download)")
     ap.add_argument("--drop", nargs="+", default=[], metavar="APP", help="apps to take out")
+    ap.add_argument("--front", metavar="APP", help="when only one app is left: this one (idle_front = a window that does "
+                                                   "nothing) is added and holds the front in every other step")
     ap.add_argument("--out", required=True, help="where to write the reduced config")
     args = ap.parse_args(argv)
     cfg = json.load(open(args.config))
     keep = None if args.download is None else [a for a in args.download if a != "none"]
     try:
-        out, gone = subset(cfg, args.drop, keep, args.classes)
+        out, gone = subset(cfg, args.drop, keep, args.classes, args.front or None)
     except ValueError as e:
         print(f"!! {e}", file=sys.stderr)
         return 2
@@ -97,6 +113,10 @@ def main(argv=None) -> int:
         json.dump(out, f, ensure_ascii=False, indent=2)
     print(f"  apps taken out of {args.config}: {', '.join(gone) or 'none'}; {len(out['apps'])} apps, "
           f"{len((out.get('trace') or {}).get('pattern') or [])} steps per round -> {args.out}", file=sys.stderr)
+    if out.get("front_app"):
+        alone = [a for a in out["apps"] if a != out["front_app"]]
+        print(f"  only {', '.join(alone)} is left: {out['front_app']} holds the front in every other step, so that "
+              f"{', '.join(alone)} is measured in front and in the background by turns", file=sys.stderr)
     print(args.out)
     return 0
 
