@@ -343,6 +343,85 @@ def test_run_script_runs_the_reduced_config(tmp_path):
     assert r.returncode == 2 and "not a download app" in r.stdout + r.stderr
 
 
+def test_subset_keeps_one_class_alone():
+    import json
+
+    from cf.linux import subset as S
+    cfg = json.load(open(os.path.join(REPO, "configs/ubuntu_arm64_full.json")))
+    out, gone = S.subset(cfg, download=["baidunetdisk", "browser_dl"], only_classes=["download"])
+    assert out["apps"] == ["baidunetdisk", "browser_dl"] and len(gone) == 11 and gone[0] == "xunlei"
+    assert out["classes"] == {"interactive": [], "compute": [], "download": ["baidunetdisk", "browser_dl"]}
+    assert out["trace"]["pattern"] == ["baidunetdisk", "browser_dl"] and out["trace"]["T"] == 4      # they take turns in front
+    assert out["throttle"] == cfg["throttle"] and len(cfg["apps"]) == 13
+
+    three, _ = S.subset(cfg, only_classes=["download"])
+    assert sorted(three["trace"]["pattern"]) == ["baidunetdisk", "browser_dl", "xunlei"]
+    rest, gone = S.subset(cfg, only_classes=["interactive", "compute"])
+    assert gone == ["baidunetdisk", "xunlei", "browser_dl"] and len(rest["trace"]["pattern"]) == 14
+    with pytest.raises(ValueError, match="only browser_dl is left"):                 # nothing would ever be in the background
+        S.subset(cfg, download=["browser_dl"], only_classes=["download"])
+    with pytest.raises(ValueError, match="downloads is not a class"):
+        S.subset(cfg, only_classes=["downloads"])
+
+
+def test_subset_puts_an_idle_window_in_front_of_a_single_app():
+    """The Firefox download alone: it cannot take turns with itself, so a window that does nothing
+    holds the front in every other step."""
+    import json
+
+    from cf.linux import apps as A
+    from cf.linux import subset as S
+    cfg = json.load(open(os.path.join(REPO, "configs/ubuntu_arm64_full.json")))
+    out, gone = S.subset(cfg, download=["browser_dl"], only_classes=["download"], front="idle_front")
+    assert out["apps"] == ["browser_dl", "idle_front"] and len(gone) == 12 and "idle_front" not in gone
+    assert out["classes"] == {"interactive": [], "compute": [], "download": ["browser_dl"]}       # the window is in no class
+    assert out["trace"]["pattern"] == ["browser_dl", "idle_front"] and out["trace"]["T"] == 4
+    assert out["front_app"] == "idle_front" and out["throttle"] == cfg["throttle"] and "front_app" not in cfg
+
+    two, _ = S.subset(cfg, download=["baidunetdisk", "browser_dl"], only_classes=["download"], front="idle_front")
+    assert two["apps"] == ["baidunetdisk", "browser_dl"] and "front_app" not in two               # two apps: nothing is added
+    wps, gone = S.subset(cfg, download=["browser_dl"], only_classes=["download"], front="wps")    # an app of the config in front
+    assert wps["apps"] == ["browser_dl", "wps"] and "wps" not in gone and wps["classes"]["interactive"] == []
+    with pytest.raises(ValueError, match="only browser_dl is left"):                              # not in front of itself
+        S.subset(cfg, download=["browser_dl"], only_classes=["download"], front="browser_dl")
+
+    a = A.CATALOG["idle_front"]
+    assert a.kind == "placeholder" and "--cpu 0 --mem 0" in a.cmd and "--io-mbps" not in a.cmd and "--notify" not in a.cmd
+    import re
+    assert re.search(a.match, "python3 -m cf.linux.placeholder_app --app idle_front --title x")
+    assert not re.search(a.match, "python3 -m cf.linux.placeholder_app --app idle_front2")
+    assert re.search(a.wm_class, "cf-idle_front") and not re.search(a.wm_class, "cf-browser_dl")
+
+
+def test_run_script_runs_the_download_class_alone(tmp_path):
+    import json
+    env = dict(os.environ, DRY="1", OUT=str(tmp_path), CONFIG="configs/ubuntu_arm64_full.json", CLASSES="download",
+               DL_APPS="baidunetdisk browser_dl", ROUNDS="10", DWELL="30")
+    r = subprocess.run(["bash", "scripts/ubuntu/run_classes.sh"], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.load(open(tmp_path / "config.json"))["apps"] == ["baidunetdisk", "browser_dl"]
+    assert "rounds=10 (T=20)" in r.stdout and "too few" not in r.stdout
+    cmds = [ln for ln in r.stdout.splitlines() if ln.startswith("python3 -u run_linux.py")]
+    assert len(cmds) == 3 and all("--T 20" in c and "--dwell 30" in c for c in cmds)
+
+    del env["ROUNDS"]                                            # the default 2 rounds are 4 steps here: said, not refused
+    r = subprocess.run(["bash", "scripts/ubuntu/run_classes.sh"], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0 and "only 4 steps per cell" in r.stdout and "ROUNDS=10 gives 20" in r.stdout
+
+    env.update(DL_APPS="browser_dl", ROUNDS="10")               # one app: the idle window holds the front in between
+    r = subprocess.run(["bash", "scripts/ubuntu/run_classes.sh"], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    cfg = json.load(open(tmp_path / "config.json"))
+    assert cfg["apps"] == ["browser_dl", "idle_front"] and cfg["trace"]["pattern"] == ["browser_dl", "idle_front"]
+    assert "idle_front holds the front in every other step" in r.stdout and "rounds=10 (T=20)" in r.stdout
+    cmds = [ln for ln in r.stdout.splitlines() if ln.startswith("python3 -u run_linux.py")]
+    assert len(cmds) == 3 and all("--T 20" in c for c in cmds)
+
+    env["FRONT_APP"] = ""                                        # ... unless that is switched off
+    r = subprocess.run(["bash", "scripts/ubuntu/run_classes.sh"], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2 and "only browser_dl is left" in r.stdout + r.stderr and "FRONT_APP" in r.stdout + r.stderr
+
+
 def test_limits_left_on_an_app_are_named(tmp_path):
     from cf.linux import netstat as N
     from cf.linux.cgroup import CgroupTree

@@ -40,6 +40,18 @@
 #   DL_APPS="xunlei browser_dl"                           # download class reduced to these apps (of the config's three): here
 #                                                         # 迅雷 + the Firefox download; "xunlei", "browser_dl", or "none".
 #                                                         # The reduced config is written to $OUT/config.json (cf.linux.subset)
+#   CLASSES="download"                                    # only the apps of this class / these classes (interactive, compute,
+#                                                         # download), taking turns in front.  With DL_APPS: the download
+#                                                         # class alone with two of its apps, 2 steps per round - give it rounds:
+#   CLASSES=download DL_APPS="baidunetdisk browser_dl" ROUNDS=10 DWELL=30 CONFIG=configs/ubuntu_arm64_full.json \
+#     OUT=results/arm64_dl scripts/ubuntu/run_classes.sh  # each app 10 x 30 s in front and 10 x 30 s behind per cell, ~14 min per cell
+#   CLASSES=download DL_APPS=browser_dl CF_BROWSER_DL_RATE_MBPS=0 ROUNDS=10 DWELL=30 CONFIG=configs/ubuntu_arm64_full.json \
+#     OUT=results/arm64_dl_ff scripts/ubuntu/run_classes.sh   # the Firefox download alone and not held at a rate: no other client
+#                                                         # takes its bandwidth.  One app cannot take turns with itself, so an idle
+#                                                         # window (idle_front: no CPU, no memory, no network) holds the front in
+#                                                         # every other step - 10 x 30 s in front, 10 x 30 s behind it per cell
+#   FRONT_APP=wps                                         # another app of the config holds the front instead; FRONT_APP="" refuses
+#                                                         # a run with a single app as before
 #   DL_DISK_CHECK=0                                       # do not stop when the downloads would not fit on the disk
 #   DL_TRIM=1                                             # delete every file 百度网盘 / 迅雷 finish while the run goes on (cf.linux.dl_trim:
 #                                                         # only files it saw them write): the disk holds the files in progress,
@@ -81,19 +93,29 @@ DL_PORT="${DL_PORT:-18080}"
 RTT_HOST="${RTT_HOST-www.baidu.com:443}"
 EXTRA="${EXTRA:-}"
 DRY="${DRY:-0}"
+FRONT_APP="${FRONT_APP-idle_front}"
 mkdir -p "$OUT"
 LOG="$OUT/run_classes.log"
 exec > >(tee -a "$LOG") 2>&1
-if [ -n "${DL_APPS:-}" ]; then
-  # shellcheck disable=SC2086
-  CONFIG=$(python3 -m cf.linux.subset "$CONFIG" --download $DL_APPS --out "$OUT/config.json") || exit 2
+if [ -n "${DL_APPS:-}" ] || [ -n "${CLASSES:-}" ]; then
+  sub=()
+  # shellcheck disable=SC2206
+  [ -n "${DL_APPS:-}" ] && sub+=(--download $DL_APPS)
+  # shellcheck disable=SC2206
+  [ -n "${CLASSES:-}" ] && sub+=(--classes $CLASSES)
+  [ -n "$FRONT_APP" ] && sub+=(--front "$FRONT_APP")
+  CONFIG=$(python3 -m cf.linux.subset "$CONFIG" "${sub[@]}" --out "$OUT/config.json") || exit 2
 fi
 PAT=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))['trace']['pattern']))" "$CONFIG")
 T=$((ROUNDS * PAT))
 echo "== run_classes $(date -Is): config=$CONFIG rounds=$ROUNDS (T=$T) dwell=${DWELL}s seeds=$SEEDS cells=$CELLS out=$OUT"
+if [ "$T" -lt 12 ]; then
+  echo "!! only $T steps per cell ($PAT per round x $ROUNDS rounds): too few to compare front and background - ROUNDS=$(( (20 + PAT - 1) / PAT )) gives $(( (20 + PAT - 1) / PAT * PAT ))"
+fi
 
 has_app() { python3 -c "import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))['apps'] else 1)" "$CONFIG" "$1"; }
-has_downloads() { python3 -c "import json,sys; sys.exit(0 if (json.load(open(sys.argv[1])).get('classes') or {}).get('download') else 1)" "$CONFIG"; }
+has_class() { python3 -c "import json,sys; sys.exit(0 if (json.load(open(sys.argv[1])).get('classes') or {}).get(sys.argv[2]) else 1)" "$CONFIG" "$1"; }
+has_downloads() { has_class download; }
 MINUTES=$(( (T * (DWELL + 6) / 60 + 2) * $(echo $CELLS | wc -w) * $(echo $SEEDS | wc -w) ))
 SRV_PID=""
 TRIM_PID=""
@@ -107,6 +129,8 @@ cleanup() {
   # the bench apps would otherwise keep computing / downloading after the experiment
   pkill -f "cf.linux.bench_app --app" 2>/dev/null || true
   pkill -f "cf.linux.browser_dl --app" 2>/dev/null || true       # it stops its browser and removes the partial file
+  pkill -f "cf.linux.placeholder_app --app idle_front" 2>/dev/null || true   # the idle window of a single-app run: left open,
+                                                                             # the next run would find an app it does not know
   [ -n "$old_swappiness" ] && sudo sysctl -q -w vm.swappiness="$old_swappiness" || true
 }
 
@@ -132,6 +156,8 @@ if [ "$DRY" != 1 ]; then
     [ "${STRICT:-1}" = 1 ] && exit 2
   fi
   want=$(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['apps']))" "$CONFIG")
+  # the idle window of an earlier single-app run that was killed before it could tidy up: ours, and it holds nothing
+  case " $want " in *" idle_front "*) ;; *) pkill -f "cf.linux.placeholder_app --app idle_front" 2>/dev/null && sleep 1 || true;; esac
   others=""
   for leaf in /sys/fs/cgroup/cf/*/; do
     id=$(basename "$leaf"); [ "$id" = host ] && continue
@@ -149,7 +175,7 @@ if [ "$DRY" != 1 ]; then
   pkill -f "cf.linux.bench_app --app" 2>/dev/null && sleep 1 || true
   # one job of every compute app, here and unlimited: a tool that is installed but does not work (a model that
   # does not load, a codec that is missing) would otherwise only show up as bad_jobs after the run
-  if [ "${TOOLCHECK:-1}" = 1 ]; then
+  if [ "${TOOLCHECK:-1}" = 1 ] && has_class compute; then
     echo "  one test job per compute app (TOOLCHECK=0 skips this):"
     if ! python3 -m cf.linux.tool_jobs --check --cycles 1 --config "$CONFIG" | sed 's/^/    /'; then
       echo "!! a compute app does not do its job correctly - see the line marked FAILED / MISSING above" >&2
@@ -194,6 +220,18 @@ if [ "$DRY" != 1 ]; then
   # the browser that downloads by itself: start it now, so that it is downloading when the check below looks
   if has_app browser_dl; then
     if python3 -m cf.linux.browser_dl --check | sed 's/^/    browser_dl: /'; then
+      # one that is still running was started with the rate of that moment: CF_BROWSER_DL_RATE_MBPS of this run
+      # would silently not apply to it
+      dl_pid=$(pgrep -u "$USER" -f "cf.linux.browser_dl --app browser_dl" | head -1 || true)
+      if [ -n "$dl_pid" ]; then
+        dl_have=$(tr '\0' '\n' < "/proc/$dl_pid/environ" 2>/dev/null | sed -n 's/^CF_BROWSER_DL_RATE_MBPS=//p' || true)
+        if ! python3 -c "import sys; sys.exit(0 if float(sys.argv[1] or 2) == float(sys.argv[2] or 2) else 1)" \
+             "$dl_have" "${CF_BROWSER_DL_RATE_MBPS:-}" 2>/dev/null; then
+          echo "    browser_dl is running with rate ${dl_have:-2} MB/s, this run asks for ${CF_BROWSER_DL_RATE_MBPS:-2} (0 = unlimited): restarting it"
+          pkill -f "cf.linux.browser_dl --app" 2>/dev/null || true
+          for _ in $(seq 20); do pgrep -u "$USER" -f "cf.linux.browser_dl --app browser_dl" >/dev/null || break; sleep 1; done
+        fi
+      fi
       if ! pgrep -u "$USER" -f "cf.linux.browser_dl --app browser_dl" >/dev/null; then
         python3 run_linux.py "$CONFIG" --launch browser_dl | sed 's/^/    /' || true
         echo "    waiting 25 s for its download to start"; sleep 25

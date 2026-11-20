@@ -36,6 +36,7 @@ from typing import Optional, Sequence
 from ..scenarios import EXTRA_NAMES, Scenario
 
 PLACEHOLDER_CMD = "python3 -m cf.linux.placeholder_app --app {id} --title '{name}'"
+IDLE_FRONT = "idle_front"              # the window that does nothing: holds the front while a lone app is measured behind it
 
 
 @dataclass
@@ -302,6 +303,12 @@ CATALOG: dict[str, LinuxApp] = {a.id: a for a in [
     _p("sim_download", "下载占位", "download"),
     _p("sim_push", "推送占位", "push"),
     _p("sim_compute", "计算占位", "compute"),
+    LinuxApp(IDLE_FRONT, "空闲窗口", "compute",
+             cmd=f"python3 -m cf.linux.placeholder_app --app {IDLE_FRONT} --title '空闲窗口' --cpu 0 --mem 0",
+             match=rf"placeholder_app.*--app {IDLE_FRONT}\b", wm_class=rf"^cf-{IDLE_FRONT}$", arch=("any",),
+             install="bundled: python3 -m cf.linux.placeholder_app (needs python3-xlib)", kind="placeholder",
+             note="一个什么都不做的窗口 (不占 CPU, 不留内存, 不联网): 实验里只剩一个应用时由它轮流占着前台, "
+                  "那个应用才有 '后台' 可量 (run_classes.sh 的 FRONT_APP, cf/linux/subset.py --front)"),
     # ------------------------------------- compute apps of the three-class experiment (manual §6.9): real tools
     _b("sevenzip", "7-Zip", "compute", "sevenzip", install="sudo apt install p7zip-full",
        note="真实的 7-Zip (7z): 把约 4 MB 的系统真实文件 (文档 / python 源码 / 可执行文件) 用默认级别 -mx=5、两线程压成 .7z, "

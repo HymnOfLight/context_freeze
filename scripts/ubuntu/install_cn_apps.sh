@@ -53,20 +53,52 @@ if [ "$FIREFOX" = 1 ]; then
   # Mozilla's APT repository: a real deb (the Ubuntu 22.04 default is a snap whose processes land in
   # snapd's own systemd scope, outside our cgroup).  Same steps as manual §0 step 4.
   echo "== firefox (Mozilla APT deb build) + xclip"
-  if dpkg-query -W -f='${db:Status-Status}' firefox 2>/dev/null | grep -q installed && [ ! -d /snap/firefox ] \
-     && apt-cache policy firefox | grep -q packages.mozilla.org; then
+  # read into variables first: under pipefail `cmd | grep -q` fails whenever grep leaves before cmd has finished writing
+  fx_status="$(dpkg-query -W -f='${db:Status-Status}' firefox 2>/dev/null || true)"
+  fx_policy="$(apt-cache policy firefox 2>/dev/null || true)"
+  if [ "$fx_status" = installed ] && [ ! -d /snap/firefox ] && [ -x /usr/lib/firefox/firefox ] \
+     && grep -q packages.mozilla.org <<<"$fx_policy"; then
     echo "   already installed: $(dpkg-query -W -f='${Version}' firefox)"; skipped+=(firefox)
   else
+    # Every proxy setting left out: a proxy that is set but fetches nothing (the host's Clash answering
+    # "502 Bad Gateway") must not be the end of it - packages.mozilla.org needs none.
+    direct=(env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY)
+    key=/etc/apt/keyrings/packages.mozilla.org.asc
+    # gpg's exit status says nothing here: it is 2 for a root that has no ~/.gnupg yet, with the key shown all the same
+    key_ok() { { gpg -n -q --import --import-options import-show "$key" 2>/dev/null || true; } | grep -q 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3; }
+    # the real thing, not Ubuntu's "firefox" package (a script that starts the snap; its version says so)
+    deb_ok() { [ -x /usr/lib/firefox/firefox ] && ! dpkg-query -W -f='${Version}' firefox 2>/dev/null | grep -q snap; }
+    get_deb() {  # [direct]
+      local pre=() opt=()
+      if [ "${1:-}" = direct ]; then pre=("${direct[@]}"); opt=(-o Acquire::http::Proxy= -o Acquire::https::Proxy=); fi
+      "${pre[@]}" apt-get "${opt[@]}" update -q || true
+      # --allow-downgrades: Ubuntu's own "firefox" package (the snap launcher) is version 1:1snap1-..., which
+      # sorts above every real Firefox version - replacing it counts as a downgrade, and -y alone refuses those
+      "${pre[@]}" apt-get "${opt[@]}" install -y -q --allow-downgrades firefox xclip && deb_ok
+    }
     install -d -m 0755 /etc/apt/keyrings
-    wget -qO /etc/apt/keyrings/packages.mozilla.org.asc https://packages.mozilla.org/apt/repo-signing-key.gpg || true
-    if gpg -n -q --import --import-options import-show /etc/apt/keyrings/packages.mozilla.org.asc 2>/dev/null \
-         | grep -q 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3; then
-      echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
+    wget -qO "$key" https://packages.mozilla.org/apt/repo-signing-key.gpg || true
+    if ! key_ok; then
+      echo "   signing key: no luck with the proxy settings as they are, trying without them"
+      "${direct[@]}" wget -qO "$key" https://packages.mozilla.org/apt/repo-signing-key.gpg || true
+    fi
+    if key_ok; then
+      echo "deb [signed-by=$key] https://packages.mozilla.org/apt mozilla main" \
         > /etc/apt/sources.list.d/mozilla.list
       printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla
-      snap list firefox >/dev/null 2>&1 && snap remove firefox
-      if apt-get update -q && apt-get install -y -q firefox xclip; then installed+=(firefox)
-      else echo "!! firefox: apt failed (packages.mozilla.org unreachable? proxy on for this step: manual §2.5)"; failed+=(firefox); fi
+      if get_deb || { echo "   apt: no luck with the proxy settings as they are, trying without them"; get_deb direct; }; then
+        # The snap goes only now that the deb is in place - never leave the machine without a browser.
+        # Its profile (~/snap/firefox) is not carried over: the deb starts with a fresh ~/.mozilla;
+        # snapd keeps a snapshot of the old one for 31 days (snap saved).
+        if snap list firefox >/dev/null 2>&1; then
+          snap remove firefox || echo "   note: could not remove the firefox snap (is it running? quit it, then: sudo snap remove firefox)"
+        fi
+        installed+=(firefox)
+      else
+        echo "!! firefox: the deb from packages.mozilla.org did not install, with and without the proxy settings - apt's"
+        echo "   messages above say why (fetch errors: python3 -m cf.linux.netcheck, manual §2.5). The snap, if there was one, was left alone."
+        failed+=(firefox)
+      fi
     else
       echo "!! firefox: the Mozilla signing key did not download completely (manual §10) - skipped"; failed+=(firefox)
     fi

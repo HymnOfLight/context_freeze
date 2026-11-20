@@ -52,7 +52,7 @@ wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | sudo tee /etc/
 gpg -n -q --import --import-options import-show /etc/apt/keyrings/packages.mozilla.org.asc | grep -q 35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 && echo key-ok
 echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" | sudo tee /etc/apt/sources.list.d/mozilla.list
 printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' | sudo tee /etc/apt/preferences.d/mozilla
-sudo apt update && sudo apt install -y firefox
+sudo apt update && sudo apt install -y --allow-downgrades firefox    # --allow-downgrades: 已经装着 Ubuntu 自带的 firefox 包 (启动 snap 的那个, 版本号 1:1snap1…) 时, 换成真正的 deb 在 apt 看来是 "降级"
 sudo apt install -y ubuntu-desktop-minimal      # ~1.5 GB; 之后 sudo systemctl set-default graphical.target && sudo reboot
 ```
 
@@ -270,6 +270,8 @@ python3 -m cf.linux.netcheck         # 地址 -> 网关 -> 网关之外 -> 登�
 | `addresses are reachable but names do not resolve` | `up 223.5.5.5 443` 通, `getent hosts www.baidu.com` 没结果: DNS 还指着旧网络 (`resolvectl status`) | `sudo resolvectl dns enp0s1 223.5.5.5` (到下次重启为止); 手写过 DNS 的改 netplan / NetworkManager |
 | `proxy 192.168.64.1:7897 does not answer, and it is set in …` | **网络本身是通的**, 但本节开头写进 `/etc/environment`、`/etc/apt/apt.conf.d/95proxy` (或 GNOME "网络代理") 的代理地址是共享网络下的宿主, 桥接后没有这台机器: 读这些设置的程序 (apt、curl、git、pip、用 "系统代理" 的浏览器) 全都连不上 | 注释掉 `/etc/environment` 里那几行后重新登录, `sudo rm /etc/apt/apt.conf.d/95proxy`, `gsettings set org.gnome.system.proxy mode none`, 当前终端 `unset {http,https,ftp,all}_proxy {HTTP,HTTPS,FTP,ALL}_PROXY`; 还想走代理就把地址换成 Mac 在局域网里的 IP (Clash 开 Allow LAN) |
 | `proxy 192.168.64.1:7897 … is the host on UTM's shared network; this machine is not on that network now` (警告, 跟在上面某一条后面) | 路还没通到能检查代理的地方, 但已经能看出: 网络修好以后这个代理设置在桥接下也是死的 | 同上一行; 改回 Shared Network 则它重新可用, 不用动 |
+| `proxy 192.168.64.1:7897 takes connections but fetches nothing through them (…: 502 Bad Gateway …)` | 代理的端口连得上 (Allow LAN、端口、防火墙都没问题), 但经它取什么都失败 —— `netcheck` 真的经它向 `www.baidu.com` 和 `github.com` 各做了一次 TLS 握手。毛病在**宿主上的代理内部** (节点失效 / 订阅过期 / 规则把请求拒掉), 不在虚拟机也不在路上。虚拟机里的表现: `apt` 报 `502  Bad Gateway [IP: 192.168.64.1 7897]`, `git pull` 报 `gnutls_handshake() failed` | 在 Mac 上 `curl -x http://127.0.0.1:7897 https://github.com -o /dev/null -w '%{http_code}\n'` 应是 200, 不是就换节点 / 更新订阅 / 模式改成 "规则" 或 "全局"; Mac 的浏览器能开网页不说明代理是好的 (系统代理没开时浏览器是直连)。修好之前不需要代理的事绕开它做: `sudo env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY apt install …`, 当前终端 `unset …` (同上) |
+| `proxy … reaches www.baidu.com but not github.com (…)` | 代理的直连规则是通的, 出国的那一路 (节点) 不通 | 同上一行的 Mac 侧检查; 实验本身不需要代理, 受影响的只有 `git pull` 和 `install_compute_apps.sh --llama` |
 | `… resolve into 198.18.x.x` (警告) | 还在宿主的 fake-IP 代理后面 (上一段) | 关 TUN 模式 |
 
 桥接后**不经过 Mac 的代理**, 所以 GitHub 之类原来靠代理才快的站点会变慢或打不开 —— 这是桥接的本意, 不是故障; 需要时按上表 `proxy …` 那一行把代理地址换成 Mac 的局域网 IP。
@@ -546,7 +548,7 @@ Wayland 会话里演练一步会跳过 (xdotool 不可用), 登录检测照常�
 | `running outside /cf (desktop icon / autostart)` | 应用在跑, 但进程在 `user.slice` 里 (从桌面图标点开的, 或钉钉这类开机自启动的), 普通用户不能把它移进 `/cf/<id>`, 限流对它无效 | 交互式 `cf_onboard.sh <id>` 会在启动时发现并提议 "退出它并由脚本重新启动" (回车即可); 钉钉还要关掉自启动 (`rm ~/.config/autostart/*dingtalk*`); 或配置 `sudo_adopt: true` |
 | `login timeout / skipped` | 等了 `--onboard-timeout` (默认 600 s) 没见到 ≥ `main` 的主窗口 | 登录完成后重跑 `cf_onboard.sh <id>`; 主窗口本来就小的在 `onboard_overrides` 里改 `main` |
 | `N non-normal (dialog / dock ...)` 出现在 `main_window` 列 | 找到的窗口都不是普通顶层窗口 (对话框 / 托盘). 旧版本把微信 / WPS / 中望的 Qt 无边框主窗口 (`_KDE_NET_WM_WINDOW_TYPE_OVERRIDE, _NET_WM_WINDOW_TYPE_NORMAL`) 也误判成这种, 现在按类型列表判断 | 更新代码; 仍出现就 `--discover` 看该窗口的 `_NET_WM_WINDOW_TYPE` |
-| `no main window now (...)` | 记录是就绪的, 但现在没有一个 ≥ `main` 的普通窗口; `main_window` 列写着实际找到的最大窗口 (`largest 640x400 < 700x500`) 或 `no window matched` | 窗口被最小化 / 关掉了就点开; 尺寸偏小就放大窗口或改 `main`; `no window matched` = WM_CLASS / 标题都对不上, `--discover` 看真实的 WM_CLASS 写进 `app_overrides.wm_class` |
+| `no main window now (...)` | 记录是就绪的, 但现在没有一个 ≥ `main` 的普通窗口; `main_window` 列写着实际找到的最大窗口和它的标题 (`largest 640x400 '微信' < 700x500`; 看标题就知道那是登录框、设置对话框, 还是主窗口本身就这么小) 或 `no window matched` | 主窗口被最小化 / 收进托盘 / 关掉了就点开 (留在屏幕上的只是个对话框时就是这种情况); 主窗口本身偏小就拉大, 或在配置的 `onboard_overrides` 里改 `main`; `no window matched` = WM_CLASS / 标题都对不上, `--discover` 看真实的 WM_CLASS 写进 `app_overrides.wm_class` |
 | `work not-active (focus was on 0x... 'xxx' [class])` / `oracle clipboard: not-active (...)` | 脚本发键前核对 `_NET_ACTIVE_WINDOW`: 焦点在**别的程序**的窗口上 (括号里是谁: 弹窗 / 对话框 / 桌面) - 切前台失败 (GNOME 焦点保护 / 模态对话框挡住) 或当时记的是已经消失的登录框。该应用自己的其他窗口 (QQ / 钉钉弹出的独立会话窗、WPS 重建的文档窗) 不算, 照常输入。发现焦点被抢时脚本会**夺回一次** (再 `activate` 该应用) 再输入 / 读 oracle, 日志记 `refocused`; 只有夺不回来才算 `not-active` | 关掉括号里那个窗口 (操作者的终端: 回车后别再点它), 重跑 `cf_onboard.sh <id>`; 还不行看 §10 "activate 失败" |
 | `prep skipped` | 准备那一步回答了 `s` - 常常不是故意的: 上一问 (如 "退出并重新启动?") 回车后脚本忙了 10-20 s, 这期间敲的键被下一问吃掉了 | 重跑 `cf_onboard.sh <id>`, 等提示出现再敲键 (现在每个提示前会丢弃提前敲的键) |
 | `oracle clipboard: xclip: ...` | 没装 xclip | `sudo apt install xclip` |
@@ -805,6 +807,9 @@ python3 -m cf.linux.classes results/arm64_classes/*.jsonl --out results/arm64_cl
 - **先看报告开头每格下面有没有 "注意"**, 以及日志里的 WARN —— 它们说的是这一格的数据能不能用:
   - "**X 的内存限制在这一格没有生效**": X 被压到后台时仍留着远多于 `memory.high` 的匿名内存, 而它的 cgroup 只记着几 MB。cgroup v2 里内存记在**分配它的时候进程所在的 cgroup** 上, 进程后来被移进 `/cf/<app>` 时账不跟着走, 所以 `memory.high` / `memory.reclaim` 够不着这些页。典型原因是应用启动时真正干活的进程离开了它的 cgroup (snap 包、交给桌面环境启动的包装脚本; 日志 `N matching process(es) outside its cgroup` / `had left its cgroup while it started`), 事后才被收养回来。这一格对 X 只有 CPU 限制, 它的响应时间不能写成 "内存被压过以后" 的结果; 处理办法见 §10 "应用的进程不在它的 cgroup 里"。
   - 日志 "**N app(s) were started by this warmup**": 应用是这次运行冷启动的, `m_fg` 是它启动后 `warmup_dwell_s` 秒时的占用, 通常远小于稳定后的占用 (一次实测: 微信冷启动后 6 s 是 252 MB, 用了几分钟后约 590 MB), 于是 `memory.high = 比例 × m_fg` 比设想的紧得多 (那次 `mild` 格的 "0.5 × m_fg" 实际只有稳定占用的约 21 %), 后面几格沿用第一格的 `m_fg` 也一样。**先把交互应用启动好** (`python3 run_linux.py <配置> --launch wechat qq wps firefox`, 或 `ONBOARD=1`), 用一两分钟、让它们稳定下来再跑; 这样它们也一定是在各自的 cgroup 里启动的。
+  - "**第 N 步的停留本该 15 s, 实际过了 … s**": 这一步里整台机器没有在跑 (全部应用合计只用了一个停留那么多的 CPU) —— 虚拟机被暂停了, 通常是宿主机睡眠 / 合盖。这一步不计入前台 / 后台的时长、任务数和下载统计, 其余各步照常可用。过夜跑之前把宿主机设成不睡眠 (macOS: 系统设置 → 锁定屏幕 / 电池里关掉自动睡眠, 或在终端里开着 `caffeinate -s`)。一次实测 (arm64 虚拟机过夜, 9 格): 21:29 到 21:45 暂停了 16 分钟, 而且暂停前后机器的状态不一样 —— 之前窗口激活的中位数在 110–270 ms 之间飘, 之后稳定在 83–92 ms —— 所以跨过暂停的两格之间差的 "0.7 倍" 不是限制的效果: **比较要在同一个种子的三格之间做, 还要看这三格是不是同一段时间里跑的**。
+- "每分钟任务数" 是按相邻两次完成之间的时间算的。一段前台里完成不了两次的任务 (15 s 的停留里 10 s 一个的大模型推理 / 文字识别) 这一列和 "后台吞吐占前台" 留空, 看 "单任务 P50"。
+- 多个种子 (`SEEDS="1 2 3"`) 时 `plots/classes.png` 每个应用有 9 组柱子, 挤得看不清: 按种子分开画, `python3 -m cf.linux.classes results/<目录>/*_s3.jsonl --out results/<目录>/s3`。
 - 判读用的不变量仍然是: `state_lost` 为空、`work_fail` = 0、`n_cold` = 0 (被压制只是慢, 不能丢状态); 计算型的 `bad_jobs` (程序报错或答案不对) 应为 0; 下载型的 `无流量的秒` 应接近 0。
 
 **局限** (写报告时要交代):
@@ -883,6 +888,11 @@ python3 run_linux.py configs/ubuntu_arm64_full.json --launch wechat qq wps firef
    sudo scripts/ubuntu/install_cn_apps.sh --firefox     # 是 snap 版时: 换成 Mozilla APT 仓库的 deb (§0 第 4 步的同一套命令)
    python3 -m cf.linux.browser_dl --check       # 三行: 用哪个 Firefox、哪个下载源答应了、限速多少
    ```
+   snap 版不行的原因对交互型的那个 `firefox` 同样成立 (它的进程归 snapd 管, 放不进 `/cf/firefox`; 就绪表里是 `running outside /cf`), 所以这一步两个应用都需要。
+   `--firefox` 做的事: 下 Mozilla 的签名密钥并核对指纹 → 加 APT 源 → 装 deb → **确认 `/usr/lib/firefox/firefox` 装上了以后**才 `snap remove firefox`
+   (装不上时 snap 原样留着, 不会落到没有浏览器)。代理变量 / `95proxy` 指着一个取不回东西的代理 (502) 时, 密钥和 apt 都会自动再**不经代理**试一次。
+   注意 snap 版的书签 / 登录状态在 `~/snap/firefox` 里, 不会带到 deb 版 (deb 版从全新的 `~/.mozilla` 开始; snapd 把旧数据的快照留 31 天, `snap saved` 可查) ——
+   实验用的 Firefox 不需要账号。装完后把还开着的旧 Firefox 全部退出, 再 `python3 run_linux.py configs/ubuntu_arm64_full.json --launch firefox`。
    它做的事: 用**独立的 profile** (`~/.local/share/context_freeze/browser_dl/profile`) 和**独立的窗口类** (`cf-browser_dl`) 再开一个 Firefox —— 和交互型的那个 `firefox` 是两个应用、两个 cgroup, 互不影响, 你自己的书签 / 登录状态不会被动到。窗口里是本机的一个说明页, 页面每 2 秒问一次 "有没有要下的文件", 有就让一个隐藏的 frame 去打开那个链接 —— 和你点一个下载链接完全一样, 文件由 **Firefox 自己的下载管理器**收、解密、写盘 (存到 `~/.local/share/context_freeze/browser_dl/downloads`)。文件下完就删掉重下, 所以跑多久都只占一个文件的空间; 卡住 5 分钟没进度、或者某个源给了链接却没开始下, 就换下一个源。
    - **下载源**: 默认是几个国内镜像站上的同一个 Ubuntu 镜像 (4.8 GB; 清华 → 北外 → 南大 → 华为云 → 浙大 → releases.ubuntu.com, 用第一个答应的)。换成别的文件: `export CF_BROWSER_DL_URL="https://…/big.iso"` (可以空格分隔给几个)。
    - **限速**: Firefox 自己没有限速功能, 而不限速的话一晚上会从镜像站拉走几百 GB, 速度也不稳。所以默认让它的 HTTPS 连接经过同一进程里的一个小中继 (HTTP CONNECT 隧道, 不解密, 只是按 **2 MB/s** 把字节转交给浏览器; 中继在应用自己的 cgroup 里, 受同样的限制)。改速度 `export CF_BROWSER_DL_RATE_MBPS=4`; `=0` 是不经中继、有多快下多快 (这时测到的是浏览器自己的连接, 对 CPU 限制最敏感, 但流量很大, 只建议短跑时用)。两个变量都要在**启动它之前**设好 (`run_classes.sh` 发现它没在跑会自己启动它)。
@@ -956,7 +966,41 @@ DL_APPS="xunlei browser_dl" CONFIG=configs/ubuntu_arm64_full.json OUT=results/ar
 DL_APPS="xunlei" …      # 只有迅雷 (11 个应用, 每轮 15 步)        DL_APPS="browser_dl" …      # 只有浏览器下载 (不用账号)        DL_APPS="none" …      # 不要下载型
 ```
 
-被拿掉的应用如果还开着 (比如百度网盘), 脚本会说 "running but not part of this experiment" 并停下: 先把它退出。同一个 `OUT` 续跑时要带同样的 `DL_APPS`。**百度网盘没有限速选项**时两条路: 不管它 (普通账号的速度本来就被服务器限着; 配 `DL_TRIM=1` 不占盘), 或者用 `DL_APPS` 不测它。
+被拿掉的应用如果还开着 (比如百度网盘), 脚本会说 "running but not part of this experiment" 并停下: 先把它退出。同一个 `OUT` 续跑时要带同样的 `DL_APPS`。**百度网盘没有限速选项**时两条路: 不管它 (见下一段 "不限速的客户端"), 或者用 `DL_APPS` 不测它。
+
+**只跑下载型 (`CLASSES=download`)**: 交互 / 计算那些应用还没配好, 或者想先单独看下载。`CLASSES` 只留指定类别的应用 (`interactive` / `compute` / `download`, 可以写几个), 能和 `DL_APPS` 一起用:
+
+```bash
+CLASSES=download DL_APPS="baidunetdisk browser_dl" ROUNDS=10 DWELL=30 CONFIG=configs/ubuntu_arm64_full.json \
+  OUT=results/arm64_dl scripts/ubuntu/run_classes.sh        # 百度网盘 + 浏览器下载, 不测迅雷; 三格约 42 分钟
+```
+
+- 剩下的应用**轮流到前台**: 这里是 `百度网盘 → 浏览器下载` 来回换, 一个在前台 (不限制) 时另一个在后台 (按该格的限制), 每 `DWELL` 秒对调。每个应用前台、后台的时间各一半, 而且是交替着量的 —— 网速慢慢变快变慢时, 前台和后台受的影响一样。(全量配置里每个下载应用 17 步里只有 1 步在前台。)
+- 每轮只有 2 步, 默认的 `ROUNDS=2` 一格才 4 步, 脚本会提示太少。`ROUNDS=10 DWELL=30`: 每格每个应用前台 10 段、后台 10 段, 每段 30 秒, 一格约 14 分钟。
+- 只剩一个应用时它没法和自己轮换: 脚本自动加一个**空闲窗口** (`idle_front`) 替它占前台, 见下一段 "只测浏览器下载一个应用"。`FRONT_APP=""` 关掉这个行为, 这时只剩一个应用脚本会拒绝 (`only browser_dl is left …`)。
+- 不在这次实验里的应用 (微信 / QQ / WPS / 平时用的 Firefox / 迅雷) 要先退出, 否则脚本报 "running but not part of this experiment" 并停下。一次退干净: `for a in wechat qq wps firefox xunlei; do [ -f /sys/fs/cgroup/cf/$a/cgroup.procs ] && xargs -r kill < /sys/fs/cgroup/cf/$a/cgroup.procs; done`。
+- 报告的第一、二节写 "(这次运行没有这一类应用)", 只有第三节有数。以后跑全量要换一个 `OUT`。
+
+**只测浏览器下载一个应用, 不限速 (`DL_APPS=browser_dl` + `CF_BROWSER_DL_RATE_MBPS=0`)**: 百度网盘不能限速, 和浏览器下载一起跑时会把带宽占走 (上面 "不限速的客户端" 第 3 条), 浏览器下载量到的就不只是限制的效果。这条命令只留浏览器下载, 并且不经限速中继:
+
+```bash
+CLASSES=download DL_APPS=browser_dl CF_BROWSER_DL_RATE_MBPS=0 ROUNDS=10 DWELL=30 CONFIG=configs/ubuntu_arm64_full.json \
+  OUT=results/arm64_dl_ff scripts/ubuntu/run_classes.sh        # 三格 (none / mild / squeeze), 一格约 13 分钟
+```
+
+- **空闲窗口 `idle_front`**: 一个应用只有在别的应用占着前台时才算在后台。脚本发现只剩一个应用, 就往配置里加一个什么都不做的窗口 (自带的占位程序, `--cpu 0 --mem 0`: 不占 CPU、不留内存、不联网、不写盘), 访问顺序是 `浏览器下载 → 空闲窗口` 来回换。浏览器下载每格前台 10 段、后台 10 段, 每段 30 秒 —— 和上面两个应用轮换时一样, 只是它在后台时前台没有别的下载。空闲窗口不属于任何一类, 报告里没有它的行; 缩减后的配置 (`$OUT/config.json`) 里记着 `"front_app": "idle_front"`。想让配置里的某个应用来占前台: `FRONT_APP=wps`。
+- **不限速**: `CF_BROWSER_DL_RATE_MBPS=0` 时 Firefox 直接连镜像站, 有多快下多快。脚本开头会打印 `browser_dl: rate unlimited (direct)`; 如果上一次运行留下的浏览器下载还开着而且速度设置不同, 脚本会说 `browser_dl is running with rate 2 MB/s, this run asks for 0 … restarting it` 并重启它 (速度是启动时定的)。
+- **流量和磁盘**: 三格共约 40 分钟, 一直满速下载 —— 20 MB/s 的线路约 50 GB 流量; 虚拟机的流量如果经过按量计费的代理, 先确认镜像站走直连。磁盘只需要放得下一个文件 (4.8 GB, 下完即删再下) 再加 3 GB 余量。
+- **开跑前**: 退出百度网盘和迅雷 (否则脚本报 "running but not part of this experiment" 并停下, 而且它们还在占带宽), 其余同上。
+- **速度会飘**: 不限速时速度由镜像站和线路决定, 判断办法同下一段第 1 条 —— 先看 `none` 格的 "后台速度占前台 (%)" 离 100 % 多远。
+
+**不限速的客户端 (百度网盘没有限速选项)**: 可以照测, 注意三件事。
+
+1. *速度会飘, 先看噪声有多大*。不限速时速度由服务器和线路决定。`none` 格什么都没限制, 它的 "后台速度占前台 (%)" 本该是 100 %, 实际偏离多少就是这次测量的噪声; `mild` / `squeeze` 格的同一列要明显超出这个幅度才算限制的效果。浏览器下载被中继定在 2 MB/s, 是稳定的对照。噪声太大就加 `ROUNDS` 或多跑一个 `SEEDS`。
+2. *磁盘*。开跑前脚本按当时的速度打印 `at these speeds, in the N min of the run: baidunetdisk writes about X GB`, 放不下就停下。办法: 排几个 1–3 GB 的文件并加 `DL_TRIM=1` (下完的随下随删; 一个几十 GB 的大文件 `DL_TRIM=1` 帮不上), 或少跑一格 (`CELLS="none squeeze"`)。
+3. *它会和浏览器下载抢带宽*。浏览器下载在 `none` 格前台也到不了 2 MB/s 时, 说明线路被网盘占满了: 把 `CF_BROWSER_DL_RATE_MBPS` 调到它稳定够得着的值 (例如 `1`)。
+
+在 x86 云主机上按上面的命令形式实际跑过一遍 (三格, `ROUNDS=6 DWELL=15`; 百度网盘的位置上是一个替身: 一个窗口加一个不限速的 curl 下载, 约 50–100 MB/s —— 不是真的百度网盘客户端): 两个应用都被量到; `none` 格 "后台速度占前台" 是 107 % 和 105 % (即这么短的一次运行噪声约 ±7 %), `squeeze` 格替身是 56 %、浏览器下载 95 % (在噪声之内); 浏览器下载在这次运行里只有 1.7–1.8 MB/s, 就是第 3 条说的被抢了。另一次没有任何 swap (没开 zram) 的运行里, `squeeze` 格两个应用的后台速度都掉到接近 0、探针建连要 2 秒: 有 swap 的那次没有这个现象, 所以原因应是 `memory.high` 压下去的匿名内存没处可去 (内核对超过 `memory.high` 的进程每次分配最多罚睡 2 秒, 和量到的 2 秒对得上; 没有再进一步确认)。这不是下载被 CPU 限制的结果, 所以 zram 要开着 (脚本默认会开, `ZRAM_MB=0` 才不开)。
 
 **迅雷任务加不进去 / 一直 "正在寻找资源" / 速度是 0** —— 按这个顺序查 (每一步都是 "有问题就先修这一步"):
 
@@ -1197,6 +1241,10 @@ sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv && sudo resize2fs /dev/ubunt
 被覆盖会弹出模态的 "文件已修改, 是否重新加载" 对话框抢走焦点, 演练就成了 `not-active`; 想要干净文档先退出 WPS 再 reset)。
 `apt` 走代理 `Could not connect to x.x.x.2:7897 Connection refused` — VMware NAT 的宿主是 `.1` 不是网关 `.2` (§2.5); 删掉 `/etc/apt/apt.conf.d/95proxy`。
 
+**`apt install` 报 `502  Bad Gateway [IP: 192.168.64.1 7897]`** — apt 连上了宿主的代理 (方括号里就是它), 是代理自己取不回东西: 节点失效 / 订阅过期 / 规则拒绝,
+要在 Mac 上修 (`python3 -m cf.linux.netcheck` 会报 "takes connections but fetches nothing", §2.5 的表)。Ubuntu 的软件源不需要代理, 这一次绕开它:
+`sudo env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY apt install -y <包>` (`/etc/apt/apt.conf.d/95proxy` 存在的话先删掉)。
+
 **`git pull` 报 `gnutls_handshake() failed: The TLS connection was non-properly terminated`** — 连 github.com 的 TLS 握手被中途掐断。两种情况:
 (a) 这个终端里没有代理变量 (`env | grep -i https_proxy` 没输出: `unset` 过, 或宿主代理原先是 TUN 模式、关掉之后虚拟机不再被它接管), git 在直连 github.com;
 (b) 走了代理, 但代理那头的节点不通。区分: `curl -s -m 8 -o /dev/null -w '%{http_code}\n' -x http://192.168.64.1:7897 https://github.com` ——
@@ -1241,6 +1289,10 @@ CF_PLOT_FONT="Noto Sans CJK JP" python3 -m cf.linux.classes ...                 
 
 ## 11. 测试
 
+需要 `pytest` (`sudo apt install -y python3-pytest` 或 `pip install --user pytest`)。末行形如 `248 passed, 15 skipped` 是正常的: 被跳过的是要靠
+本机没有的东西才能跑的那几个 (多数需要 `Xvfb` 虚拟显示; 其余是某个计算工具没装、当前终端不在 `/cf` 里); `python3 -m pytest tests -q -rs` 逐条列出原因。
+有 `failed` 才是问题。matplotlib 的 `Unable to import Axes3D` 警告是系统里装了两份 matplotlib (apt 一份、pip 一份), 不影响出图。
+
 ```bash
 python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋钮值 / 伪 cgroupfs / xprop 解析 / 伪桌面上的完整 runner (静态与预算策略、
                                                    # 无进程被杀、WARM、state_lost 注入、resume 重放档位) / focusd 决策 / 应用目录与 桌面->手机版 替代链 /
@@ -1263,9 +1315,10 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
                                                    # 边下边删 (tests/test_linux_dl_trim.py): 一个真实的 "客户端" 进程写文件 / 改名 / 关闭 -> 下完的被删、
                                                    # 同目录别的文件和只读打开的文件不动、临时名和带进度文件的不动、宽限时间、dry-run; 打洞后文件长度不变、
                                                    # 盘上占用归零、客户端接着写; 镜像目录页解析、按大小筛选去重、不够时加 ?n=K 重复、只留真给明文 http 的;
-                                                   # 下载型缩到一个应用后的配置 (访问顺序相邻重复合并) 和 DL_APPS 的 DRY 运行; 应用身上残留的限制能被指出来;
+                                                   # 下载型缩到一个应用后的配置 (访问顺序相邻重复合并) 和 DL_APPS 的 DRY 运行; 只留下载型两个应用 (CLASSES) 的配置和 DRY 运行; 应用身上残留的限制能被指出来;
                                                    # 网络自检 (tests/test_linux_netcheck.py): ip 输出解析、各处代理设置的收集、每一跳不通时只报第一处、
-                                                   # 登录页、代理地址失效 / 仍有效 / fake-IP 的区分、没有 ping 的机器、没地址时区分 "没网线" 和 "DHCP 没人理"
+                                                   # 登录页、代理地址失效 / 仍有效 / fake-IP 的区分、没有 ping / ip 命令的机器、没地址时区分 "没网线" 和 "DHCP 没人理"、
+                                                   # 代理端口连得上但取不回东西 (本机假代理: 回 502 / 回 200 后断开 / 真的转发到一个 TLS 服务)
                                                    # (探测全部注入, 不碰真实网络);
                                                    # 域名解析到 198.18.x.x / 应用的连接落在 198.18.x.x 时认出中间的 fake-IP 代理
                                                    # 冷启动后立刻收养跑出 cgroup 的进程 / "m_fg 是冷启动后量的" 与 "内存限制没有生效" 的提示 / 图只画有数据的类
@@ -1298,11 +1351,11 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `python3 -m cf.linux.tool_jobs [KIND…] [--check [--cycles n]] [--config CONFIG]` / `--missing CONFIG` | §6.9 检查 | 计算应用的工具装没装、缺什么、怎么装; `--check` 试做并打印每个操作的墙钟 / CPU 时间; `--missing` 列出某个配置里工具没就绪的计算应用 (有则退出码 1) |
 | `python3 -m cf.linux.browser_dl --app ID [--url URL …] [--rate-mbps n] [--dir D] [--min-free-gb n]` / `--check` + `CF_BROWSER_DL_URL= CF_BROWSER_DL_RATE_MBPS= CF_BROWSER=` | 由 runner 启动 | §6.9 下载应用 `browser_dl`: 第二个 Firefox (独立 profile / 窗口类), 用浏览器自己的下载管理器反复下载同一个大文件, 下完即删; 默认经进程内的 CONNECT 中继限速 2 MB/s (0 = 不限速); `--check` 报告用哪个 Firefox、哪个源、限速多少 |
 | `python3 -m cf.linux.dl_trim CONFIG [--list] [--dry-run] [--punch] [--apps …] [--every s] [--grace s] [--min-mb n] [--dir D] [--for s]` | `run_classes.sh` 在 `DL_TRIM=1 / punch` 时启动 | §6.9 边下边删: 下载应用下完的文件 (只限亲眼见到它在写的) 随下随删; `--punch` 连正在下的文件已写的部分也还给文件系统; `--list` 看应用此刻在写哪些文件, `--dry-run` 只报告不删 |
-| `python3 -m cf.linux.subset CONFIG [--download APP… \| none] [--drop APP…] --out FILE` | `run_classes.sh` 在 `DL_APPS=…` 时调用 | 去掉若干应用后的配置 (应用表 / 三类表 / 访问顺序一起改), 例如下载型只留迅雷 |
+| `python3 -m cf.linux.subset CONFIG [--download APP… \| none] [--classes CLASS…] [--drop APP…] [--front APP] --out FILE` | `run_classes.sh` 在 `DL_APPS=…` / `CLASSES=…` 时调用 | 去掉若干应用后的配置 (应用表 / 三类表 / 访问顺序一起改), 例如下载型只留迅雷, 或只留下载型这一类; `--front idle_front`: 只剩一个应用时加一个空闲窗口轮流占前台 |
 | `python3 -m cf.linux.dl_files [--gb n \| --rate-mbps r --minutes M] [--min-gb a --max-gb b] [--mirror URL] [--http] [--skip N] [--plain]` | §6.9 准备下载任务 | 从清华 / 北外镜像站的目录页现查一批 0.7–3.3 GB、此刻能下的安装镜像链接 (够数为止, 不够就加 `?n=K` 重复), 用来粘进迅雷 / 百度网盘离线下载 |
 | `python3 -m cf.linux.netcheck` | §2.5 上不了网时 | 从地址、网关、网关之外、登录页、域名解析到代理设置逐跳检查, 停在第一处不通的地方并给出处理办法; 不需要配置文件, 探测不走代理; 退出码 0 = 通 |
 | `python3 -m cf.linux.netstat CONFIG [--watch s] [--min-kbps n] [--minutes M]` | §6.9 检查 | 真实下载应用此刻的连接数 / 速度 / 往返时延; `--min-kbps` 有应用没在下时退出码 1; `--minutes` 按看到的速度算这么多分钟要写多少盘, 放不下退出码 3 |
-| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= DL_APPS= DL_DISK_CHECK= DL_TRIM= DL_TRIM_ARGS= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
+| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= DL_APPS= CLASSES= FRONT_APP= DL_DISK_CHECK= DL_TRIM= DL_TRIM_ARGS= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
 | `python3 -m cf.linux.classes FILES… --out DIR [--no-plots]` | 分析 | §6.9 的三张表 (CSV / Markdown / Excel) 和图; 不重跑实验 |
 | `python3 -m cf.linux.bench_app --app ID --kind sevenzip\|z3\|openssl\|llama\|tesseract\|ffmpeg\|numeric\|compress\|download [--corpus-mb n --level n --threads n --model F --tokens n --workers k --scale f --url U --rtt-host H:P]` / `--serve PORT --rate-mbps n` / `--check-url U` | §6.9 内部 | 可度量的计算 / 下载应用: X11 窗口 + 循环做固定任务 (`sevenzip` / `z3` 每个任务启动一次真实程序), 每个任务的时延写到 `/tmp/cf_bench_<id>.jsonl`; `--serve` 是合成版的本机限速下载源 |
 | `python3 -m cf.linux.netstat CONFIG [--apps ID…] [--watch S] [--min-kbps K]` | §6.9 检查 | 看 S 秒配置里下载应用的 TCP 连接: 是否在跑、连接数、MB/s、往返时延 (内核 `ss` 统计); 低于 K 时退出码 1 |

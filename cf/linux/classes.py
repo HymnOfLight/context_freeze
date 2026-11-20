@@ -33,6 +33,7 @@ from ..analyze import load, pct
 STALL_MS = 100.0          # a ping answered later than this is a stall the user notices
 MERGE_GAP_S = 60.0        # background dwells further apart than this are separate intervals (resume)
 INSIDE_FRAC = 0.9         # a job / download second counts for a stretch when this much of it lies inside
+MIN_GAPS = 3              # jobs per minute needs this many pairs of consecutive completions inside one stretch
 
 INTERACTIVE_COLS = ["run", "policy", "app", "n_calls", "n_limited", "n_cold", "resp_p50_ms", "resp_p95_ms", "resp_max_ms",
                     "resp_p50_x", "activate_p50_ms", "ping_p50_ms", "probe_n", "probe_p50_ms", "probe_p95_ms",
@@ -92,6 +93,8 @@ NOTES = [
     "对同一个问题贪心生成恰好 64 个 token (单线程); 文字识别 = Tesseract (LSTM) 识别一页 A4 英文, 至少认对 90 % 的词; "
     "视频转码 = FFmpeg 把 4 s 的 720p 视频缩到 540p 并用 libx264 重新编码. (合成配置里: 科学计算 = LU + FFT + n 体, "
     "压缩解压 = zlib.) 前台 = 该应用是当前请求的应用的停留期; 后台 = 其它应用在前台的停留期 (只统计至少 90 % 的时间落在同一档位里的任务). "
+    "每分钟任务数按 '相邻两次完成之间的时间' 算 (每段前台 / 后台里: (任务数 - 1) / (最后一次完成 - 第一次完成)), 不是 任务数 / 时长 —— "
+    "后者会漏掉每段两头正在做的那个任务, 任务越长漏得越多; 一段里完成不了两次的任务 (15 s 的前台里做 10 s 一个的任务) 这一列留空, 看单任务时延. "
     "任务内 CPU 占比 = 该程序的 CPU 时间 / 任务墙钟时间 (两线程的 7z 压缩不受限时约 180 %), 低说明任务大部分时间在等 CPU 配额或等缺页.",
     "下载型 (真实应用: 百度网盘 / 迅雷 / 浏览器下载, 数据来源 = sockets): 每秒从内核读一次该应用全部 TCP 连接的统计 (ss -tin, 按 cgroup / 进程归属), "
     "速度 = 这一秒各连接 bytes_received 的增量之和 (应用真正从网络收到的字节, 不含 UDP), P10 = 最慢的 10 % 的秒. "
@@ -205,16 +208,42 @@ def bench_events(run: dict, app: str) -> list[dict]:
     return out
 
 
+def stalled(run: dict) -> list[dict]:
+    """Steps whose dwell lasted far longer than it was set to (a 15 s dwell that took 16 minutes):
+    [{"t", "req", "wall_s", "dwell_s", "cpu_s", "usual_cpu_s", "paused"}].  `paused`: the apps
+    together used hardly any CPU in that time - the whole machine stood still (a virtual machine
+    whose host went to sleep).  Such a step says nothing about foreground or background: it is
+    left out of the stretches below, with the jobs and download seconds that fall into it."""
+    def cpu(s):
+        return sum(float(b.get("cg_cpu_ms") or 0) for b in (s.get("bg") or {}).values()) / 1000.0
+
+    def wall(s):
+        return max((float(b.get("wall_s") or 0) for b in (s.get("bg") or {}).values()), default=0.0)
+
+    out = []
+    for s in run["steps"]:
+        dwell = float(s.get("dwell_s") or 0)
+        w = wall(s)
+        if dwell <= 0 or w <= max(3 * dwell, dwell + 60):
+            continue
+        rest = sorted(cpu(x) / wall(x) for x in run["steps"] if x is not s and wall(x) > 0)
+        usual = rest[len(rest) // 2] if rest else 0.0                      # cores the apps normally use together
+        out.append({"t": s["t"], "req": s["req"], "wall_s": round(w, 1), "dwell_s": dwell, "cpu_s": round(cpu(s), 1),
+                    "usual_cpu_s": round(usual * dwell, 1), "paused": usual > 0.2 and cpu(s) / w < 0.25 * usual})
+    return out
+
+
 def intervals(run: dict, app: str) -> list[dict]:
     """Stretches of time in which `app` kept one position: "fg" = the dwell of a step that requested
     it, "bg" = consecutive dwells of steps that requested something else (the limits of a background
     app are only touched when it is requested, so the switches in between belong to the stretch).
     [{"pos", "t0", "t1", "tiers": [tier per step]}]"""
     out: list[dict] = []
+    skip = {x["t"] for x in stalled(run)}
     for s in run["steps"]:
         t0 = s.get("t_dwell")
         b = (s.get("bg") or {}).get(app)
-        if t0 is None or not b:
+        if t0 is None or not b or s["t"] in skip:
             continue
         t1 = t0 + float(b.get("wall_s") or s.get("dwell_s") or 0)
         pos = "fg" if s["req"] == app else "bg"
@@ -240,6 +269,22 @@ def _inside(ivs: list[dict], pos: str, start: float, end: float) -> bool:
 
 def _seconds(ivs: list[dict], pos: str) -> float:
     return sum(iv["t1"] - iv["t0"] for iv in ivs if iv["pos"] == pos)
+
+
+def _per_min(jobs: list[dict], ivs: list[dict], pos: str) -> Optional[float]:
+    """Jobs per minute in that position, from the time between completions: in every stretch
+    (jobs in it - 1) / (last completion - first completion), summed over the stretches.  Counting
+    jobs and dividing by the stretch's length would lose the job that is under way at each end -
+    one job in three when a job takes 5 s and the app is in front for 15 s.  None when the stretches
+    hold fewer than MIN_GAPS such pairs (a 10 s job never completes twice in a 15 s stretch)."""
+    n = span = 0.0
+    for iv in ivs:
+        if iv["pos"] != pos:
+            continue
+        ends = sorted(e["T"] for e in jobs if iv["t0"] <= e["T"] - e["ms"] / 2000.0 <= iv["t1"])
+        if len(ends) > 1:
+            n, span = n + len(ends) - 1, span + ends[-1] - ends[0]
+    return 60.0 * n / span if n >= MIN_GAPS and span > 0 else None
 
 
 def _tiers(ivs: list[dict]) -> str:
@@ -277,7 +322,7 @@ def _compute_row(run: dict, label: str, op: str, ev: list[dict], ivs: list[dict]
         sec = _seconds(ivs, pos)
         row.update({f"{pos}_s": _r(sec), f"{pos}_jobs": len(jobs), f"{pos}_job_p50_ms": _r(pct(ms, 0.5)),
                     f"{pos}_job_p95_ms": _r(pct(ms, 0.95)),
-                    f"{pos}_jobs_per_min": _r(60.0 * len(jobs) / sec) if sec > 0 else None,
+                    f"{pos}_jobs_per_min": _r(_per_min(jobs, ivs, pos)),
                     f"{pos}_cpu_pct": _r(100.0 * sum(float(e.get("cpu") or 0) for e in jobs) / sum(ms)) if sum(ms) > 0 else None})
     f50, b50 = row["fg_job_p50_ms"], row["bg_job_p50_ms"]
     row["slowdown_x"] = _r(b50 / f50, 2) if f50 and b50 else None
@@ -290,9 +335,10 @@ def _compute_row(run: dict, label: str, op: str, ev: list[dict], ivs: list[dict]
 def _disk_mbps(run: dict, app: str, pos: str) -> Optional[float]:
     """MB/s the app's cgroup wrote to disk over the dwells in which it was in that position."""
     mb = sec = 0.0
+    skip = {x["t"] for x in stalled(run)}
     for s in run["steps"]:
         b = (s.get("bg") or {}).get(app)
-        if not b or b.get("write_mb") is None or (s["req"] == app) != (pos == "fg"):
+        if s["t"] in skip or not b or b.get("write_mb") is None or (s["req"] == app) != (pos == "fg"):
             continue
         mb += float(b["write_mb"])
         sec += float(b.get("wall_s") or 0)
@@ -453,6 +499,12 @@ def report_md(runs: list[dict], tb: Optional[dict] = None) -> str:
         if n:
             lines.append(f"  - **注意**: {n}/{len(r['steps'])} 步里前台应用仍被 cpuset 钉在核 {cpus} 上 (和全部后台应用挤同一个核) —— "
                          "这是修复前的 bug (提回前台时 cpuset.cpus 没有被放开) 或上一次运行留下的限制; 这一格的前台列 / 响应时间偏慢, 需重跑")
+        for x in stalled(r):
+            what = (f"这期间全部应用合计只用了 {x['cpu_s']:g} s 的 CPU, 和平时一个 {x['dwell_s']:g} s 的停留差不多 (约 {x['usual_cpu_s']:g} s): 整台机器这段时间没有在跑 "
+                    "(虚拟机被暂停 —— 宿主机睡眠 / 合盖 / 手动暂停)" if x["paused"] else
+                    f"这期间应用仍在运行 (合计 {x['cpu_s']:g} s 的 CPU): 是切换或采样卡住了")
+            lines.append(f"  - **注意**: 第 {x['t'] + 1} 步 ({_cn(x['req'])} 在前台) 的停留本该 {x['dwell_s']:g} s, 实际过了 {x['wall_s']:g} s; "
+                         f"{what}. 这一步不计入前台 / 后台的时长、任务数和下载统计")
         for app, anon, high, cg in mem_unbounded(r):
             lines.append(f"  - **注意**: {_cn(app)} 的内存限制在这一格没有生效 —— 被压到后台时仍留着约 {anon} MB 匿名内存 "
                          f"(memory.high = {high} MB, 它的 cgroup 只记着 {cg} MB): 这些内存是进程被移进 cgroup **之前**分配的 "

@@ -357,6 +357,8 @@ def test_seen_windows_describes_what_was_found(monkeypatch):
     }
     monkeypatch.setattr(OB.x11, "windows_for", lambda pids, c=None, n=None, infos_=None: infos.get(next(iter(pids), 0), []))
     monkeypatch.setattr(OB.x11, "geometry", lambda wid: {1: (640, 400), 2: (50, 50)}.get(wid))
+    assert OB.seen_windows(dev, "wechat", OB.login_spec(cat["wechat"])) == "largest 640x400 '微信' < 700x500"
+    infos[100][0]["name"] = ""
     assert OB.seen_windows(dev, "wechat", OB.login_spec(cat["wechat"])) == "largest 640x400 < 700x500"
     assert OB.seen_windows(dev, "wps", OB.login_spec(cat["wps"])) == "1 non-normal (dock)"
     assert OB.seen_windows(dev, "qq", OB.login_spec(cat["qq"])) == "no window matched"
