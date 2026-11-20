@@ -408,9 +408,18 @@ def test_run_script_runs_the_download_class_alone(tmp_path):
     r = subprocess.run(["bash", "scripts/ubuntu/run_classes.sh"], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0 and "only 4 steps per cell" in r.stdout and "ROUNDS=10 gives 20" in r.stdout
 
-    env["DL_APPS"] = "browser_dl"
+    env.update(DL_APPS="browser_dl", ROUNDS="10")               # one app: the idle window holds the front in between
     r = subprocess.run(["bash", "scripts/ubuntu/run_classes.sh"], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
-    assert r.returncode == 2 and "only browser_dl is left" in r.stdout + r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr
+    cfg = json.load(open(tmp_path / "config.json"))
+    assert cfg["apps"] == ["browser_dl", "idle_front"] and cfg["trace"]["pattern"] == ["browser_dl", "idle_front"]
+    assert "idle_front holds the front in every other step" in r.stdout and "rounds=10 (T=20)" in r.stdout
+    cmds = [ln for ln in r.stdout.splitlines() if ln.startswith("python3 -u run_linux.py")]
+    assert len(cmds) == 3 and all("--T 20" in c for c in cmds)
+
+    env["FRONT_APP"] = ""                                        # ... unless that is switched off
+    r = subprocess.run(["bash", "scripts/ubuntu/run_classes.sh"], cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2 and "only browser_dl is left" in r.stdout + r.stderr and "FRONT_APP" in r.stdout + r.stderr
 
 
 def test_limits_left_on_an_app_are_named(tmp_path):
