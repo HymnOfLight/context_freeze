@@ -977,9 +977,22 @@ CLASSES=download DL_APPS="baidunetdisk browser_dl" ROUNDS=10 DWELL=30 CONFIG=con
 
 - 剩下的应用**轮流到前台**: 这里是 `百度网盘 → 浏览器下载` 来回换, 一个在前台 (不限制) 时另一个在后台 (按该格的限制), 每 `DWELL` 秒对调。每个应用前台、后台的时间各一半, 而且是交替着量的 —— 网速慢慢变快变慢时, 前台和后台受的影响一样。(全量配置里每个下载应用 17 步里只有 1 步在前台。)
 - 每轮只有 2 步, 默认的 `ROUNDS=2` 一格才 4 步, 脚本会提示太少。`ROUNDS=10 DWELL=30`: 每格每个应用前台 10 段、后台 10 段, 每段 30 秒, 一格约 14 分钟。
-- 至少要留两个应用: 只剩一个时它整场都在前台, 没有 "后台" 可量, 脚本会拒绝 (`only browser_dl is left …`)。
+- 只剩一个应用时它没法和自己轮换: 脚本自动加一个**空闲窗口** (`idle_front`) 替它占前台, 见下一段 "只测浏览器下载一个应用"。`FRONT_APP=""` 关掉这个行为, 这时只剩一个应用脚本会拒绝 (`only browser_dl is left …`)。
 - 不在这次实验里的应用 (微信 / QQ / WPS / 平时用的 Firefox / 迅雷) 要先退出, 否则脚本报 "running but not part of this experiment" 并停下。一次退干净: `for a in wechat qq wps firefox xunlei; do [ -f /sys/fs/cgroup/cf/$a/cgroup.procs ] && xargs -r kill < /sys/fs/cgroup/cf/$a/cgroup.procs; done`。
 - 报告的第一、二节写 "(这次运行没有这一类应用)", 只有第三节有数。以后跑全量要换一个 `OUT`。
+
+**只测浏览器下载一个应用, 不限速 (`DL_APPS=browser_dl` + `CF_BROWSER_DL_RATE_MBPS=0`)**: 百度网盘不能限速, 和浏览器下载一起跑时会把带宽占走 (上面 "不限速的客户端" 第 3 条), 浏览器下载量到的就不只是限制的效果。这条命令只留浏览器下载, 并且不经限速中继:
+
+```bash
+CLASSES=download DL_APPS=browser_dl CF_BROWSER_DL_RATE_MBPS=0 ROUNDS=10 DWELL=30 CONFIG=configs/ubuntu_arm64_full.json \
+  OUT=results/arm64_dl_ff scripts/ubuntu/run_classes.sh        # 三格 (none / mild / squeeze), 一格约 13 分钟
+```
+
+- **空闲窗口 `idle_front`**: 一个应用只有在别的应用占着前台时才算在后台。脚本发现只剩一个应用, 就往配置里加一个什么都不做的窗口 (自带的占位程序, `--cpu 0 --mem 0`: 不占 CPU、不留内存、不联网、不写盘), 访问顺序是 `浏览器下载 → 空闲窗口` 来回换。浏览器下载每格前台 10 段、后台 10 段, 每段 30 秒 —— 和上面两个应用轮换时一样, 只是它在后台时前台没有别的下载。空闲窗口不属于任何一类, 报告里没有它的行; 缩减后的配置 (`$OUT/config.json`) 里记着 `"front_app": "idle_front"`。想让配置里的某个应用来占前台: `FRONT_APP=wps`。
+- **不限速**: `CF_BROWSER_DL_RATE_MBPS=0` 时 Firefox 直接连镜像站, 有多快下多快。脚本开头会打印 `browser_dl: rate unlimited (direct)`; 如果上一次运行留下的浏览器下载还开着而且速度设置不同, 脚本会说 `browser_dl is running with rate 2 MB/s, this run asks for 0 … restarting it` 并重启它 (速度是启动时定的)。
+- **流量和磁盘**: 三格共约 40 分钟, 一直满速下载 —— 20 MB/s 的线路约 50 GB 流量; 虚拟机的流量如果经过按量计费的代理, 先确认镜像站走直连。磁盘只需要放得下一个文件 (4.8 GB, 下完即删再下) 再加 3 GB 余量。
+- **开跑前**: 退出百度网盘和迅雷 (否则脚本报 "running but not part of this experiment" 并停下, 而且它们还在占带宽), 其余同上。
+- **速度会飘**: 不限速时速度由镜像站和线路决定, 判断办法同下一段第 1 条 —— 先看 `none` 格的 "后台速度占前台 (%)" 离 100 % 多远。
 
 **不限速的客户端 (百度网盘没有限速选项)**: 可以照测, 注意三件事。
 
@@ -1338,11 +1351,11 @@ python3 -m pytest -q tests/test_linux_*.py         # 不需要桌面: tier 旋�
 | `python3 -m cf.linux.tool_jobs [KIND…] [--check [--cycles n]] [--config CONFIG]` / `--missing CONFIG` | §6.9 检查 | 计算应用的工具装没装、缺什么、怎么装; `--check` 试做并打印每个操作的墙钟 / CPU 时间; `--missing` 列出某个配置里工具没就绪的计算应用 (有则退出码 1) |
 | `python3 -m cf.linux.browser_dl --app ID [--url URL …] [--rate-mbps n] [--dir D] [--min-free-gb n]` / `--check` + `CF_BROWSER_DL_URL= CF_BROWSER_DL_RATE_MBPS= CF_BROWSER=` | 由 runner 启动 | §6.9 下载应用 `browser_dl`: 第二个 Firefox (独立 profile / 窗口类), 用浏览器自己的下载管理器反复下载同一个大文件, 下完即删; 默认经进程内的 CONNECT 中继限速 2 MB/s (0 = 不限速); `--check` 报告用哪个 Firefox、哪个源、限速多少 |
 | `python3 -m cf.linux.dl_trim CONFIG [--list] [--dry-run] [--punch] [--apps …] [--every s] [--grace s] [--min-mb n] [--dir D] [--for s]` | `run_classes.sh` 在 `DL_TRIM=1 / punch` 时启动 | §6.9 边下边删: 下载应用下完的文件 (只限亲眼见到它在写的) 随下随删; `--punch` 连正在下的文件已写的部分也还给文件系统; `--list` 看应用此刻在写哪些文件, `--dry-run` 只报告不删 |
-| `python3 -m cf.linux.subset CONFIG [--download APP… \| none] [--classes CLASS…] [--drop APP…] --out FILE` | `run_classes.sh` 在 `DL_APPS=…` / `CLASSES=…` 时调用 | 去掉若干应用后的配置 (应用表 / 三类表 / 访问顺序一起改), 例如下载型只留迅雷, 或只留下载型这一类 |
+| `python3 -m cf.linux.subset CONFIG [--download APP… \| none] [--classes CLASS…] [--drop APP…] [--front APP] --out FILE` | `run_classes.sh` 在 `DL_APPS=…` / `CLASSES=…` 时调用 | 去掉若干应用后的配置 (应用表 / 三类表 / 访问顺序一起改), 例如下载型只留迅雷, 或只留下载型这一类; `--front idle_front`: 只剩一个应用时加一个空闲窗口轮流占前台 |
 | `python3 -m cf.linux.dl_files [--gb n \| --rate-mbps r --minutes M] [--min-gb a --max-gb b] [--mirror URL] [--http] [--skip N] [--plain]` | §6.9 准备下载任务 | 从清华 / 北外镜像站的目录页现查一批 0.7–3.3 GB、此刻能下的安装镜像链接 (够数为止, 不够就加 `?n=K` 重复), 用来粘进迅雷 / 百度网盘离线下载 |
 | `python3 -m cf.linux.netcheck` | §2.5 上不了网时 | 从地址、网关、网关之外、登录页、域名解析到代理设置逐跳检查, 停在第一处不通的地方并给出处理办法; 不需要配置文件, 探测不走代理; 退出码 0 = 通 |
 | `python3 -m cf.linux.netstat CONFIG [--watch s] [--min-kbps n] [--minutes M]` | §6.9 检查 | 真实下载应用此刻的连接数 / 速度 / 往返时延; `--min-kbps` 有应用没在下时退出码 1; `--minutes` 按看到的速度算这么多分钟要写多少盘, 放不下退出码 3 |
-| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= DL_APPS= CLASSES= DL_DISK_CHECK= DL_TRIM= DL_TRIM_ARGS= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
+| `scripts/ubuntu/run_classes.sh` + `CONFIG= CELLS= ROUNDS= DWELL= SEEDS= RTT_HOST= DL_MIN_KBPS= DL_APPS= CLASSES= FRONT_APP= DL_DISK_CHECK= DL_TRIM= DL_TRIM_ARGS= ONBOARD= EXTRA= SWAPPINESS= STRICT= TOOLCHECK= DRY= OUT=` (合成版另有 `DL_URL= DL_RATE_MBPS=`) | 三类应用 | §6.9: 交互 4 个 (呼叫 / 切换响应 + 顺滑度) + 计算 2 个 (真实的 7-Zip / Z3: 前台 vs 后台的单任务时延、每分钟任务数) + 下载 2 个 (百度网盘 / 迅雷: 下载速度、往返时延、收包积压、处理延迟), none / mild / squeeze 三格走同一个固定访问顺序, 约 10 分钟一格; 出 `classes_report.md` / `classes_tables.xlsx` / `classes_*.csv` / `plots/classes.png` / `plots/<run>_bench.png`; `CONFIG=configs/ubuntu_arm64_classes_synthetic.json` 是自带基准程序的合成版 |
 | `python3 -m cf.linux.classes FILES… --out DIR [--no-plots]` | 分析 | §6.9 的三张表 (CSV / Markdown / Excel) 和图; 不重跑实验 |
 | `python3 -m cf.linux.bench_app --app ID --kind sevenzip\|z3\|openssl\|llama\|tesseract\|ffmpeg\|numeric\|compress\|download [--corpus-mb n --level n --threads n --model F --tokens n --workers k --scale f --url U --rtt-host H:P]` / `--serve PORT --rate-mbps n` / `--check-url U` | §6.9 内部 | 可度量的计算 / 下载应用: X11 窗口 + 循环做固定任务 (`sevenzip` / `z3` 每个任务启动一次真实程序), 每个任务的时延写到 `/tmp/cf_bench_<id>.jsonl`; `--serve` 是合成版的本机限速下载源 |
 | `python3 -m cf.linux.netstat CONFIG [--apps ID…] [--watch S] [--min-kbps K]` | §6.9 检查 | 看 S 秒配置里下载应用的 TCP 连接: 是否在跑、连接数、MB/s、往返时延 (内核 `ss` 统计); 低于 K 时退出码 1 |
